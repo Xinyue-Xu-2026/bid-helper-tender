@@ -1,0 +1,12 @@
+﻿# 工作树与虚拟环境
+.worktrees/
+venv/
+
+# 运行时数据
+data/
+imports/
+projects/
+
+# Python
+__pycache__/
+*.pyc
