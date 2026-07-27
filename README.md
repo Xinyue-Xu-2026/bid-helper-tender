@@ -7,6 +7,16 @@ venv\Scripts\activate
 python main.py
 ```
 
+## 自动版本管理
+
+开启文件监控，源码有变动时自动 `git add` + `commit`：
+
+```bash
+python -u scripts/auto_commit.py
+```
+
+按 `Ctrl+C` 停止。自动提交的信息格式为 `auto: sync changes (...)`。
+
 ## 目录说明
 
 - `src/bidhelper/`：源码
