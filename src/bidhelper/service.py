@@ -5,6 +5,7 @@ from typing import List
 
 from bidhelper import config
 from bidhelper.db import Database
+from bidhelper.excel_exporter import export_requirements
 from bidhelper.extractor import extract_text
 from bidhelper.parser import parse_tender
 
@@ -53,3 +54,10 @@ class BidService:
                 status=req["status"],
             )
         return reqs
+
+    def export_requirements_excel(self, project_id: int, dest_path: str) -> Path:
+        project = self.db.get_project(project_id)
+        if not project:
+            raise ValueError("Project not found")
+        requirements = self.db.get_requirements(project_id)
+        return export_requirements(project, requirements, dest_path)
