@@ -1,5 +1,8 @@
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem, QMessageBox
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QHeaderView, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+)
 
 from bidhelper.db import Database
 from bidhelper.ui.dialogs import ProjectDialog
@@ -18,25 +21,30 @@ class ProjectPage(QWidget):
 
         btn_layout = QHBoxLayout()
         self.new_btn = QPushButton("新建项目")
+        self.new_btn.setObjectName("primaryBtn")
         self.edit_btn = QPushButton("编辑项目")
         self.delete_btn = QPushButton("删除项目")
         self.open_btn = QPushButton("打开项目")
-        btn_layout.addWidget(self.new_btn)
-        btn_layout.addWidget(self.edit_btn)
-        btn_layout.addWidget(self.delete_btn)
-        btn_layout.addWidget(self.open_btn)
+        for btn in (self.new_btn, self.edit_btn, self.delete_btn, self.open_btn):
+            btn_layout.addWidget(btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["ID", "项目名称", "招标单位", "投标日期", "项目类型"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setColumnHidden(0, True)  # ID 仅内部使用
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
         self.new_btn.clicked.connect(self._new_project)
         self.edit_btn.clicked.connect(self._edit_project)
         self.delete_btn.clicked.connect(self._delete_project)
         self.open_btn.clicked.connect(self._open_project)
+        self.table.cellDoubleClicked.connect(lambda *args: self._open_project())
 
         self._load_projects()
 
@@ -78,8 +86,9 @@ class ProjectPage(QWidget):
     def _delete_project(self):
         pid = self._selected_project_id()
         if pid is None:
+            QMessageBox.warning(self, "提示", "请先选择一个项目")
             return
-        reply = QMessageBox.question(self, "确认", "确定删除该项目？")
+        reply = QMessageBox.question(self, "确认", "确定删除该项目？其要求清单一并删除。")
         if reply == QMessageBox.StandardButton.Yes:
             self.db.delete_project(pid)
             self._load_projects()
@@ -87,7 +96,6 @@ class ProjectPage(QWidget):
     def _open_project(self):
         pid = self._selected_project_id()
         if pid is None:
-            QMessageBox.warning(self, "提示", "请先选择一个项目")
-            return
+            return  # 双击空白区域或无选中时静默忽略
         self.project_selected.emit(pid)
         self.main_window.nav.setCurrentRow(1)
