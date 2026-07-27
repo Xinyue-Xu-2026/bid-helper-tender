@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
 
         self.nav.setCurrentRow(0)
         self.project_page.project_selected.connect(self._on_project_selected)
+        self.project_page.project_deleted.connect(self._on_project_deleted)
 
     def _on_nav_changed(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -75,3 +76,11 @@ class MainWindow(QMainWindow):
     def show_requirements_page(self):
         """解析完成后自动跳转到要求清单页。"""
         self.nav.setCurrentRow(2)
+
+    def _on_project_deleted(self, project_id: int):
+        if project_id == self._current_project_id:
+            self._current_project_id = None
+            self.current_project_label.setText("未选择项目")
+            self.statusBar().showMessage("就绪")
+            self.tender_page.load_project(None)
+            self.requirements_page.load_project(None)

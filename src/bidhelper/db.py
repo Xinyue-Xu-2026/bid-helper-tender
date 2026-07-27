@@ -11,7 +11,9 @@ class Database:
         self.db_path = db_path or str(config.DB_PATH)
 
     def _connect(self):
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     def init_schema(self):
         config.ensure_dirs()

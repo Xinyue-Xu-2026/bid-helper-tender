@@ -61,6 +61,11 @@ class TenderPage(QWidget):
             self.result_table.setRowCount(0)
             return
         project = self.service.db.get_project(project_id)
+        if project is None:
+            self.info_label.setText("当前未选择项目")
+            self.file_label.setText("尚未导入招标文件")
+            self.result_table.setRowCount(0)
+            return
         self.info_label.setText(f"当前项目：{project['name']}")
         notes = project.get("notes") or ""
         if "招标文件：" in notes:

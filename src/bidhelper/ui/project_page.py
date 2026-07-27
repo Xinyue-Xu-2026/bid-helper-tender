@@ -10,6 +10,7 @@ from bidhelper.ui.dialogs import ProjectDialog
 
 class ProjectPage(QWidget):
     project_selected = pyqtSignal(int)
+    project_deleted = pyqtSignal(int)
 
     def __init__(self, main_window):
         super().__init__()
@@ -92,6 +93,7 @@ class ProjectPage(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.db.delete_project(pid)
             self._load_projects()
+            self.project_deleted.emit(pid)
 
     def _open_project(self):
         pid = self._selected_project_id()
