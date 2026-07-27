@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bidhelper"
+version = "0.1.0"
+description = "投标助手 MVP"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.4.0",
+    "PyMuPDF>=1.23.0",
+    "python-docx>=1.1.2",
+    "pytest>=7.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
