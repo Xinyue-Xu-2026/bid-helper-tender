@@ -9,13 +9,15 @@ python main.py
 
 ## 自动版本管理
 
-开启文件监控，源码有变动时自动 `git add` + `commit`：
+开启文件监控，源码有变动时自动 `git add` + `commit` + `push`：
 
 ```bash
 python -u scripts/auto_commit.py
 ```
 
 按 `Ctrl+C` 停止。自动提交的信息格式为 `auto: sync changes (...)`。
+
+> 首次 push 时会要求输入 GitHub 账号密码，Windows 凭据管理器会自动记住，之后不再需要输入。
 
 ## 目录说明
 

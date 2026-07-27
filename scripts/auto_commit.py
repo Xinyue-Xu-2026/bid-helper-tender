@@ -2,10 +2,10 @@
 """
 自动版本管理脚本
 
-监控项目源码目录，当文件发生变化时自动执行 git add + commit。
+监控项目源码目录，当文件发生变化时自动执行 git add + commit + push。
 
 用法：
-    python scripts/auto_commit.py
+    python -u scripts/auto_commit.py
 
 按 Ctrl+C 停止监控。
 """
@@ -73,6 +73,13 @@ class AutoCommitHandler(FileSystemEventHandler):
 
         subprocess.run(["git", "commit", "-m", message], check=True)
         print(f"[{time.strftime('%H:%M:%S')}] Auto committed: {message}")
+
+        # 如果配置了远程仓库，自动推送
+        try:
+            subprocess.run(["git", "push"], check=True, capture_output=True)
+            print(f"[{time.strftime('%H:%M:%S')}] Auto pushed to remote")
+        except subprocess.CalledProcessError as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Auto push failed: {e.stderr.decode()}")
 
 
 def main():
