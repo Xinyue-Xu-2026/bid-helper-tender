@@ -1,7 +1,6 @@
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import List
 
 from bidhelper import config
 from bidhelper.db import Database
