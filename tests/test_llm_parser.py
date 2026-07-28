@@ -89,3 +89,9 @@ def test_empty_requirements_raises():
 def test_no_api_key_raises():
     with pytest.raises(LLMParseError):
         parse_with_llm("text", "")
+
+
+def test_empty_choices_raises():
+    client = FakeClient(SimpleNamespace(choices=[]))
+    with pytest.raises(LLMParseError):
+        parse_with_llm("text", "sk-fake", client=client)

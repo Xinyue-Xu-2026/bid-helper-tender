@@ -91,3 +91,17 @@ def test_parse_engine_rule_without_key(tmp_path, monkeypatch):
     assert result["engine"] == "rule"
     assert result["warning"] is None
     assert called == []  # 无 Key 时不得调用 LLM
+
+
+def test_reparse_replaces_old_requirements(tmp_path, monkeypatch):
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-fake")
+    monkeypatch.setattr("bidhelper.service.parse_with_llm", _fake_llm_success)
+    service = BidService(str(tmp_path / "app.db"))
+    pid = service.create_project("测试", "单位", "2026-08-15", "审计类", "")
+    service.import_tender(pid, str(Path(__file__).parent / "fixtures" / "sample_tender.docx"))
+
+    service.parse_and_save_requirements(pid)
+    first = service.db.get_requirements(pid)
+    service.parse_and_save_requirements(pid)
+    second = service.db.get_requirements(pid)
+    assert len(first) == len(second)  # 重复解析不翻倍

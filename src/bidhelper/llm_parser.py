@@ -55,6 +55,8 @@ def parse_with_llm(text: str, api_key: str, model: str = DEFAULT_MODEL, client=N
     except Exception as exc:
         raise LLMParseError(f"API 调用失败：{exc}") from exc
 
+    if not completion.choices:
+        raise LLMParseError("API 返回缺少 choices")
     choice = completion.choices[0]
     if choice.finish_reason == "length":
         raise LLMParseError("输出被截断（finish_reason=length）")

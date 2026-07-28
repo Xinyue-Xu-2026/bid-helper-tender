@@ -117,3 +117,7 @@ class Database:
     def delete_requirement(self, requirement_id: int):
         with self._connect() as conn:
             conn.execute("DELETE FROM requirements WHERE id = ?", (requirement_id,))
+
+    def delete_requirements_by_project(self, project_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM requirements WHERE project_id = ?", (project_id,))

@@ -63,6 +63,7 @@ class BidService:
 
         reqs = dedupe_and_filter(reqs)
 
+        self.db.delete_requirements_by_project(project_id)
         for req in reqs:
             self.db.create_requirement(
                 project_id=project_id,

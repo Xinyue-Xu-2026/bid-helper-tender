@@ -49,3 +49,11 @@ def test_delete_project_cascades_requirements(db):
     db.create_requirement(pid, "格式要求", "A4打印", "2.5", "中", "待响应")
     db.delete_project(pid)
     assert db.get_requirements(pid) == []
+
+
+def test_delete_requirements_by_project(db):
+    pid = db.create_project("项目", "单位", "2026-08-15", "审计类", "")
+    db.create_requirement(pid, "废标项", "必须签字", "第四章", "高", "待响应")
+    db.create_requirement(pid, "格式要求", "A4打印", "2.5", "中", "待响应")
+    db.delete_requirements_by_project(pid)
+    assert db.get_requirements(pid) == []
