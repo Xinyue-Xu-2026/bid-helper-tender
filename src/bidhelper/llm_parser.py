@@ -35,6 +35,16 @@ class LLMParseError(Exception):
     """LLM 解析失败（调用方据此回退到规则解析）。"""
 
 
+def _friendly_api_error(exc: Exception) -> str:
+    """把常见 API 错误翻译成用户可行动的中文提示。"""
+    text = str(exc)
+    if "access_terminated_error" in text or "usage limit" in text:
+        return "Kimi 编程订阅本周期用量已达上限（下一周期自动恢复）；也可在设置中改用 Moonshot 开放平台按量计费 Key"
+    if "Invalid Authentication" in text or "401" in text:
+        return "API Key 无效或已过期，请在设置中检查 Key"
+    return f"API 调用失败：{text}"
+
+
 def is_coding_key(api_key: str) -> bool:
     """Kimi 编程订阅 Key（sk-kimi- 前缀）使用编程网关，而非 Moonshot 开放平台端点。"""
     return api_key.startswith("sk-kimi-")
@@ -52,19 +62,23 @@ def parse_with_llm(text: str, api_key: str, model: str = DEFAULT_MODEL, client=N
     if is_coding_key(api_key) and model not in CODING_MODELS:
         model = CODING_DEFAULT_MODEL
     client = client or _make_client(api_key)
+    kwargs = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "response_format": {"type": "json_object"},
+        # 编程网关的推理模型思考过程也占输出额度，需更大余量；截断会抛 LLMParseError 走规则回退
+        "max_tokens": 16384 if is_coding_key(api_key) else 8192,
+    }
+    # 编程网关的推理模型仅允许 temperature=1（即默认值），传 0.2 会被 400 拒绝；公众平台保持 0.2
+    if not is_coding_key(api_key):
+        kwargs["temperature"] = 0.2
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=4096,
-        )
+        completion = client.chat.completions.create(**kwargs)
     except Exception as exc:
-        raise LLMParseError(f"API 调用失败：{exc}") from exc
+        raise LLMParseError(_friendly_api_error(exc)) from exc
 
     if not completion.choices:
         raise LLMParseError("API 返回缺少 choices")

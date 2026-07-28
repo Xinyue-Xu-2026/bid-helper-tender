@@ -52,7 +52,7 @@ def test_parse_success():
     kwargs = client.chat.completions.calls[0]
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["temperature"] == 0.2
-    assert kwargs["max_tokens"] == 4096
+    assert kwargs["max_tokens"] == 8192
     assert kwargs["model"] == "kimi-k2.6"
 
 
@@ -136,3 +136,33 @@ def test_settings_dialog_gateway_hint(qapp):
     assert "编程网关" in dialog.gateway_hint.text()
     dialog.key_edit.setText("sk-normal")
     assert dialog.gateway_hint.text() == ""
+
+
+def test_coding_key_omits_temperature():
+    client = FakeClient(make_completion(GOOD_PAYLOAD))
+    parse_with_llm("text", "sk-kimi-testkey", client=client)
+    assert "temperature" not in client.chat.completions.calls[0]
+
+
+def test_platform_key_sets_temperature():
+    client = FakeClient(make_completion(GOOD_PAYLOAD))
+    parse_with_llm("text", "sk-normal", client=client)
+    assert client.chat.completions.calls[0]["temperature"] == 0.2
+
+
+def test_coding_key_max_tokens_headroom():
+    client = FakeClient(make_completion(GOOD_PAYLOAD))
+    parse_with_llm("text", "sk-kimi-testkey", client=client)
+    assert client.chat.completions.calls[0]["max_tokens"] == 16384
+
+
+def test_friendly_error_for_quota_limit():
+    client = FakeClient(RuntimeError("Error code: 403 - {'error': {'message': 'usage limit reached', 'type': 'access_terminated_error'}}"))
+    with pytest.raises(LLMParseError, match="用量已达上限"):
+        parse_with_llm("text", "sk-kimi-testkey", client=client)
+
+
+def test_friendly_error_passthrough():
+    client = FakeClient(RuntimeError("boom"))
+    with pytest.raises(LLMParseError, match="boom"):
+        parse_with_llm("text", "sk-normal", client=client)
