@@ -7,6 +7,12 @@ venv\Scripts\activate
 python main.py
 ```
 
+## AI 解析配置
+
+1. 首次使用：点击左侧"设置"，粘贴 Moonshot API Key（platform.moonshot.cn 创建），点"测试连接"验证后保存。
+2. 解析招标文件时，程序将招标文件文本发送至 Moonshot 云端 API 进行智能抽取（每次约 ¥0.2）；无 Key 或调用失败时自动使用内置规则解析。
+3. 也可通过环境变量 `MOONSHOT_API_KEY` 配置（优先级高于设置界面）。
+
 ## 自动版本管理
 
 开启文件监控，源码有变动时自动 `git add` + `commit` + `push`：
@@ -33,3 +39,5 @@ python -u scripts/auto_commit.py
 - 自动解析招标要求（评分项、废标项、资质门槛、格式要求、时间节点）
 - 要求清单：统计卡片、搜索/筛选/排序、状态与分类表格内直接编辑
 - 要求清单导出 Excel（冻结表头、自动筛选、状态着色、合法值下拉校验）
+- AI 智能解析：接入 Kimi 大模型自动抽取招标要求（评分细则、资格证明、保证金等全覆盖），规则解析离线兜底
+- 设置界面：配置 Moonshot API Key（存本地 data/config.json，不上传）、切换解析模型、测试连接
