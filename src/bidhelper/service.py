@@ -7,7 +7,10 @@ from bidhelper import config
 from bidhelper.db import Database
 from bidhelper.excel_exporter import export_requirements
 from bidhelper.extractor import extract_text
+from bidhelper.llm_parser import LLMParseError, parse_with_llm
 from bidhelper.parser import parse_tender
+from bidhelper.postprocess import dedupe_and_filter
+from bidhelper.settings_store import get_api_key, get_model
 
 
 class BidService:
@@ -34,15 +37,32 @@ class BidService:
         self.db.update_project(project_id, notes=f"招标文件：{dest}")
         return dest
 
-    def parse_and_save_requirements(self, project_id: int) -> List[dict]:
+    def parse_and_save_requirements(self, project_id: int) -> dict:
+        """解析招标文件并保存要求。返回 {"requirements": [...], "engine": "ai"|"rule", "warning": str|None}。"""
         project = self.db.get_project(project_id)
+        if not project:
+            raise ValueError("Project not found")
         notes = project.get("notes", "")
         if "招标文件：" not in notes:
             raise ValueError("No imported tender file")
 
         tender_path = notes.split("招标文件：")[-1].strip()
         text = extract_text(tender_path)
-        reqs = parse_tender(text)
+
+        engine = "rule"
+        warning = None
+        reqs = None
+        api_key = get_api_key()
+        if api_key:
+            try:
+                reqs = parse_with_llm(text, api_key, get_model())
+                engine = "ai"
+            except LLMParseError as exc:
+                warning = str(exc)
+        if reqs is None:
+            reqs = parse_tender(text)
+
+        reqs = dedupe_and_filter(reqs)
 
         for req in reqs:
             self.db.create_requirement(
@@ -53,7 +73,7 @@ class BidService:
                 confidence=req["confidence"],
                 status=req["status"],
             )
-        return reqs
+        return {"requirements": reqs, "engine": engine, "warning": warning}
 
     def export_requirements_excel(self, project_id: int, dest_path: str) -> Path:
         project = self.db.get_project(project_id)

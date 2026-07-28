@@ -16,9 +16,12 @@ def test_parse_worker_success(qapp, tmp_path):
     worker.finished_ok.connect(ok.append)
     worker.failed.connect(err.append)
     worker.run()  # 直接同步调用，测试线程体逻辑
-    assert len(ok) == 1 and ok[0] > 0
+    assert len(ok) == 1
+    result = ok[0]
+    assert result["engine"] == "rule"
+    assert len(result["requirements"]) > 0
     assert err == []
-    assert len(service.db.get_requirements(pid)) == ok[0]
+    assert len(service.db.get_requirements(pid)) == len(result["requirements"])
 
 
 def test_parse_worker_failure(qapp, tmp_path):
