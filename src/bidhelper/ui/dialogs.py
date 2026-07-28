@@ -63,6 +63,12 @@ class SettingsDialog(QDialog):
         key_row.addWidget(self.show_key_btn, 0)
         layout.addRow("API Key：", key_row)
 
+        self.gateway_hint = QLabel("")
+        self.gateway_hint.setObjectName("pageHint")
+        self.gateway_hint.setWordWrap(True)
+        layout.addRow(self.gateway_hint)
+        self.key_edit.textChanged.connect(self._update_gateway_hint)
+
         self.model_combo = QComboBox()
         self.model_combo.addItems(["kimi-k2.6", "kimi-k3"])
         self.model_combo.setCurrentText(settings.get("model", "kimi-k2.6"))
@@ -82,6 +88,14 @@ class SettingsDialog(QDialog):
         layout.addRow(buttons)
 
         self.test_btn.clicked.connect(self._test_connection)
+        self._update_gateway_hint(self.key_edit.text())
+
+    def _update_gateway_hint(self, text):
+        from bidhelper.llm_parser import is_coding_key
+        if is_coding_key(text.strip()):
+            self.gateway_hint.setText("已识别为 Kimi 编程订阅 Key：将自动使用编程网关（api.kimi.com/coding），模型按 k3 处理")
+        else:
+            self.gateway_hint.setText("")
 
     def _toggle_key_visible(self, checked):
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)

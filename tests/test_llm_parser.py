@@ -95,3 +95,44 @@ def test_empty_choices_raises():
     client = FakeClient(SimpleNamespace(choices=[]))
     with pytest.raises(LLMParseError):
         parse_with_llm("text", "sk-fake", client=client)
+
+
+def test_is_coding_key():
+    from bidhelper.llm_parser import is_coding_key
+    assert is_coding_key("sk-kimi-abc123")
+    assert not is_coding_key("sk-abc123")
+    assert not is_coding_key("")
+
+
+def test_make_client_routes_coding_key():
+    from bidhelper.llm_parser import _make_client, CODING_API_BASE_URL
+    client = _make_client("sk-kimi-testkey123")
+    assert str(client.base_url).rstrip("/") == CODING_API_BASE_URL.rstrip("/")
+
+
+def test_make_client_routes_platform_key():
+    from bidhelper.llm_parser import _make_client, API_BASE_URL
+    client = _make_client("sk-normalkey123")
+    assert str(client.base_url).rstrip("/") == API_BASE_URL.rstrip("/")
+
+
+def test_coding_key_model_resolution():
+    from bidhelper.llm_parser import CODING_DEFAULT_MODEL
+    client = FakeClient(make_completion(GOOD_PAYLOAD))
+    parse_with_llm("text", "sk-kimi-testkey", model="kimi-k2.6", client=client)
+    assert client.chat.completions.calls[0]["model"] == CODING_DEFAULT_MODEL
+
+
+def test_platform_key_model_kept():
+    client = FakeClient(make_completion(GOOD_PAYLOAD))
+    parse_with_llm("text", "sk-normal", model="kimi-k2.6", client=client)
+    assert client.chat.completions.calls[0]["model"] == "kimi-k2.6"
+
+
+def test_settings_dialog_gateway_hint(qapp):
+    from bidhelper.ui.dialogs import SettingsDialog
+    dialog = SettingsDialog()
+    dialog.key_edit.setText("sk-kimi-abc")
+    assert "编程网关" in dialog.gateway_hint.text()
+    dialog.key_edit.setText("sk-normal")
+    assert dialog.gateway_hint.text() == ""

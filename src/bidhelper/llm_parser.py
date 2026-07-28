@@ -4,7 +4,10 @@ import json
 from openai import OpenAI
 
 API_BASE_URL = "https://api.moonshot.cn/v1"
+CODING_API_BASE_URL = "https://api.kimi.com/coding/v1"
 DEFAULT_MODEL = "kimi-k2.6"
+CODING_DEFAULT_MODEL = "k3"
+CODING_MODELS = ("k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed")
 
 VALID_CATEGORIES = ("资质门槛", "评分项", "废标项", "格式要求", "时间节点", "其他")
 VALID_CONFIDENCES = ("高", "中", "低")
@@ -32,14 +35,22 @@ class LLMParseError(Exception):
     """LLM 解析失败（调用方据此回退到规则解析）。"""
 
 
+def is_coding_key(api_key: str) -> bool:
+    """Kimi 编程订阅 Key（sk-kimi- 前缀）使用编程网关，而非 Moonshot 开放平台端点。"""
+    return api_key.startswith("sk-kimi-")
+
+
 def _make_client(api_key: str, timeout: float = 300.0) -> OpenAI:
-    return OpenAI(api_key=api_key, base_url=API_BASE_URL, timeout=timeout, max_retries=2)
+    base_url = CODING_API_BASE_URL if is_coding_key(api_key) else API_BASE_URL
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=2)
 
 
 def parse_with_llm(text: str, api_key: str, model: str = DEFAULT_MODEL, client=None) -> list:
     """调用 Kimi API 抽取招标要求；任何失败抛 LLMParseError。client 参数用于测试注入。"""
     if not api_key:
         raise LLMParseError("未配置 API Key")
+    if is_coding_key(api_key) and model not in CODING_MODELS:
+        model = CODING_DEFAULT_MODEL
     client = client or _make_client(api_key)
     try:
         completion = client.chat.completions.create(

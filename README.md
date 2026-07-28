@@ -9,8 +9,10 @@ python main.py
 
 ## AI 解析配置
 
-1. 首次使用：点击左侧"设置"，粘贴 Moonshot API Key（platform.moonshot.cn 创建），点"测试连接"验证后保存。
-2. 解析招标文件时，程序将招标文件文本发送至 Moonshot 云端 API 进行智能抽取（每次约 ¥0.2）；无 Key 或调用失败时自动使用内置规则解析。
+1. 首次使用：点击左侧"设置"，粘贴 API Key，点"测试连接"验证后保存。支持两种 Key：
+   - Moonshot 开放平台 Key（platform.moonshot.cn 创建，按量计费，每次约 ¥0.2）
+   - Kimi 编程订阅 Key（`sk-kimi-` 开头，如 Kimi for Coding 订阅）：程序自动识别并使用编程网关（api.kimi.com/coding），模型按 k3 处理，无需额外配置
+2. 解析招标文件时，程序将招标文件文本发送至云端 API 进行智能抽取；无 Key 或调用失败时自动使用内置规则解析。
 3. 也可通过环境变量 `MOONSHOT_API_KEY` 配置（优先级高于设置界面）。
 
 ## 自动版本管理
