@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from bidhelper.ui.project_page import ProjectPage
@@ -35,6 +35,9 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self._on_nav_changed)
         side_layout.addWidget(self.nav, 1)
 
+        self.settings_btn = QPushButton("设置")
+        side_layout.addWidget(self.settings_btn, 0)
+
         self.current_project_label = QLabel("未选择项目")
         self.current_project_label.setObjectName("currentProject")
         self.current_project_label.setWordWrap(True)
@@ -56,6 +59,7 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(0)
         self.project_page.project_selected.connect(self._on_project_selected)
         self.project_page.project_deleted.connect(self._on_project_deleted)
+        self.settings_btn.clicked.connect(self._open_settings)
 
     def _on_nav_changed(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -84,3 +88,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("就绪")
             self.tender_page.load_project(None)
             self.requirements_page.load_project(None)
+
+    def _open_settings(self):
+        from bidhelper.settings_store import save_settings
+        from bidhelper.ui.dialogs import SettingsDialog
+        dialog = SettingsDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            save_settings(dialog.get_data())
+            self.statusBar().showMessage("设置已保存")

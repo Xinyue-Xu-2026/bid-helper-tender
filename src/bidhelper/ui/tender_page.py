@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
 )
 
 from bidhelper.service import BidService
+from bidhelper.settings_store import get_api_key
 from bidhelper.ui.workers import ParseWorker
 
 
@@ -73,6 +74,8 @@ class TenderPage(QWidget):
             self.file_label.setText(f"已导入：{name}（重新导入将覆盖）")
         else:
             self.file_label.setText("尚未导入招标文件")
+        if not get_api_key():
+            self.file_label.setText(self.file_label.text() + "｜未配置 API Key：将使用规则解析")
         self._load_results()
 
     def _load_results(self):
@@ -119,10 +122,16 @@ class TenderPage(QWidget):
         self.import_btn.setEnabled(not parsing)
         self.parse_btn.setText("解析中…" if parsing else "开始解析")
 
-    def _on_parse_ok(self, count: int):
+    def _on_parse_ok(self, result: dict):
         self._set_parsing(False)
         self._load_results()
-        QMessageBox.information(self, "解析完成", f"共解析出 {count} 条要求，已切换到要求清单页。")
+        count = len(result.get("requirements", []))
+        engine_label = "AI 解析" if result.get("engine") == "ai" else "规则解析"
+        message = f"共解析出 {count} 条要求（{engine_label}），已切换到要求清单页。"
+        warning = result.get("warning")
+        if warning:
+            message += f"\nAI 解析失败（{warning}），已改用规则解析。"
+        QMessageBox.information(self, "解析完成", message)
         self.main_window.show_requirements_page()
 
     def _on_parse_failed(self, message: str):
