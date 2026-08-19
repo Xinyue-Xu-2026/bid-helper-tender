@@ -1,4 +1,4 @@
 .superpowers/
 __pycache__/
 *.pyc
-data/app.db
+data/
