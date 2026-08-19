@@ -101,8 +101,8 @@ class Database:
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         with self._connect() as conn:
             conn.execute(
-                f"UPDATE projects SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                list(fields.values()) + [project_id])
+                f"UPDATE projects SET {set_clause}, updated_at = ? WHERE id = ?",
+                list(fields.values()) + [datetime.now().isoformat(), project_id])
 
     def delete_project(self, project_id: int):
         with self._connect() as conn:
