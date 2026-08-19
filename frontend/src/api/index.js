@@ -45,4 +45,4 @@ export const setCompliance = (rid, checked) => api.put(`/compliance/${rid}`, { c
 // 设置
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const saveSettings = (data) => api.put('/settings', data).then(r => r.data)
-export const testSettings = () => api.post('/settings/test').then(r => r.data)
+export const testSettings = (data) => api.post('/settings/test', data).then(r => r.data)

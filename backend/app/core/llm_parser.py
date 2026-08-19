@@ -5,7 +5,7 @@ from openai import OpenAI
 
 API_BASE_URL = "https://api.moonshot.cn/v1"
 CODING_API_BASE_URL = "https://api.kimi.com/coding/v1"
-DEFAULT_MODEL = "kimi-k2.6"
+DEFAULT_MODEL = "kimi-k3"
 CODING_DEFAULT_MODEL = "k3"
 CODING_MODELS = ("k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed")
 

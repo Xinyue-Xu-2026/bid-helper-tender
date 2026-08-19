@@ -37,7 +37,7 @@ def test_upload_tender_rejects_bad_type(client):
 
 
 def test_settings_roundtrip(client):
-    r = client.put("/api/settings", json={"api_key": "sk-test-123", "model": "kimi-k2.6"})
+    r = client.put("/api/settings", json={"api_key": "sk-test-123", "model": "kimi-k3"})
     assert r.status_code == 200
     data = client.get("/api/settings").json()
-    assert data["api_key"] == "sk-test-123" and data["model"] == "kimi-k2.6"
+    assert data["api_key"] == "sk-test-123" and data["model"] == "kimi-k3"

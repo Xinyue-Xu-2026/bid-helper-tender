@@ -3,20 +3,24 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getSettings, saveSettings, testSettings } from '../api'
 
-const form = ref({ api_key: '', model: 'kimi-k2.6' })
+const form = ref({ api_key: '', model: 'kimi-k3' })
 const testing = ref(false)
 
 onMounted(async () => { form.value = await getSettings() })
 
 async function save() {
-  await saveSettings(form.value)
-  ElMessage.success('已保存')
+  try {
+    await saveSettings(form.value)
+    ElMessage.success('已保存')
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e.response?.data?.detail || e.message))
+  }
 }
 
 async function test() {
   testing.value = true
   try {
-    const r = await testSettings()
+    const r = await testSettings({ api_key: form.value.api_key, model: form.value.model })
     r.ok ? ElMessage.success(r.message) : ElMessage.error(r.message)
   } finally {
     testing.value = false

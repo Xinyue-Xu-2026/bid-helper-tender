@@ -4,7 +4,7 @@ import os
 
 from app import config
 
-DEFAULT_MODEL = "kimi-k2.6"
+DEFAULT_MODEL = "kimi-k3"
 
 
 def _settings_file():
