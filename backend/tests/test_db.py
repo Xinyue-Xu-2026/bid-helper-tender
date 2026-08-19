@@ -41,7 +41,7 @@ def test_asset_and_expiry(db_path):
     assert len(db.get_assets("credit")) == 2
     assert len(db.get_assets("person")) == 1
     assets = db.get_assets("credit")
-    assert assets[0]["fields"]["发证机关"] == "市监局"
+    assert assets[1]["fields"]["发证机关"] == "市监局"  # DESC: assets[0] 为资质证书A
     expiring = db.get_expiring_assets(days=30)
     assert len(expiring) == 1 and expiring[0]["name"] == "营业执照"
     assert expiring[0]["days_left"] == 10

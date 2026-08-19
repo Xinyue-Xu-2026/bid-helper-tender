@@ -184,7 +184,7 @@ class Database:
         if type:
             sql += " WHERE type = ?"
             params.append(type)
-        sql += " ORDER BY id"
+        sql += " ORDER BY id DESC"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             return [self._asset_row(r) for r in conn.execute(sql, params).fetchall()]
