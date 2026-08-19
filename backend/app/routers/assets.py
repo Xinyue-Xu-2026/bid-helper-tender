@@ -1,4 +1,5 @@
 import shutil
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from app import config
 from app.db import ASSET_TYPES, Database
 from app.deps import get_db
+from app.services.asset_service import import_assets_excel
 
 router = APIRouter()
 
@@ -35,6 +37,19 @@ def _check_type(t: str):
 @router.get("/expiring")
 def expiring(days: int = 30, db: Database = Depends(get_db)):
     return db.get_expiring_assets(days=days)
+
+
+@router.post("/import")
+def import_assets(type: str, file: UploadFile, db: Database = Depends(get_db)):
+    _check_type(type)
+    if type not in ("credit", "person"):
+        raise HTTPException(400, "仅资信证书/常用人员支持 Excel 导入")
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(400, "仅支持 .xlsx 文件")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+        tmp.write(file.file.read())
+        tmp_path = tmp.name
+    return import_assets_excel(db, type, tmp_path)
 
 
 @router.get("")
