@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import config
 from app.db import Database
-from app.routers import assets, export, projects, requirements, settings
+from app.routers import assets, compliance, export, projects, requirements, settings
 
 app = FastAPI(title="投标Web平台")
 
@@ -25,6 +25,7 @@ def startup():
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(requirements.router, prefix="/api", tags=["requirements"])
 app.include_router(export.router, prefix="/api", tags=["export"])
+app.include_router(compliance.router, prefix="/api", tags=["compliance"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 
