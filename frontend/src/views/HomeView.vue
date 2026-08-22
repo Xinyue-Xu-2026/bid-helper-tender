@@ -20,11 +20,14 @@ async function load() {
 async function create() {
   const { id } = await createProject(form.value)
   dialogVisible.value = false
+  Object.assign(form.value, { name: '', client: '', bid_date: '', project_type: '服务', notes: '' })
   router.push(`/projects/${id}`)
 }
 
 async function remove(row) {
-  await ElMessageBox.confirm(`确定删除项目「${row.name}」？`, '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(`确定删除项目「${row.name}」？`, '提示', { type: 'warning' })
+  } catch { return }
   await deleteProject(row.id)
   load()
 }
@@ -50,7 +53,9 @@ onMounted(load)
     <el-table-column prop="client" label="招标单位" />
     <el-table-column prop="bid_date" label="投标日期" width="120" />
     <el-table-column prop="project_type" label="类型" width="100" />
-    <el-table-column prop="created_at" label="创建时间" width="180" />
+    <el-table-column label="创建时间" width="180">
+      <template #default="{ row }">{{ (row.created_at || '').slice(0, 16).replace('T', ' ') }}</template>
+    </el-table-column>
     <el-table-column label="操作" width="100">
       <template #default="{ row }">
         <el-button type="danger" size="small" @click.stop="remove(row)">删除</el-button>

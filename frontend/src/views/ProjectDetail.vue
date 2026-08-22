@@ -1,8 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteRequirement, exportUrl, getProject, getRequirements,
   updateRequirement, uploadTender,
@@ -18,6 +18,7 @@ const requirements = ref([])
 const filter = ref({ category: '', status: '', q: '' })
 const parsing = ref(false)
 const parseLogs = ref([])
+let es = null
 
 const CATEGORIES = ['资质门槛', '评分项', '废标项', '格式要求', '时间节点', '其他']
 const STATUSES = ['待响应', '已响应', '需关注']
@@ -46,7 +47,7 @@ async function onUploadTender(options) {
 function startParse() {
   parsing.value = true
   parseLogs.value = []
-  const es = new EventSource(`/api/projects/${pid}/parse`)
+  es = new EventSource(`/api/projects/${pid}/parse`)
   es.addEventListener('progress', e => parseLogs.value.push(e.data))
   es.addEventListener('done', e => {
     const d = JSON.parse(e.data)
@@ -60,11 +61,18 @@ function startParse() {
   })
 }
 
-async function onStatusChange(row, val) { await updateRequirement(row.id, { status: val }) }
-async function onCategoryChange(row, val) { await updateRequirement(row.id, { category: val }) }
-async function onDelete(row) { await deleteRequirement(row.id); load() }
+async function onStatusChange(row, val) { row.status = val; await updateRequirement(row.id, { status: val }) }
+async function onCategoryChange(row, val) { row.category = val; await updateRequirement(row.id, { category: val }) }
+async function onDelete(row) {
+  try {
+    await ElMessageBox.confirm('确定删除该要求？', '提示', { type: 'warning' })
+  } catch { return }
+  await deleteRequirement(row.id); load()
+}
 
 onMounted(load)
+
+onBeforeUnmount(() => { if (es) es.close() })
 </script>
 
 <template>

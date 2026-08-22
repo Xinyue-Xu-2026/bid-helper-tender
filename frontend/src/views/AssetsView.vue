@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createAsset, deleteAsset, importAssets, listAssets, updateAsset, uploadAssetFile,
 } from '../api'
@@ -42,7 +42,12 @@ async function save() {
   load()
 }
 
-async function remove(row) { await deleteAsset(row.id); load() }
+async function remove(row) {
+  try {
+    await ElMessageBox.confirm(`确定删除「${row.name}」？`, '提示', { type: 'warning' })
+  } catch { return }
+  await deleteAsset(row.id); load()
+}
 
 async function onUploadFile(row, options) {
   await uploadAssetFile(row.id, options.file)

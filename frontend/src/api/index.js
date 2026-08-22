@@ -1,6 +1,18 @@
 import axios from 'axios'
+import { ElMessage } from 'element-plus'
 
 export const api = axios.create({ baseURL: '/api' })
+
+// 全局响应拦截器：统一错误提示（覆盖各页无错误处理的情况）
+api.interceptors.response.use(
+  r => r,
+  err => {
+    const detail = err?.response?.data?.detail
+    const msg = typeof detail === 'string' ? detail : (err?.message || '请求失败')
+    ElMessage.error(msg)
+    return Promise.reject(err)
+  }
+)
 
 // 项目
 export const listProjects = () => api.get('/projects').then(r => r.data)
