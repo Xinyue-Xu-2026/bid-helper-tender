@@ -60,14 +60,5 @@ class BidService:
         reqs = dedupe_and_filter(reqs)
         emit(f"解析完成，正在保存 {len(reqs)} 条要求…")
 
-        self.db.delete_requirements_by_project(project_id)
-        for req in reqs:
-            self.db.create_requirement(
-                project_id=project_id,
-                category=req["category"],
-                content=req["content"],
-                source=req["source"],
-                confidence=req["confidence"],
-                status=req["status"],
-            )
+        self.db.replace_requirements(project_id, reqs)
         return {"requirements": reqs, "engine": engine, "warning": warning}

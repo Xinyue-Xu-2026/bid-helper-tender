@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.db import Database
 from app.deps import get_db
 from app.services.bid_service import BidService
+from app.core.llm_parser import VALID_CATEGORIES
 
 router = APIRouter()
 
@@ -32,6 +33,8 @@ def update_requirement(requirement_id: int, body: RequirementUpdate,
                        db: Database = Depends(get_db)):
     if not db.get_requirement(requirement_id):
         raise HTTPException(404, "要求不存在")
+    if body.category is not None and body.category not in VALID_CATEGORIES:
+        raise HTTPException(400, f"非法分类 {body.category}，可选：{'/'.join(VALID_CATEGORIES)}")
     db.update_requirement(requirement_id,
                           **{k: v for k, v in body.model_dump().items() if v is not None})
     return {"ok": True}
@@ -58,7 +61,7 @@ def parse_stream(project_id: int, db: Database = Depends(get_db)):
                 "warning": result["warning"],
             }))
         except Exception as exc:
-            q.put(("error", str(exc)))
+            q.put(("error", str(exc).replace("\r", " ").replace("\n", " ")))
         finally:
             q.put(None)
 

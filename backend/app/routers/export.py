@@ -15,13 +15,16 @@ router = APIRouter()
 
 
 @router.get("/projects/{project_id}/requirements/export")
-def export_xlsx(project_id: int, db: Database = Depends(get_db)):
+def export_xlsx(project_id: int, background_tasks: BackgroundTasks,
+                db: Database = Depends(get_db)):
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
     requirements = db.get_requirements(project_id)
-    dest = Path(tempfile.gettempdir()) / f"{project['name']}_要求清单.xlsx"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project["name"])
+    dest = Path(tempfile.gettempdir()) / f"{safe}_要求清单.xlsx"
     export_requirements(project, requirements, str(dest))
+    background_tasks.add_task(Path(dest).unlink, missing_ok=True)
     filename = quote(dest.name)
     return FileResponse(
         str(dest),

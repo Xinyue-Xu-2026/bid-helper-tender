@@ -193,6 +193,17 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM requirements WHERE project_id = ?", (project_id,))
 
+    def replace_requirements(self, project_id: int, reqs: list):
+        """在单个事务内先删后插项目要求（避免半途失败留下空清单）。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM requirements WHERE project_id = ?", (project_id,))
+            for req in reqs:
+                conn.execute(
+                    "INSERT INTO requirements (project_id, category, content, source, confidence, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (project_id, req["category"], req["content"], req["source"],
+                     req["confidence"], req["status"]))
+
     # ---------- 资产 ----------
     def create_asset(self, type: str, name: str, fields: dict = None,
                      file_path: str = "", expiry_date: str = "") -> int:

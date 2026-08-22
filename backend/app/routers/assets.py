@@ -49,7 +49,10 @@ def import_assets(type: str, file: UploadFile, db: Database = Depends(get_db)):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
-    return import_assets_excel(db, type, tmp_path)
+    try:
+        return import_assets_excel(db, type, tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 @router.get("")
@@ -82,6 +85,9 @@ def update_asset(asset_id: int, body: AssetUpdate, db: Database = Depends(get_db
 
 @router.delete("/{asset_id}")
 def delete_asset(asset_id: int, db: Database = Depends(get_db)):
+    asset = db.get_asset(asset_id)
+    if asset and asset.get("file_path"):
+        Path(asset["file_path"]).unlink(missing_ok=True)
     db.delete_asset(asset_id)
     return {"ok": True}
 

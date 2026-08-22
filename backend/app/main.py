@@ -1,13 +1,22 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
 from app.db import Database
 from app.routers import assets, compliance, export, materials, projects, requirements, settings, templates, write
 
-app = FastAPI(title="投标Web平台")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    config.ensure_dirs()
+    Database().init_schema()
+    yield
+
+
+app = FastAPI(title="投标Web平台", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,12 +24,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def startup():
-    config.ensure_dirs()
-    Database().init_schema()
 
 
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
@@ -39,6 +42,8 @@ if _dist.exists():
 
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         candidate = _dist / full_path
         if full_path and candidate.is_file():
             return FileResponse(str(candidate))

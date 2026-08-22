@@ -71,6 +71,8 @@ def upload_tender(project_id: int, file: UploadFile, db: Database = Depends(get_
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
-    dest = svc.import_tender(project_id, tmp_path)
-    # import_tender 用的是临时文件名，重命名回原始文件名更友好
+    try:
+        dest = svc.import_tender(project_id, tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
     return {"tender_file_path": str(dest)}

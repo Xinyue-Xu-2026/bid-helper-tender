@@ -38,5 +38,7 @@ def set_compliance(requirement_id: int, body: CheckIn, db: Database = Depends(ge
 
 
 @router.post("/projects/{project_id}/compliance/ai-check")
-def ai_check_placeholder(project_id: int):
+def ai_check_placeholder(project_id: int, db: Database = Depends(get_db)):
+    if not db.get_project(project_id):
+        raise HTTPException(404, "项目不存在")
     raise HTTPException(501, "AI 自动比对将在后续版本提供")
