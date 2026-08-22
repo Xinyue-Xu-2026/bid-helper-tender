@@ -1,4 +1,5 @@
 import shutil
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -27,7 +28,9 @@ def upload_material(project_id: int, file: UploadFile, db: Database = Depends(ge
     if suffix not in ALLOWED_MATERIAL_SUFFIXES:
         raise HTTPException(400, f"不支持的文件类型 {suffix}，仅支持 PDF/Word/Excel/图片")
     config.ensure_dirs()
-    dest = config.UPLOADS_DIR / f"material_{project_id}_{file.filename}"
+    safe_name = Path(file.filename or "material").name
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in safe_name)
+    dest = config.UPLOADS_DIR / f"material_{project_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
     mid = db.create_material(project_id, str(dest), suffix.lstrip("."))
