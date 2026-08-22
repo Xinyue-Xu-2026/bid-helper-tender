@@ -52,18 +52,7 @@ class WriteService:
         if not api_key:
             raise LLMParseError("未配置 API Key")
         outline = generate_outline(requirements, api_key, get_model())
-        self.db.delete_sections_by_project(project_id)
-        counter = {"n": 0}
-
-        def flatten(nodes, parent_id):
-            for node in nodes:
-                counter["n"] += 1
-                sid = self.db.create_section(
-                    project_id, parent_id, node["title"], node["level"], counter["n"])
-                flatten(node.get("children", []), sid)
-
-        flatten(outline, 0)
-        return self.db.get_sections_tree(project_id)
+        return self.db.replace_sections(project_id, outline)
 
     # ---------- 单节生成 ----------
     def assemble_section_prompt(self, project_id: int, section_id: int,

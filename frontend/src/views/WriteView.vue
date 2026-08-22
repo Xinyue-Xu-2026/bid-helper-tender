@@ -64,6 +64,7 @@ function select(node) {
 }
 
 async function onGenerateOutline() {
+  if (generating.value) return
   try {
     await ElMessageBox.confirm('AI 将生成目录初稿并覆盖现有章节，继续？', '提示', { type: 'warning' })
   } catch { return }

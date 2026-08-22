@@ -399,6 +399,23 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM sections WHERE project_id = ?", (project_id,))
 
+    def replace_sections(self, project_id: int, outline: list) -> List[dict]:
+        """在单个事务内先删后插项目章节树（避免半途失败留下残树），返回嵌套树。"""
+        counter = {"n": 0}
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sections WHERE project_id = ?", (project_id,))
+
+            def insert_nodes(nodes, parent_id):
+                for node in nodes:
+                    counter["n"] += 1
+                    cur = conn.execute(
+                        "INSERT INTO sections (project_id, parent_id, title, level, sort_order) VALUES (?, ?, ?, ?, ?)",
+                        (project_id, parent_id, node["title"], node["level"], counter["n"]))
+                    insert_nodes(node.get("children", []), cur.lastrowid)
+
+            insert_nodes(outline, 0)
+        return self.get_sections_tree(project_id)
+
     def get_sections_tree(self, project_id: int) -> List[dict]:
         """嵌套章节树（children 键），同级按 sort_order 排序。"""
         flat = self.get_sections(project_id)

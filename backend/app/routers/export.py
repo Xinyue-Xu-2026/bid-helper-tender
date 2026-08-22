@@ -1,4 +1,5 @@
 import tempfile
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,7 +23,7 @@ def export_xlsx(project_id: int, background_tasks: BackgroundTasks,
         raise HTTPException(404, "项目不存在")
     requirements = db.get_requirements(project_id)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project["name"])
-    dest = Path(tempfile.gettempdir()) / f"{safe}_要求清单.xlsx"
+    dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_要求清单.xlsx"
     export_requirements(project, requirements, str(dest))
     background_tasks.add_task(Path(dest).unlink, missing_ok=True)
     filename = quote(dest.name)
@@ -43,7 +44,7 @@ def export_word_doc(project_id: int, template_id: int = None,
     template = db.get_template(template_id) if template_id else None
     sections = db.get_sections_flat(project_id)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project["name"])
-    dest = Path(tempfile.gettempdir()) / f"{safe}_标书.docx"
+    dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_标书.docx"
     try:
         export_word(project, template, sections, str(dest))
     except ValueError as exc:
