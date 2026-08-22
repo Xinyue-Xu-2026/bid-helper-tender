@@ -1,5 +1,6 @@
 """编写工作台业务编排：模板画像、目录大纲、单节生成。"""
 import shutil
+import uuid
 from pathlib import Path
 
 from app import config
@@ -19,7 +20,7 @@ class WriteService:
         config.ensure_dirs()
         src = Path(source_path)
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-        dest = config.TEMPLATES_DIR / f"{safe_name}{src.suffix.lower()}"
+        dest = config.TEMPLATES_DIR / f"{safe_name}_{uuid.uuid4().hex[:8]}{src.suffix.lower()}"
         shutil.copy2(src, dest)
         return self.db.create_template(name, str(dest))
 
