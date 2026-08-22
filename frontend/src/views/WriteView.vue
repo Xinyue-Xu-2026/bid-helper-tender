@@ -57,6 +57,7 @@ async function load() {
 }
 
 function select(node) {
+  if (generating.value) return
   currentId.value = node.id
   content.value = node.content || ''
   selectedReqs.value = matchedReqs.value.map(r => r.id)
@@ -78,6 +79,7 @@ async function onGenerateOutline() {
 }
 
 async function onAddChild() {
+  if (generating.value) return
   if (!currentId.value) { ElMessage.warning('请先选择父章节'); return }
   const node = current.value
   const { id } = await createSection(pid, {
@@ -89,6 +91,7 @@ async function onAddChild() {
 }
 
 async function onDeleteSection() {
+  if (generating.value) return
   if (!currentId.value) return
   try {
     await ElMessageBox.confirm('删除该章节及其子章节？', '提示', { type: 'warning' })
