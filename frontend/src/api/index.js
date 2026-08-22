@@ -46,3 +46,38 @@ export const setCompliance = (rid, checked) => api.put(`/compliance/${rid}`, { c
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const saveSettings = (data) => api.put('/settings', data).then(r => r.data)
 export const testSettings = (data) => api.post('/settings/test', data).then(r => r.data)
+
+// 模板
+export const listTemplates = () => api.get('/templates').then(r => r.data)
+export const uploadTemplate = (file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post('/templates', fd, { params: { name: file.name } }).then(r => r.data)
+}
+export const analyzeTemplate = (id) => api.post(`/templates/${id}/analyze`).then(r => r.data)
+export const deleteTemplate = (id) => api.delete(`/templates/${id}`).then(r => r.data)
+
+// 资料
+export const listMaterials = (pid) => api.get(`/projects/${pid}/materials`).then(r => r.data)
+export const uploadMaterial = (pid, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post(`/projects/${pid}/materials`, fd).then(r => r.data)
+}
+export const deleteMaterial = (id) => api.delete(`/materials/${id}`).then(r => r.data)
+
+// 章节与编写
+export const getSections = (pid) => api.get(`/projects/${pid}/sections`).then(r => r.data)
+export const createSection = (pid, data) => api.post(`/projects/${pid}/sections`, data).then(r => r.data)
+export const updateSection = (id, data) => api.put(`/sections/${id}`, data).then(r => r.data)
+export const deleteSection = (id) => api.delete(`/sections/${id}`).then(r => r.data)
+export const generateOutline = (pid) => api.post(`/projects/${pid}/outline`).then(r => r.data)
+export const sectionGenerateUrl = (pid, sid, { assetIds, materialIds, reqIds }) => {
+  const qs = new URLSearchParams()
+  if (assetIds.length) qs.set('asset_ids', assetIds.join(','))
+  if (materialIds.length) qs.set('material_ids', materialIds.join(','))
+  if (reqIds.length) qs.set('req_ids', reqIds.join(','))
+  return `/api/projects/${pid}/sections/${sid}/generate?${qs.toString()}`
+}
+export const exportWordUrl = (pid, templateId) =>
+  `/api/projects/${pid}/export${templateId ? `?template_id=${templateId}` : ''}`

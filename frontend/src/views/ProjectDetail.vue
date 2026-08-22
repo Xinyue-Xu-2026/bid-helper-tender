@@ -1,15 +1,18 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   deleteRequirement, exportUrl, getProject, getRequirements,
   updateRequirement, uploadTender,
 } from '../api'
 import CompliancePanel from '../components/CompliancePanel.vue'
+import MaterialsPanel from '../components/MaterialsPanel.vue'
 
 const route = useRoute()
 const pid = Number(route.params.id)
+const router = useRouter()
 const project = ref({})
 const requirements = ref([])
 const filter = ref({ category: '', status: '', q: '' })
@@ -67,6 +70,8 @@ onMounted(load)
 <template>
   <h2>{{ project.name }}</h2>
   <p v-if="project.client">招标单位：{{ project.client }}　投标日期：{{ project.bid_date }}</p>
+      <el-button type="success" @click="router.push(`/projects/${pid}/write`)"
+                 style="margin-bottom: 12px">进入编写工作台</el-button>
 
   <el-tabs>
     <el-tab-pane label="要求清单">
@@ -124,6 +129,9 @@ onMounted(load)
 
     <el-tab-pane label="废标核对">
       <CompliancePanel :project-id="pid" />
+    </el-tab-pane>
+    <el-tab-pane label="资料与模板">
+      <MaterialsPanel :project-id="pid" />
     </el-tab-pane>
   </el-tabs>
 </template>
