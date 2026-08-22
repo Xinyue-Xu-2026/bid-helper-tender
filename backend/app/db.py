@@ -70,6 +70,39 @@ class Database:
                     FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    file_path TEXT DEFAULT '',
+                    mode TEXT DEFAULT 'example',
+                    style_profile TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS materials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    file_path TEXT DEFAULT '',
+                    file_type TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    parent_id INTEGER DEFAULT 0,
+                    title TEXT NOT NULL,
+                    level INTEGER DEFAULT 1,
+                    content TEXT DEFAULT '',
+                    gen_status TEXT DEFAULT '未生成',
+                    sort_order INTEGER DEFAULT 0,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+            """)
 
     # ---------- 项目 ----------
     def create_project(self, name: str, client: str = "", bid_date: str = "",
@@ -244,3 +277,135 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM compliance_checks WHERE project_id = ?", (project_id,)).fetchall()
             return {r["requirement_id"]: dict(r) for r in rows}
+
+    # ---------- 模板 ----------
+    def create_template(self, name: str, file_path: str, mode: str = "example") -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO templates (name, file_path, mode) VALUES (?, ?, ?)",
+                (name, file_path, mode))
+            return cur.lastrowid
+
+    def get_templates(self) -> List[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM templates ORDER BY id DESC").fetchall()
+            return [dict(r) for r in rows]
+
+    def get_template(self, template_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM templates WHERE id = ?", (template_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_template(self, template_id: int, **kwargs):
+        allowed = {"name", "file_path", "mode", "style_profile"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE templates SET {set_clause} WHERE id = ?",
+                         list(fields.values()) + [template_id])
+
+    def delete_template(self, template_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+
+    # ---------- 项目资料 ----------
+    def create_material(self, project_id: int, file_path: str, file_type: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO materials (project_id, file_path, file_type) VALUES (?, ?, ?)",
+                (project_id, file_path, file_type))
+            return cur.lastrowid
+
+    def get_materials(self, project_id: int) -> List[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM materials WHERE project_id = ? ORDER BY id DESC",
+                (project_id,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_material(self, material_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM materials WHERE id = ?", (material_id,)).fetchone()
+            return dict(row) if row else None
+
+    def delete_material(self, material_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM materials WHERE id = ?", (material_id,))
+
+    # ---------- 章节 ----------
+    def create_section(self, project_id: int, parent_id: int, title: str,
+                       level: int, sort_order: int) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO sections (project_id, parent_id, title, level, sort_order) VALUES (?, ?, ?, ?, ?)",
+                (project_id, parent_id, title, level, sort_order))
+            return cur.lastrowid
+
+    def get_sections(self, project_id: int) -> List[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM sections WHERE project_id = ? ORDER BY sort_order, id",
+                (project_id,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_section(self, section_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM sections WHERE id = ?", (section_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_section(self, section_id: int, **kwargs):
+        allowed = {"parent_id", "title", "level", "content", "gen_status", "sort_order"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE sections SET {set_clause} WHERE id = ?",
+                         list(fields.values()) + [section_id])
+
+    def delete_section(self, section_id: int):
+        """删除章节及其全部后代（parent_id 无自引用外键，递归收集后删除）。"""
+        def collect(conn, sid):
+            ids = [sid]
+            for row in conn.execute(
+                    "SELECT id FROM sections WHERE parent_id = ?", (sid,)).fetchall():
+                ids.extend(collect(conn, row[0]))
+            return ids
+        with self._connect() as conn:
+            ids = collect(conn, section_id)
+            conn.execute(
+                f"DELETE FROM sections WHERE id IN ({','.join('?' * len(ids))})", ids)
+
+    def delete_sections_by_project(self, project_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sections WHERE project_id = ?", (project_id,))
+
+    def get_sections_tree(self, project_id: int) -> List[dict]:
+        """嵌套章节树（children 键），同级按 sort_order 排序。"""
+        flat = self.get_sections(project_id)
+        nodes = {s["id"]: {**s, "children": []} for s in flat}
+        roots = []
+        for s in flat:
+            node = nodes[s["id"]]
+            parent = nodes.get(s["parent_id"])
+            (parent["children"] if parent else roots).append(node)
+        return roots
+
+    def get_sections_flat(self, project_id: int) -> List[dict]:
+        """先序遍历的扁平章节列表（写作/导出顺序，无 children 键）。"""
+        result = []
+
+        def walk(nodes):
+            for n in nodes:
+                result.append({k: v for k, v in n.items() if k != "children"})
+                walk(n["children"])
+        walk(self.get_sections_tree(project_id))
+        return result
