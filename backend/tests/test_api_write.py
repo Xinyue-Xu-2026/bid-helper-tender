@@ -84,3 +84,27 @@ def test_generate_section_error_strips_newline(client, monkeypatch):
 def test_generate_section_missing_404(client):
     pid = _project(client)
     assert client.get(f"/api/projects/{pid}/sections/999/generate").status_code == 404
+
+
+def test_generate_section_multiline_sse(client, monkeypatch):
+    pid = _project(client)
+    sid = client.post(f"/api/projects/{pid}/sections",
+                      json={"title": "1.1", "level": 2}).json()["id"]
+    monkeypatch.setattr("app.services.write_service.get_api_key", lambda: "sk-test")
+    monkeypatch.setattr("app.services.write_service.get_model", lambda: "kimi-k3")
+    monkeypatch.setattr("app.services.write_service.stream_section",
+                        lambda prompt, key, model: iter(["第一行\n第二行", "第三行"]))
+    r = client.get(f"/api/projects/{pid}/sections/{sid}/generate")
+    assert r.status_code == 200
+    assert "data: 第一行\ndata: 第二行" in r.text
+    stored = client.get(f"/api/projects/{pid}/sections").json()[0]
+    assert stored["content"] == "第一行\n第二行第三行"
+    assert stored["gen_status"] == "已生成"
+
+
+def test_generate_section_cross_project_404(client):
+    pid_a = _project(client)
+    pid_b = client.post("/api/projects", json={"name": "另一个项目"}).json()["id"]
+    sid = client.post(f"/api/projects/{pid_b}/sections",
+                      json={"title": "1.1", "level": 2}).json()["id"]
+    assert client.get(f"/api/projects/{pid_a}/sections/{sid}/generate").status_code == 404

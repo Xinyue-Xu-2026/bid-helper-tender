@@ -29,6 +29,12 @@ class SectionUpdate(BaseModel):
     sort_order: int | None = None
 
 
+def _sse_lines(text: str) -> str:
+    """把一段文本按 SSE 规范展开为多个 data: 行，多行正文不破坏事件分帧。"""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(f"data: {line}" for line in normalized.split("\n"))
+
+
 @router.get("/projects/{project_id}/sections")
 def list_sections(project_id: int, db: Database = Depends(get_db)):
     return db.get_sections_tree(project_id)
@@ -69,7 +75,10 @@ def generate_outline(project_id: int, db: Database = Depends(get_db)):
 def generate_section(project_id: int, section_id: int,
                      asset_ids: str = "", material_ids: str = "", req_ids: str = "",
                      db: Database = Depends(get_db)):
-    if not db.get_section(section_id):
+    section = db.get_section(section_id)
+    if not section:
+        raise HTTPException(404, "章节不存在")
+    if section["project_id"] != project_id:
         raise HTTPException(404, "章节不存在")
     svc = WriteService(db.db_path)
     q: queue.Queue = queue.Queue()
@@ -102,6 +111,6 @@ def generate_section(project_id: int, section_id: int,
             if item is None:
                 break
             event, data = item
-            yield f"event: {event}\ndata: {data}\n\n"
+            yield f"event: {event}\n{_sse_lines(data)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
