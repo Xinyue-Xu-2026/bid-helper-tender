@@ -12,7 +12,7 @@ if errorlevel 1 (
   echo 首次运行，正在安装后端依赖...
   python -m pip install -r requirements.txt
 )
-echo 后端启动中，3 秒后自动打开浏览器 http://127.0.0.1:8000（若未自动打开请手动访问该地址）
+echo 后端启动中，3 秒后自动打开浏览器 http://127.0.0.1:8000
 start "" cmd /c "ping -n 4 127.0.0.1 >nul & start http://127.0.0.1:8000"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 if errorlevel 1 (
