@@ -1,4 +1,5 @@
 import shutil
+from datetime import date
 from pathlib import Path
 
 from app import config
@@ -62,3 +63,143 @@ class BidService:
 
         self.db.replace_requirements(project_id, reqs)
         return {"requirements": reqs, "engine": engine, "warning": warning}
+
+
+# ---------- 商务标：项目维度的拟派人员/企业业绩勾选、证书警告、证书级到期明细 ----------
+
+from app.services.asset_service import normalize_date  # noqa: E402
+
+
+def _cert_expiry(cert: dict) -> str:
+    """证书有效期：键名同时接受"有效期"与"有效期至"（裁定），统一为 YYYY-MM-DD。"""
+    cert = cert or {}
+    return normalize_date(cert.get("有效期") or cert.get("有效期至") or "")
+
+
+def _cert_name(cert: dict) -> str:
+    return cert.get("证书名称") or cert.get("类型") or "证书"
+
+
+def cert_warnings(person_fields: dict, bid_date: str, today: date, days: int = 30) -> list:
+    """人员证书警告：有效期早于投标日 → expired（最高优先，不再判 soon）；
+    否则 0 <= (有效期 - today).days <= days → soon。解析失败/为空跳过。"""
+    warnings = []
+    bid = None
+    norm_bid = normalize_date(bid_date)
+    if norm_bid:
+        bid = date.fromisoformat(norm_bid)
+    for cert in (person_fields or {}).get("证书") or []:
+        if not isinstance(cert, dict):
+            continue
+        expiry = _cert_expiry(cert)
+        if not expiry:
+            continue
+        expiry_date = date.fromisoformat(expiry)
+        if bid and expiry_date < bid:
+            warnings.append({
+                "cert_name": _cert_name(cert),
+                "expiry": expiry,
+                "level": "expired",
+                "message": f"有效期 {expiry} 早于投标日 {norm_bid}",
+            })
+            continue
+        days_left = (expiry_date - today).days
+        if 0 <= days_left <= days:
+            warnings.append({
+                "cert_name": _cert_name(cert),
+                "expiry": expiry,
+                "level": "soon",
+                "days_left": days_left,
+                "message": f"剩余 {days_left} 天到期",
+            })
+    return warnings
+
+
+def get_bid_assets(db: Database, project_id: int) -> dict:
+    """设计文档 §5.1：已选人员（含 role 与证书警告）与已选业绩。项目存在性由路由层校验。"""
+    project = db.get_project(project_id)
+    bid_date = (project or {}).get("bid_date") or ""
+    today = date.today()
+    persons = []
+    for row in db.get_project_assets(project_id, asset_type="person"):
+        fields = row.get("fields") or {}
+        persons.append({
+            "asset_id": row["asset_id"],
+            "role": row.get("role") or "",
+            "name": row["name"],
+            "fields": fields,
+            "expiry_date": row.get("expiry_date") or "",
+            "cert_warnings": cert_warnings(fields, bid_date, today, days=30),
+        })
+    contracts = [
+        {"asset_id": row["asset_id"], "name": row["name"],
+         "fields": row.get("fields") or {}}
+        for row in db.get_project_assets(project_id, asset_type="contract")
+    ]
+    return {"persons": persons, "contracts": contracts}
+
+
+def save_bid_assets(db: Database, project_id: int, persons: list, contracts: list) -> None:
+    """校验后覆盖式保存勾选：asset_id 必须存在且类型匹配（persons→person，contracts→contract）。"""
+    person_ids = [p["asset_id"] for p in persons]
+    contract_ids = list(contracts)
+    found = {}
+    for aid in set(person_ids + contract_ids):
+        asset = db.get_asset(aid)
+        if asset:
+            found[aid] = asset
+    missing = sorted({aid for aid in person_ids + contract_ids if aid not in found})
+    if missing:
+        raise ValueError(f"资产不存在: {missing}")
+    mismatched = sorted(
+        {aid for aid in person_ids if found[aid]["type"] != "person"}
+        | {aid for aid in contract_ids if found[aid]["type"] != "contract"})
+    if mismatched:
+        raise ValueError(f"资产类型不匹配: {mismatched}")
+    db.replace_project_assets(project_id, persons, contracts)
+
+
+def expiring_detail(db: Database, days: int = 30) -> list:
+    """设计文档 §5.4：证书级到期明细。person 逐本证书一行；credit 用其 expiry_date。
+    仅含 0 <= days_left <= days，按 days_left 升序。"""
+    today = date.today()
+    rows = []
+    for asset in db.get_assets(type="person"):
+        certs = (asset.get("fields") or {}).get("证书") or []
+        for cert in certs:
+            if not isinstance(cert, dict):
+                continue
+            expiry = _cert_expiry(cert)
+            if not expiry:
+                continue
+            days_left = (date.fromisoformat(expiry) - today).days
+            if not 0 <= days_left <= days:
+                continue
+            rows.append({
+                "type": "person",
+                "asset_name": asset["name"],
+                "cert_type": cert.get("类型") or "",
+                "cert_name": _cert_name(cert),
+                "expiry_date": expiry,
+                "days_left": days_left,
+            })
+    for asset in db.get_assets(type="credit"):
+        raw = (asset.get("expiry_date") or "").strip()
+        if not raw:
+            continue
+        try:
+            d = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        days_left = (d - today).days
+        if not 0 <= days_left <= days:
+            continue
+        rows.append({
+            "type": "credit",
+            "asset_name": asset["name"],
+            "cert_type": "",
+            "cert_name": asset["name"],
+            "expiry_date": raw,
+            "days_left": days_left,
+        })
+    return sorted(rows, key=lambda r: r["days_left"])

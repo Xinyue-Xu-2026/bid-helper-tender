@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
-import { createProject, deleteProject, getExpiring, listProjects } from '../api'
+import { createProject, deleteProject, getExpiringDetail, listProjects } from '../api'
 
 const router = useRouter()
 const projects = ref([])
@@ -10,11 +10,9 @@ const expiring = ref([])
 const dialogVisible = ref(false)
 const form = ref({ name: '', client: '', bid_date: '', project_type: '服务', notes: '' })
 
-const TYPE_LABELS = { info: '企业信息', credit: '资信证书', person: '常用人员', material: '素材' }
-
 async function load() {
   projects.value = await listProjects()
-  expiring.value = await getExpiring(30)
+  expiring.value = await getExpiringDetail(30)
 }
 
 async function create() {
@@ -40,8 +38,10 @@ onMounted(load)
   <el-alert v-if="expiring.length" type="warning" :closable="false" style="margin-bottom: 16px">
     <template #title>
       以下证书/资质将在 30 天内到期：
-      <span v-for="a in expiring" :key="a.id" style="margin-right: 12px">
-        【{{ TYPE_LABELS[a.type] }}】{{ a.name }}（剩 {{ a.days_left }} 天）
+      <span v-for="(a, i) in expiring" :key="i" style="margin-right: 12px">
+        <template v-if="a.type === 'person'">【人员】{{ a.asset_name }} · {{ a.cert_type || a.cert_name }}</template>
+        <template v-else>【资信】{{ a.cert_name }}</template>
+        （剩 {{ a.days_left }} 天）
       </span>
     </template>
   </el-alert>

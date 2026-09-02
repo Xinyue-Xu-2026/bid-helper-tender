@@ -1,18 +1,17 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteRequirement, exportUrl, getProject, getRequirements,
   updateRequirement, uploadTender,
 } from '../api'
+import BidPanel from '../components/BidPanel.vue'
 import CompliancePanel from '../components/CompliancePanel.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
 
 const route = useRoute()
 const pid = Number(route.params.id)
-const router = useRouter()
 const project = ref({})
 const requirements = ref([])
 const filter = ref({ category: '', status: '', q: '' })
@@ -78,8 +77,6 @@ onBeforeUnmount(() => { if (es) es.close() })
 <template>
   <h2>{{ project.name }}</h2>
   <p v-if="project.client">招标单位：{{ project.client }}　投标日期：{{ project.bid_date }}</p>
-      <el-button type="success" @click="router.push(`/projects/${pid}/write`)"
-                 style="margin-bottom: 12px">进入编写工作台</el-button>
 
   <el-tabs>
     <el-tab-pane label="要求清单">
@@ -140,6 +137,9 @@ onBeforeUnmount(() => { if (es) es.close() })
     </el-tab-pane>
     <el-tab-pane label="资料与模板">
       <MaterialsPanel :project-id="pid" />
+    </el-tab-pane>
+    <el-tab-pane label="商务标">
+      <BidPanel :project-id="pid" :bid-date="project.bid_date" />
     </el-tab-pane>
   </el-tabs>
 </template>

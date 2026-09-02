@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from app import config
 
-ASSET_TYPES = ("info", "credit", "person", "material")
+ASSET_TYPES = ("info", "credit", "person", "material", "contract")
 
 
 class Database:
@@ -103,6 +103,61 @@ class Database:
                     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_assets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    asset_id INTEGER NOT NULL,
+                    role TEXT DEFAULT '',
+                    sort_order INTEGER DEFAULT 0,
+                    UNIQUE (project_id, asset_id),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+                )
+            """)
+        self._migrate_perfs_to_contracts()
+
+    def _migrate_perfs_to_contracts(self):
+        """一次性迁移：person.fields["业绩"] 数组 → contract 资产（幂等）。
+
+        contract 资产 name=项目名称，fields=业绩条目 + "项目经理"=人员姓名；
+        同（项目名称, 年份）合并（已有非空值优先），迁移后删除 person.fields 的"业绩"键。
+        迁移完成后 person 中不再有"业绩"键，重复执行自然为空操作。
+        """
+        persons = [a for a in self.get_assets(type="person")
+                   if isinstance((a.get("fields") or {}).get("业绩"), list)
+                   and a["fields"]["业绩"]]
+        if not persons:
+            return
+        persons.sort(key=lambda a: a["id"])  # 按创建顺序迁移：同项目合并时先建人员优先
+        existing = {}  # (项目名称, 年份) → contract 资产
+        for c in self.get_assets(type="contract"):
+            year = str((c.get("fields") or {}).get("年份", ""))
+            existing[(c["name"], year)] = c
+        for person in persons:
+            fields = dict(person["fields"])
+            perfs = fields.pop("业绩")
+            for perf in perfs:
+                if not isinstance(perf, dict):
+                    continue
+                entry = {k: v for k, v in perf.items() if v not in (None, "")}
+                name = str(entry.pop("项目名称", "") or "").strip()
+                if not name:
+                    continue
+                entry.setdefault("项目经理", person["name"])
+                year = str(entry.get("年份", ""))
+                target = existing.get((name, year))
+                if target:
+                    merged = dict(target.get("fields") or {})
+                    for k, v in entry.items():
+                        if merged.get(k) in (None, ""):
+                            merged[k] = v
+                    self.update_asset(target["id"], fields=merged)
+                else:
+                    new_id = self.create_asset("contract", name, entry)
+                    existing[(name, year)] = {
+                        "id": new_id, "name": name, "fields": entry}
+            self.update_asset(person["id"], fields=fields)
 
     # ---------- 项目 ----------
     def create_project(self, name: str, client: str = "", bid_date: str = "",
@@ -222,7 +277,7 @@ class Database:
             d["fields"] = {}
         return d
 
-    def get_assets(self, type: str = None) -> List[dict]:
+    def get_assets(self, type: Optional[str] = None) -> List[dict]:
         sql = "SELECT * FROM assets"
         params: list = []
         if type:
@@ -271,6 +326,44 @@ class Database:
                 a["days_left"] = (d - today).days
                 results.append(a)
         return sorted(results, key=lambda x: x["days_left"])
+
+    # ---------- 商务标勾选（project_assets） ----------
+    def get_project_assets(self, project_id: int, asset_type: Optional[str] = None) -> List[dict]:
+        """项目已勾选的资产（JOIN assets，fields 已解析为 dict），按 sort_order、id 升序。"""
+        sql = """
+            SELECT pa.id, pa.project_id, pa.asset_id, pa.role, pa.sort_order,
+                   a.name, a.type, a.fields, a.expiry_date
+            FROM project_assets pa
+            JOIN assets a ON a.id = pa.asset_id
+            WHERE pa.project_id = ?
+        """
+        params: list = [project_id]
+        if asset_type:
+            sql += " AND a.type = ?"
+            params.append(asset_type)
+        sql += " ORDER BY pa.sort_order, pa.id"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return [self._asset_row(r) for r in conn.execute(sql, params).fetchall()]
+
+    def replace_project_assets(self, project_id: int, persons: list, contracts: list):
+        """在单个事务内先删后插项目商务标勾选。persons=[{asset_id, role}]，
+        contracts=[asset_id]（role 置 ''）；sort_order 按传入顺序从 0 连续递增。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM project_assets WHERE project_id = ?", (project_id,))
+            sort_order = 0
+            for p in persons:
+                conn.execute(
+                    "INSERT INTO project_assets (project_id, asset_id, role, sort_order) "
+                    "VALUES (?, ?, ?, ?)",
+                    (project_id, p["asset_id"], p.get("role") or "", sort_order))
+                sort_order += 1
+            for asset_id in contracts:
+                conn.execute(
+                    "INSERT INTO project_assets (project_id, asset_id, role, sort_order) "
+                    "VALUES (?, ?, '', ?)",
+                    (project_id, asset_id, sort_order))
+                sort_order += 1
 
     # ---------- 废标核对 ----------
     def set_check(self, project_id: int, requirement_id: int, checked: bool):
