@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.db import Database
 from app.deps import get_db
@@ -16,18 +16,39 @@ def list_templates(db: Database = Depends(get_db)):
 
 
 @router.post("")
-def upload_template(name: str, file: UploadFile, db: Database = Depends(get_db)):
-    if not (file.filename or "").lower().endswith(".docx"):
-        raise HTTPException(400, "仅支持 .docx 模板")
+def upload_template(
+    name: str | None = None,
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    db: Database = Depends(get_db),
+):
+    uploads: list[UploadFile] = list(files or [])
+    if file is not None:
+        uploads.append(file)
+    if not uploads:
+        raise HTTPException(400, "未收到文件，请使用 files 字段上传")
+
     svc = WriteService(db.db_path)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-        tmp.write(file.file.read())
-        tmp_path = tmp.name
-    try:
-        tid = svc.import_template(tmp_path, name)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-    return {"id": tid}
+    items: list[dict] = []
+    errors: list[dict] = []
+    for up in uploads:
+        filename = up.filename or ""
+        if not filename.lower().endswith(".docx"):
+            errors.append({"filename": filename, "reason": "仅支持 .docx 模板"})
+            continue
+        tpl_name = name or Path(filename).stem or "未命名模板"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+            tmp.write(up.file.read())
+            tmp_path = tmp.name
+        try:
+            tid = svc.import_template(tmp_path, tpl_name)
+        except Exception as exc:
+            errors.append({"filename": filename, "reason": str(exc)})
+            continue
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        items.append({"id": tid})
+    return {"items": items, "errors": errors}
 
 
 @router.post("/{template_id}/analyze")

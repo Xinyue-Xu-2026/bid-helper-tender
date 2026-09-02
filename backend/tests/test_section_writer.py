@@ -72,3 +72,63 @@ def test_stream_section_platform_key_temperature():
 def test_stream_section_missing_key():
     with pytest.raises(LLMParseError, match="未配置 API Key"):
         list(stream_section("p", "", "kimi-k3", client=FakeStreamClient(["x"])))
+
+
+class FakeTruncatingClient:
+    """前两次 finish_reason=length 截断，第三次正常结束；记录每次 create 的 messages。"""
+
+    def __init__(self, rounds):
+        self.rounds = rounds  # [([chunks], finish_reason), ...]
+        self.calls = []
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        chunks, finish = self.rounds[min(len(self.calls) - 1, len(self.rounds) - 1)]
+
+        def gen():
+            for text in chunks:
+                delta = type("D", (), {"content": text})()
+                yield type("C", (), {"choices": [type("CC", (), {"delta": delta})()]})()
+            delta = type("D", (), {"content": None})()
+            yield type("C", (), {"choices": [type("CC", (),
+                                              {"delta": delta, "finish_reason": finish})()]})()
+        return gen()
+
+
+def test_stream_section_continues_on_length_truncation():
+    client = FakeTruncatingClient([
+        (["前半段"], "length"),
+        (["后半段"], "stop"),
+    ])
+    out = list(stream_section("p", "sk-test", "kimi-k3", client=client))
+    assert out == ["前半段", "后半段"]
+    assert len(client.calls) == 2
+    # 续写请求携带已生成内容作为 assistant 消息
+    msgs = client.calls[1]["messages"]
+    assert msgs[-2] == {"role": "assistant", "content": "前半段"}
+    assert msgs[-1]["role"] == "user"
+    assert client.calls[0]["max_tokens"] == 16384
+
+
+def test_stream_section_continuation_capped_at_two():
+    client = FakeTruncatingClient([
+        (["a"], "length"), (["b"], "length"), (["c"], "length"), (["d"], "stop"),
+    ])
+    out = list(stream_section("p", "sk-test", "kimi-k3", client=client))
+    assert out == ["a", "b", "c"]  # 最多续 2 次，共 3 轮
+    assert len(client.calls) == 3
+
+
+def test_build_section_prompt_target_chars():
+    p = build_section_prompt("1.1 项目背景", [], [], "", "", target_chars=1500)
+    assert "本章不少于 1500 字，与参考模板篇幅相当" in p
+    p2 = build_section_prompt("标题", [], [], "", "")
+    assert "篇幅要求" not in p2

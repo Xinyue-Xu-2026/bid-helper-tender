@@ -3,33 +3,88 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   analyzeTemplate, deleteMaterial, deleteTemplate, listMaterials,
-  listTemplates, uploadMaterial, uploadTemplate,
+  listTemplates, uploadMaterials, uploadTemplates,
 } from '../api'
 
 const props = defineProps({ projectId: Number })
 const templates = ref([])
 const materials = ref([])
 const analyzingId = ref(null)
+const uploading = ref(false)
 
 async function load() {
   templates.value = await listTemplates()
   materials.value = await listMaterials(props.projectId)
 }
 
-async function onUploadTemplate({ file }) {
-  const { id } = await uploadTemplate(file)
-  load()
-  analyzingId.value = id
+// el-upload 的 change 事件按文件逐个触发，这里用去抖把一次选择的多个文件攒成一批上传
+function batchUpload(uploadFile, pending, flush) {
+  pending.files.push(uploadFile.raw)
+  clearTimeout(pending.timer)
+  pending.timer = setTimeout(flush, 100)
+}
+
+function reportErrors(errors) {
+  if (!errors?.length) return
+  ElMessage.warning('部分文件上传失败：' + errors.map(e => `${e.filename}（${e.reason}）`).join('；'))
+}
+
+const templateBatch = { files: [], timer: null }
+const templateUploadRef = ref()
+function onTemplateChange(uploadFile) {
+  batchUpload(uploadFile, templateBatch, flushTemplateUpload)
+}
+async function flushTemplateUpload() {
+  const files = templateBatch.files
+  templateBatch.files = []
+  templateUploadRef.value?.clearFiles()
+  if (!files.length) return
+  uploading.value = true
   try {
-    await analyzeTemplate(id)
-    ElMessage.success('模板已上传，风格画像分析完成')
-  } catch {
-    ElMessage.warning('模板已上传，画像分析失败（可点击「分析/重试」）')
-  } finally {
-    analyzingId.value = null
+    const r = await uploadTemplates(files)
+    reportErrors(r.errors)
+    const items = r.items || []
+    if (items.length) ElMessage.success(`已上传 ${items.length} 个模板`)
     load()
+    // 逐个做风格画像分析
+    for (const t of items) {
+      if (!t?.id) continue
+      analyzingId.value = t.id
+      try {
+        await analyzeTemplate(t.id)
+      } catch {
+        ElMessage.warning(`模板「${t.name || t.id}」画像分析失败（可点击「分析/重试」）`)
+      } finally {
+        analyzingId.value = null
+        load()
+      }
+    }
+  } finally {
+    uploading.value = false
   }
 }
+
+const materialBatch = { files: [], timer: null }
+const materialUploadRef = ref()
+function onMaterialChange(uploadFile) {
+  batchUpload(uploadFile, materialBatch, flushMaterialUpload)
+}
+async function flushMaterialUpload() {
+  const files = materialBatch.files
+  materialBatch.files = []
+  materialUploadRef.value?.clearFiles()
+  if (!files.length) return
+  uploading.value = true
+  try {
+    const r = await uploadMaterials(props.projectId, files)
+    reportErrors(r.errors)
+    if (r.items?.length) ElMessage.success(`已上传 ${r.items.length} 份资料`)
+    load()
+  } finally {
+    uploading.value = false
+  }
+}
+
 async function onAnalyze(t) {
   analyzingId.value = t.id
   try {
@@ -43,7 +98,6 @@ async function onAnalyze(t) {
   }
 }
 async function onDeleteTemplate(t) { await deleteTemplate(t.id); load() }
-async function onUploadMaterial({ file }) { await uploadMaterial(props.projectId, file); load() }
 async function onDeleteMaterial(m) { await deleteMaterial(m.id); load() }
 
 onMounted(load)
@@ -53,8 +107,9 @@ onMounted(load)
   <el-row :gutter="24">
     <el-col :span="12">
       <h4>标书模板（全局库，导出时选用）</h4>
-      <el-upload :show-file-list="false" accept=".docx" :http-request="onUploadTemplate">
-        <el-button>上传模板 (.docx)</el-button>
+      <el-upload ref="templateUploadRef" :show-file-list="false" accept=".docx" multiple
+                 :auto-upload="false" :on-change="onTemplateChange">
+        <el-button :loading="uploading">上传模板 (.docx，可多选)</el-button>
       </el-upload>
       <el-table :data="templates" style="margin-top: 12px">
         <el-table-column prop="name" label="名称" />
@@ -74,8 +129,9 @@ onMounted(load)
     </el-col>
     <el-col :span="12">
       <h4>项目资料（PDF/Word/Excel/图片）</h4>
-      <el-upload :show-file-list="false" :http-request="onUploadMaterial">
-        <el-button>上传资料</el-button>
+      <el-upload ref="materialUploadRef" :show-file-list="false" multiple
+                 :auto-upload="false" :on-change="onMaterialChange">
+        <el-button :loading="uploading">上传资料（可多选）</el-button>
       </el-upload>
       <el-table :data="materials" style="margin-top: 12px">
         <el-table-column prop="file_type" label="类型" width="80" />
