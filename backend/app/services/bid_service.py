@@ -203,3 +203,95 @@ def expiring_detail(db: Database, days: int = 30) -> list:
             "days_left": days_left,
         })
     return sorted(rows, key=lambda r: r["days_left"])
+
+
+# ---------- 模板式商务标导出：数据组装 ----------
+
+# 合同 fields["类型"] → 服务类型表述
+SERVICE_TYPE_MAP = {
+    "跟踪": "跟踪审计",
+    "结算": "结算审核",
+    "编标": "编标（清单及控制价编制）",
+    "审标": "审标",
+    "水利审计": "水利审计",
+    "中标通知书": "中标",
+}
+
+
+def service_type_label(contract_fields: dict) -> str:
+    t = str((contract_fields or {}).get("类型") or "").strip()
+    return SERVICE_TYPE_MAP.get(t, t)
+
+
+def _cert_qualifications(fields: dict) -> str:
+    """执业资格列：逐本证书 "{专业}专业{类型}"（无专业仅类型），多本换行。"""
+    parts = []
+    for cert in (fields or {}).get("证书") or []:
+        if not isinstance(cert, dict):
+            continue
+        ctype = str(cert.get("类型") or "").strip()
+        if not ctype:
+            continue
+        major = str(cert.get("专业") or "").strip()
+        parts.append(f"{major}专业{ctype}" if major else ctype)
+    return "\n".join(parts)
+
+
+def assemble_bid_template_data(db: Database, person_picks: list,
+                               contract_picks: list) -> dict:
+    """模板式商务标导出数据组装。person_picks: [{asset_id, is_lead}]；
+    contract_picks: [{asset_id, section}]。返回 {"a".."g": 各表数据行（不含表头）}。"""
+    persons = []
+    for pick in person_picks or []:
+        asset = db.get_asset(pick.get("asset_id"))
+        if asset and asset.get("type") == "person":
+            persons.append({"name": asset["name"], "fields": asset.get("fields") or {},
+                            "is_lead": bool(pick.get("is_lead"))})
+    persons.sort(key=lambda p: not p["is_lead"])  # 负责人排最前（稳定排序）
+
+    contracts = []
+    for pick in contract_picks or []:
+        asset = db.get_asset(pick.get("asset_id"))
+        if asset and asset.get("type") == "contract":
+            contracts.append({"name": asset["name"], "fields": asset.get("fields") or {},
+                              "section": pick.get("section")})
+
+    def person_row(label: str, p: dict) -> list:
+        return [label, p["name"], str(p["fields"].get("职称") or ""), "",
+                _cert_qualifications(p["fields"])]
+
+    lead = next((p for p in persons if p["is_lead"]), None)
+    table_a, table_d = [], []
+    for i, p in enumerate(persons, 1):
+        if lead is not None and p is lead:
+            table_a.append(person_row("1.项目负责人", p))
+        else:
+            table_a.append(person_row(f"{i}.项目组其他人员", p))
+    for j, p in enumerate([p for p in persons if p is not lead], 1):
+        table_d.append(person_row(f"{j}.项目组其他人员", p))
+
+    def perf5(i: int, c: dict) -> list:
+        return [str(i), c["name"], str(c["fields"].get("委托单位") or ""), "",
+                f"提供{c['name']}的{service_type_label(c['fields'])}服务"]
+
+    def perf7(i: int, c: dict) -> list:
+        return [str(i), c["name"], str(c["fields"].get("委托单位") or ""),
+                str(c["fields"].get("签订日期") or ""), "",
+                service_type_label(c["fields"]), ""]
+
+    table_e = [perf5(i, c) for i, c in enumerate(contracts, 1)]
+    table_f = [perf7(i, c) for i, c in enumerate(
+        [c for c in contracts if c["section"] == 1], 1)]
+    table_g = [perf7(i, c) for i, c in enumerate(
+        [c for c in contracts if c["section"] == 2], 1)]
+
+    lead_contracts = []
+    if lead is not None:
+        lead_contracts = [
+            c for c in contracts
+            if str(c["fields"].get("项目负责人") or "").strip() == lead["name"]]
+    table_b = [perf5(i, c) for i, c in enumerate(lead_contracts, 1)]
+    table_c = [perf7(i, c) for i, c in enumerate(lead_contracts, 1)]
+
+    return {"a": table_a, "b": table_b, "c": table_c, "d": table_d,
+            "e": table_e, "f": table_f, "g": table_g}

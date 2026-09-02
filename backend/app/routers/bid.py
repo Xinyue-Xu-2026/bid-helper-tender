@@ -8,7 +8,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from app import config
 from app.core.bid_exporter import build_bid_docx, build_bid_xlsx
+from app.core.bid_template_exporter import build_bid_docx_from_template
 from app.db import Database
 from app.deps import get_db
 from app.services import bid_service
@@ -24,6 +26,21 @@ class PersonPick(BaseModel):
 class BidAssetsIn(BaseModel):
     persons: list[PersonPick] = []
     contracts: list[int] = []
+
+
+class TemplatePersonPick(BaseModel):
+    asset_id: int
+    is_lead: bool = False
+
+
+class TemplateContractPick(BaseModel):
+    asset_id: int
+    section: int = 1
+
+
+class BidTemplateExportIn(BaseModel):
+    persons: list[TemplatePersonPick] = []
+    contracts: list[TemplateContractPick] = []
 
 
 def _get_project_or_404(db: Database, project_id: int) -> dict:
@@ -73,5 +90,33 @@ def export_bid_assets(project_id: int, background_tasks: BackgroundTasks,
     return FileResponse(
         str(dest),
         media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=utf-8''{filename}"},
+    )
+
+
+@router.post("/projects/{project_id}/bid-assets/export-template")
+def export_bid_template(project_id: int, body: BidTemplateExportIn,
+                        background_tasks: BackgroundTasks,
+                        db: Database = Depends(get_db)):
+    """模板式商务标导出：以 data/商务标模板.docx 为底稿填充两节表格。"""
+    project = _get_project_or_404(db, project_id)
+    if not body.persons and not body.contracts:
+        raise HTTPException(422, "请先勾选人员或业绩")
+    template = config.BID_TEMPLATE_PATH
+    if not template.exists():
+        raise HTTPException(503, "商务标模板未配置（data/商务标模板.docx 缺失）")
+    data = bid_service.assemble_bid_template_data(
+        db,
+        [p.model_dump() for p in body.persons],
+        [c.model_dump() for c in body.contracts],
+    )
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project["name"])
+    dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_商务标.docx"
+    build_bid_docx_from_template(str(template), str(dest), data)
+    background_tasks.add_task(Path(dest).unlink, missing_ok=True)
+    filename = quote(f"{project['name']}_商务标.docx")
+    return FileResponse(
+        str(dest),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f"attachment; filename*=utf-8''{filename}"},
     )

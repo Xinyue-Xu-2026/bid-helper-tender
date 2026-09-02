@@ -43,19 +43,21 @@ export const uploadAssetFile = (id, file) => {
   fd.append('file', file)
   return api.post(`/assets/${id}/file`, fd).then(r => r.data)
 }
-export const importAssets = (type, file) => {
+export const importAssets = (type, file, subtype) => {
   const fd = new FormData()
   fd.append('file', file)
-  return api.post(`/assets/import`, fd, { params: { type } }).then(r => r.data)
+  const params = { type }
+  if (subtype) params.subtype = subtype
+  return api.post(`/assets/import`, fd, { params }).then(r => r.data)
 }
 export const getExpiring = (days = 30) => api.get('/assets/expiring', { params: { days } }).then(r => r.data)
 
 // 资产字段配置：{ person: [{ key, type, options }], contract: [...] }
 export const getFieldConfig = () => api.get('/assets/field-config').then(r => r.data)
 export const saveFieldConfig = (data) => api.put('/assets/field-config', data).then(r => r.data)
-// 下载 Excel 导入模板（type: person | contract），浏览器直接触发下载
-export const downloadImportTemplate = (type) =>
-  window.open(`/api/assets/import-template?type=${type}`, '_blank')
+// 下载 Excel 导入模板（type: person | contract；contract 需带 subtype 子类型，如 ?type=contract&subtype=编标）
+export const downloadImportTemplate = (type, subtype) =>
+  window.open(`/api/assets/import-template?type=${type}${subtype ? `&subtype=${encodeURIComponent(subtype)}` : ''}`, '_blank')
 
 // 废标核对
 export const getCompliance = (pid) => api.get(`/projects/${pid}/compliance`).then(r => r.data)
@@ -126,5 +128,9 @@ export const mimicDownloadUrl = (pid, file) =>
 export const getBidAssets = (pid) => api.get(`/projects/${pid}/bid-assets`).then(r => r.data)
 export const saveBidAssets = (pid, data) => api.put(`/projects/${pid}/bid-assets`, data).then(r => r.data)
 export const bidExportUrl = (pid, format) => `/api/projects/${pid}/bid-assets/export?format=${format}`
+// 商务标模板导出：payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}] }
+// 返回完整响应（blob + headers），调用方从 Content-Disposition 取文件名
+export const exportBidTemplate = (pid, payload) =>
+  api.post(`/projects/${pid}/bid-assets/export-template`, payload, { responseType: 'blob' })
 // 证书级到期明细（首页提醒条）：[{ type, asset_name, cert_type, cert_name, expiry_date, days_left }]
 export const getExpiringDetail = (days = 30) => api.get('/assets/expiring-detail', { params: { days } }).then(r => r.data)

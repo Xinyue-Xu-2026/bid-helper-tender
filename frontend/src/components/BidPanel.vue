@@ -1,7 +1,9 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { bidExportUrl, getBidAssets, getFieldConfig, listAssets, saveBidAssets } from '../api'
+import {
+  bidExportUrl, exportBidTemplate, getBidAssets, getFieldConfig, listAssets, saveBidAssets,
+} from '../api'
 
 const props = defineProps({ projectId: Number, bidDate: String })
 
@@ -15,8 +17,99 @@ const personTable = ref(null)
 const contractTable = ref(null)
 const loading = ref(false)
 const saving = ref(false)
+const exporting = ref(false)
 
 const selectedPersonIds = computed(() => new Set(selectedPersons.value.map(r => r.id)))
+const selectedContractIds = computed(() => new Set(selectedContracts.value.map(r => r.id)))
+
+// 人员姓名多选：与表格勾选联动（value = 资产 id）
+const personPick = ref([])
+// 项目负责人：仅一名，且只能从未勾选外的已勾选行中选择
+const leadPersonId = ref(null)
+
+function onPersonPick(ids) {
+  const want = new Set(ids)
+  for (const row of persons.value) {
+    const should = want.has(row.id)
+    if (should !== selectedPersonIds.value.has(row.id))
+      personTable.value?.toggleRowSelection(row, should)
+  }
+}
+
+function onPersonSelectionChange(rows) {
+  selectedPersons.value = rows
+  personPick.value = rows.map(r => r.id)
+  if (leadPersonId.value && !rows.some(r => r.id === leadPersonId.value)) leadPersonId.value = null
+}
+
+// ---------- 业绩筛选 ----------
+const CONTRACT_TYPE_OPTIONS = ['编标', '审标', '跟踪', '结算', '水利审计', '中标通知书']
+const typeFilter = ref([])
+const keyword = ref('')
+const yearFilter = ref('')
+const amountMin = ref(null)
+const amountMax = ref(null)
+
+// 年份选项：fields['年份'] 去重，前 4 位数字降序
+const contractYearOptions = computed(() => {
+  const years = new Set()
+  for (const c of contracts.value) {
+    const y = String(c.fields?.['年份'] ?? '').trim()
+    if (y) years.add(y)
+  }
+  return [...years].sort((a, b) => {
+    const ma = a.match(/^(\d{4})/)
+    const mb = b.match(/^(\d{4})/)
+    if (ma && mb) return Number(mb[1]) - Number(ma[1])
+    if (ma) return -1
+    if (mb) return 1
+    return a.localeCompare(b)
+  })
+})
+
+// 金额解析：fields['工程造价（万元）'] 取首个浮点数；「合同金额」旧字段兜底；解析不出返回 null
+function parseAmount(c) {
+  const raw = c.fields?.['工程造价（万元）'] ?? c.fields?.['合同金额'] ?? ''
+  const m = String(raw).match(/-?\d+(?:\.\d+)?/)
+  return m ? Number(m[0]) : null
+}
+
+const filteredContracts = computed(() => {
+  const kw = keyword.value.trim()
+  const useAmount = amountMin.value != null || amountMax.value != null
+  return contracts.value.filter(c => {
+    if (typeFilter.value.length && !typeFilter.value.includes(c.fields?.['类型'])) return false
+    if (kw && !(c.name || '').includes(kw)
+        && !String(c.fields?.['委托单位'] ?? '').includes(kw)) return false
+    if (yearFilter.value && String(c.fields?.['年份'] ?? '').trim() !== yearFilter.value) return false
+    if (useAmount) {
+      const amt = parseAmount(c)
+      if (amt === null) return false
+      if (amountMin.value != null && amt < amountMin.value) return false
+      if (amountMax.value != null && amt > amountMax.value) return false
+    }
+    return true
+  })
+})
+
+// ---------- 业绩表格分页：只渲染当前页，避免大数据量 DOM 爆炸 ----------
+const contractPage = ref(1)
+const contractPageSize = ref(50)
+const pagedContracts = computed(() => {
+  const start = (contractPage.value - 1) * contractPageSize.value
+  return filteredContracts.value.slice(start, start + contractPageSize.value)
+})
+// 筛选条件变化时回到第 1 页（勾选靠 row-key + reserve-selection 跨页保留）
+watch([typeFilter, keyword, yearFilter, amountMin, amountMax],
+  () => { contractPage.value = 1 }, { deep: true })
+
+// ---------- 小节归属（仅本次导出用，默认小节1） ----------
+const sections = ref({})
+
+function onContractSelectionChange(rows) {
+  selectedContracts.value = rows
+  for (const r of rows) if (!sections.value[r.id]) sections.value[r.id] = 1
+}
 
 // 企业业绩列：复用 AssetsView 的 contractCols 逻辑——字段配置驱动，未配置时用默认列
 const contractCols = computed(() =>
@@ -107,15 +200,54 @@ async function onSave() {
   }
 }
 
+// 导出商务标（模板）：is_lead / section 仅本次导出使用，不写入保存载荷
+async function onExportTemplate() {
+  exporting.value = true
+  try {
+    const payload = {
+      persons: selectedPersons.value.map(r => ({
+        asset_id: r.id, is_lead: r.id === leadPersonId.value,
+      })),
+      contracts: selectedContracts.value.map(r => ({
+        asset_id: r.id, section: Number(sections.value[r.id] || 1),
+      })),
+    }
+    const r = await exportBidTemplate(props.projectId, payload)
+    const cd = r.headers['content-disposition'] || ''
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="?([^";]+)"?/)
+    const filename = m ? decodeURIComponent(m[1]) : '商务标.docx'
+    const url = URL.createObjectURL(r.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    // blob 错误响应：转 json 读 detail 弹错（拦截器的通用提示不含 detail）
+    if (e.response?.data instanceof Blob) {
+      try {
+        const detail = JSON.parse(await e.response.data.text())?.detail
+        if (detail) ElMessage.error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+      } catch { /* 忽略解析失败 */ }
+    }
+  } finally {
+    exporting.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
 <template>
   <div v-loading="loading">
     <h3>拟派人员</h3>
-    <el-table ref="personTable" :data="persons" max-height="40vh"
-              @selection-change="v => selectedPersons = v">
-      <el-table-column type="selection" width="45" />
+    <el-select v-model="personPick" multiple filterable placeholder="按姓名搜索并添加人员"
+               style="width: 100%; margin-bottom: 8px" @change="onPersonPick">
+      <el-option v-for="p in persons" :key="p.id" :label="p.name" :value="p.id" />
+    </el-select>
+    <el-table ref="personTable" :data="persons" row-key="id" max-height="40vh"
+              @selection-change="onPersonSelectionChange">
+      <el-table-column type="selection" width="45" reserve-selection />
       <el-table-column prop="name" label="姓名" width="110" />
       <el-table-column label="职称" width="140">
         <template #default="{ row }">{{ row.fields['职称'] || '-' }}</template>
@@ -131,6 +263,13 @@ onMounted(load)
           <span v-else>-</span>
         </template>
       </el-table-column>
+      <el-table-column label="负责人" width="70" align="center">
+        <template #default="{ row }">
+          <el-radio-group v-model="leadPersonId">
+            <el-radio :value="row.id" :disabled="!selectedPersonIds.has(row.id)" />
+          </el-radio-group>
+        </template>
+      </el-table-column>
       <el-table-column label="拟派岗位" width="180">
         <template #default="{ row }">
           <el-input v-model="roles[row.id]" size="small" placeholder="如：项目经理"
@@ -140,17 +279,49 @@ onMounted(load)
     </el-table>
 
     <h3 style="margin-top: 24px">企业业绩</h3>
-    <el-table ref="contractTable" :data="contracts" max-height="40vh"
-              @selection-change="v => selectedContracts = v">
-      <el-table-column type="selection" width="45" />
+    <el-space style="margin-bottom: 8px" wrap>
+      <el-select v-model="typeFilter" multiple collapse-tags placeholder="合同类型"
+                 style="width: 220px">
+        <el-option v-for="t in CONTRACT_TYPE_OPTIONS" :key="t" :label="t" :value="t" />
+      </el-select>
+      <el-input v-model="keyword" clearable placeholder="关键词（项目名称/委托单位）"
+                style="width: 220px" />
+      <el-select v-model="yearFilter" clearable placeholder="年份" style="width: 130px">
+        <el-option v-for="y in contractYearOptions" :key="y" :label="y" :value="y" />
+      </el-select>
+      <el-input-number v-model="amountMin" :controls="false" placeholder="金额下限（万元）"
+                       style="width: 140px" />
+      <span>-</span>
+      <el-input-number v-model="amountMax" :controls="false" placeholder="金额上限（万元）"
+                       style="width: 140px" />
+    </el-space>
+    <el-table ref="contractTable" :data="pagedContracts" row-key="id" max-height="40vh"
+              @selection-change="onContractSelectionChange">
+      <el-table-column type="selection" width="45" reserve-selection />
       <el-table-column prop="name" label="项目名称" min-width="200" show-overflow-tooltip />
       <el-table-column v-for="f in contractCols" :key="f.key" :label="f.key" min-width="120">
         <template #default="{ row }">{{ displayField(row.fields[f.key]) || '-' }}</template>
       </el-table-column>
+      <el-table-column label="小节" width="110">
+        <template #default="{ row }">
+          <el-select :model-value="sections[row.id] ?? 1" size="small"
+                     :disabled="!selectedContractIds.has(row.id)"
+                     @update:model-value="v => sections[row.id] = v">
+            <el-option :value="1" label="小节1" />
+            <el-option :value="2" label="小节2" />
+          </el-select>
+        </template>
+      </el-table-column>
     </el-table>
+    <el-pagination v-model:current-page="contractPage" v-model:page-size="contractPageSize"
+                   :total="filteredContracts.length" :page-sizes="[20, 50, 100]"
+                   layout="total, sizes, prev, pager, next"
+                   style="margin-top: 8px; justify-content: flex-end" />
 
     <el-space style="margin-top: 16px">
       <el-button type="primary" :loading="saving" @click="onSave">保存勾选</el-button>
+      <el-button type="primary" plain :loading="exporting"
+                 @click="onExportTemplate">导出商务标（模板）</el-button>
       <el-button tag="a" :href="bidExportUrl(projectId, 'xlsx')" target="_blank">导出 Excel</el-button>
       <el-button tag="a" :href="bidExportUrl(projectId, 'docx')" target="_blank">导出 Word</el-button>
     </el-space>
