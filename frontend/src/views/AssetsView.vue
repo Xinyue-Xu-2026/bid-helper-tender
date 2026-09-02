@@ -6,6 +6,7 @@ import {
   confirmImport, createAsset, deleteAsset, downloadImportTemplate, getFieldConfig,
   getImportSettings, importAssets, listAssets, scanImport, updateAsset, uploadAssetFile,
 } from '../api'
+import { CONTRACT_SUBTYPES } from '../constants/contractSubtypes'
 
 const router = useRouter()
 const tab = ref('person')
@@ -32,19 +33,7 @@ const visibleTabs = TABS.filter(t => !t.hidden)
 
 const currentTab = () => TABS.find(t => t.key === tab.value)
 
-// ---------- 合同业绩二级页签：子类型与字段契约（键名与后端约定，勿改） ----------
-const CONTRACT_SUBTYPES = [
-  { key: '编标', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
-      '费率', '项目负责人', '工程造价（万元）', '合同扫描件', 'OA系统', '备注'] },
-  { key: '审标', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
-      '费率', '项目负责人', '工程造价（万元）', '建筑面积', '合同扫描件', 'OA系统', '备注'] },
-  { key: '跟踪', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
-      '费率', '咨询类型', '项目负责人', '工程造价（万元）', '建筑面积', '合同扫描件', 'OA系统', '备注'] },
-  { key: '结算', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
-      '费率', '项目负责人', '工程造价（万元）', '建筑面积', '审计委托书', '合同扫描件', 'OA系统', '备注'] },
-  { key: '水利审计', fields: ['委托单位', '份数', '签订日期', '文号', '委托书编号', '合同编号', '批复', '备注'] },
-  { key: '中标通知书', fields: ['招标人', '中标金额', '份数', '日期', '编号', '合同签订情况', '备注'] },
-]
+// ---------- 合同业绩二级页签：子类型定义见 constants/contractSubtypes.js（与 BidPanel 共用） ----------
 const contractSubtab = ref(CONTRACT_SUBTYPES[0].key)
 const currentSubtype = computed(() =>
   CONTRACT_SUBTYPES.find(s => s.key === contractSubtab.value) || CONTRACT_SUBTYPES[0])
