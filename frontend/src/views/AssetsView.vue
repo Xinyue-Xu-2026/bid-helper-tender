@@ -18,7 +18,7 @@ const TABS = [
   { key: 'credit', label: '资信证书', nameLabel: '证书名称',
     fieldDefs: ['发证机关', '发证日期'], hasExpiry: true, hasImport: true },
   { key: 'person', label: '常用人员', nameLabel: '姓名',
-    fieldDefs: ['身份证号', '职称', '联系方式', '证书名称'], hasExpiry: true, hasImport: true },
+    fieldDefs: ['部门', '职称', '联系方式'], hasExpiry: true, hasImport: true },
   { key: 'contract', label: '合同业绩', nameLabel: '项目名称',
     fieldDefs: [], hasExpiry: false, hasImport: true },
   { key: 'info', label: '企业信息', nameLabel: '项目',
@@ -32,7 +32,7 @@ const currentTab = () => TABS.find(t => t.key === tab.value)
 // ---------- 字段配置（设置页维护，驱动人员/合同业绩的列与表单） ----------
 const fieldConfig = ref({ person: [], contract: [] })
 
-const DEFAULT_CERT_TYPES = ['一级造价师', '二级造价师', '一级建造师', '二级建筑师', '监理工程师']
+const CERT_TYPE_OPTIONS = ['一级造价工程师', '二级造价师', '一级建造师', '二级建筑师', '监理工程师']
 const DEFAULT_PERFORMANCE_TYPES = ['编标', '审标', '跟踪', '结算']
 
 // 人员表格列：field-config 的 person 列表驱动；「姓名」固定绑 form.name，配置里出现则剔除（防御）
@@ -68,11 +68,8 @@ const configCols = computed(() => tab.value === 'person' ? personCols.value : co
 const configFormFields = computed(() =>
   configCols.value.filter(f => f.key !== currentTab().nameLabel && !['证书', '业绩'].includes(f.key)))
 
-const certTypeOptions = computed(() => {
-  const f = fieldConfig.value.person.find(f =>
-    f.type === 'dropdown' && ['证书类型', '类型'].includes(f.key) && f.options?.length)
-  return f ? f.options : DEFAULT_CERT_TYPES
-})
+// 证书「类型」为证书级字段，选项固定（后端统一定义），不再取自人员字段配置
+const certTypeOptions = CERT_TYPE_OPTIONS
 
 const performanceTypeOptions = computed(() => {
   const f = fieldConfig.value.contract.find(f => f.key === '类型' && f.type === 'dropdown' && f.options?.length)
@@ -111,7 +108,7 @@ function tagTypeOf(v, options) {
   const i = options.indexOf(v)
   return TAG_PALETTE[(i >= 0 ? i : 0) % TAG_PALETTE.length]
 }
-function certTagType(v) { return tagTypeOf(v, certTypeOptions.value) }
+function certTagType(v) { return tagTypeOf(v, certTypeOptions) }
 function perfTagType(v) { return tagTypeOf(v, performanceTypeOptions.value) }
 
 async function load() { assets.value = await listAssets(tab.value) }
@@ -129,7 +126,7 @@ function openDialog(row) {
 }
 
 function newCertRow() {
-  form.value.fields['证书'].push({ 类型: '', 证书名称: '', 有效期: '', 编号: '' })
+  form.value.fields['证书'].push({ 类型: '', 编号: '', 专业: '', 执业时间: '', 有效期至: '' })
 }
 
 async function save() {
@@ -138,7 +135,7 @@ async function save() {
     // 丢弃整行为空的证书行
     payload.fields = { ...payload.fields }
     payload.fields['证书'] = (payload.fields['证书'] || [])
-      .filter(c => c['类型'] || c['证书名称'] || c['有效期'] || c['编号'])
+      .filter(c => c['类型'] || c['编号'] || c['专业'] || c['执业时间'] || c['有效期至'])
   }
   if (editing.value) await updateAsset(editing.value.id, payload)
   else await createAsset(payload)
@@ -329,14 +326,17 @@ onMounted(load)
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column label="证书名称" min-width="160">
-                <template #default="{ row: c }">{{ c['证书名称'] || '-' }}</template>
-              </el-table-column>
-              <el-table-column label="有效期" width="120">
-                <template #default="{ row: c }">{{ c['有效期'] || '-' }}</template>
-              </el-table-column>
               <el-table-column label="编号" min-width="140">
                 <template #default="{ row: c }">{{ c['编号'] || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="专业" min-width="120">
+                <template #default="{ row: c }">{{ c['专业'] || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="执业时间" width="120">
+                <template #default="{ row: c }">{{ c['执业时间'] || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="有效期至" width="120">
+                <template #default="{ row: c }">{{ c['有效期至'] || '-' }}</template>
               </el-table-column>
             </el-table>
             <div v-else class="expand-empty">暂无证书记录</div>
@@ -426,20 +426,26 @@ onMounted(load)
                   </el-select>
                 </template>
               </el-table-column>
-              <el-table-column label="证书名称" min-width="150">
-                <template #default="{ row: c }">
-                  <el-input v-model="c['证书名称']" size="small" placeholder="证书名称" />
-                </template>
-              </el-table-column>
-              <el-table-column label="有效期" width="150">
-                <template #default="{ row: c }">
-                  <el-date-picker v-model="c['有效期']" size="small" value-format="YYYY-MM-DD"
-                                  placeholder="有效期" style="width: 100%" />
-                </template>
-              </el-table-column>
               <el-table-column label="编号" min-width="120">
                 <template #default="{ row: c }">
                   <el-input v-model="c['编号']" size="small" placeholder="编号" />
+                </template>
+              </el-table-column>
+              <el-table-column label="专业" min-width="110">
+                <template #default="{ row: c }">
+                  <el-input v-model="c['专业']" size="small" placeholder="专业" />
+                </template>
+              </el-table-column>
+              <el-table-column label="执业时间" width="150">
+                <template #default="{ row: c }">
+                  <el-date-picker v-model="c['执业时间']" size="small" value-format="YYYY-MM-DD"
+                                  placeholder="执业时间" style="width: 100%" />
+                </template>
+              </el-table-column>
+              <el-table-column label="有效期至" width="150">
+                <template #default="{ row: c }">
+                  <el-date-picker v-model="c['有效期至']" size="small" value-format="YYYY-MM-DD"
+                                  placeholder="有效期至" style="width: 100%" />
                 </template>
               </el-table-column>
               <el-table-column label="" width="60">

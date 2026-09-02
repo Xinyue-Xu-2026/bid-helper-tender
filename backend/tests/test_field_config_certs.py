@@ -28,13 +28,10 @@ def test_field_config_defaults(client):
     cfg = client.get("/api/assets/field-config").json()
     person_keys = [f["key"] for f in cfg["person"]]
     contract_keys = [f["key"] for f in cfg["contract"]]
-    # 姓名内置为资产 name 列，person 字段列表不含姓名/身份证号
-    assert person_keys == ["部门", "职称", "联系方式", "类型"]
+    # 姓名内置为资产 name 列；类型已改为证书级字段，person 字段列表不含姓名/类型
+    assert person_keys == ["部门", "职称", "联系方式"]
+    assert all(f["type"] == "text" for f in cfg["person"])
     assert contract_keys == ["项目名称", "类型", "合同金额", "年份", "甲方", "项目经理"]
-    person_type = next(f for f in cfg["person"] if f["key"] == "类型")
-    assert person_type["type"] == "dropdown"
-    assert person_type["options"] == ["一级造价师", "二级造价师", "一级建造师",
-                                      "二级建筑师", "监理工程师"]
     contract_type = next(f for f in cfg["contract"] if f["key"] == "类型")
     assert contract_type["options"] == ["编标", "审标", "跟踪", "结算"]
 
@@ -71,10 +68,10 @@ def test_person_multi_certs_create_and_get(client):
         "fields": {
             "职称": "高工",
             "证书": [
-                {"类型": "一级建造师", "证书名称": "一级建造师执业资格证",
-                 "有效期至": "2027-06-30", "编号": "A001"},
-                {"类型": "一级造价师", "证书名称": "一级造价工程师证",
-                 "有效期至": "2026-01-15", "编号": "B002"},
+                {"类型": "一级建造师", "编号": "A001", "专业": "建筑工程",
+                 "执业时间": "2015-06-01", "有效期至": "2027-06-30"},
+                {"类型": "一级造价师", "编号": "B002", "专业": "土建",
+                 "执业时间": "2018-03-01", "有效期至": "2026-01-15"},
             ],
         }})
     aid = r.json()["id"]
@@ -90,25 +87,27 @@ def test_person_multi_certs_create_and_get(client):
 def test_person_legacy_lazy_migration(client, db):
     # 直接写库模拟旧结构单值
     aid = db.create_asset("person", "李四", {
-        "职称": "工程师", "证书名称": "二级造价工程师证", "证书有效期至": "2026.12.31",
+        "职称": "工程师", "类型": "二级造价师", "编号": "B900", "证书有效期至": "2026.12.31",
     }, expiry_date="2026-12-31")
     got = client.get(f"/api/assets/{aid}").json()
     certs = got["fields"]["证书"]
     assert len(certs) == 1
-    assert certs[0]["证书名称"] == "二级造价工程师证"
+    assert certs[0]["类型"] == "二级造价师"
+    assert certs[0]["编号"] == "B900"
     assert certs[0]["有效期至"] == "2026.12.31"
-    assert "证书名称" not in got["fields"] or isinstance(got["fields"].get("证书"), list)
+    assert "证书有效期至" not in got["fields"]
+    assert isinstance(got["fields"].get("证书"), list)
     assert got["expiry_date"] == "2026-12-31"
 
 
 def test_person_put_solidifies(client, db):
-    aid = db.create_asset("person", "王五", {"证书名称": "监理工程师证", "证书有效期至": "2027-01-01"})
+    aid = db.create_asset("person", "王五", {"证书有效期至": "2027-01-01", "编号": "J001"})
     client.put(f"/api/assets/{aid}", json={"fields": {
-        "证书": [{"类型": "监理工程师", "证书名称": "监理工程师证",
-                  "有效期至": "2027-01-01", "编号": "J001"}]}})
+        "证书": [{"类型": "监理工程师", "编号": "J001",
+                  "有效期至": "2027-01-01"}]}})
     raw = db.get_asset(aid)
     assert isinstance(raw["fields"].get("证书"), list)
-    assert "证书名称" not in raw["fields"]
+    assert "证书有效期至" not in raw["fields"]
     assert raw["expiry_date"] == "2027-01-01"
 
 
@@ -118,48 +117,55 @@ def test_confirm_same_person_two_certs_no_overwrite(db):
     items = [
         {"asset_type": "person", "action": "new", "fields": {
             "姓名": "赵六", "职称": "高工",
-            "类型": "一级建造师", "证书名称": "一级建造师执业资格证",
-            "证书有效期至": "2027-03-01", "编号": "A1"}},
+            "类型": "一级建造师", "编号": "A1", "专业": "建筑工程",
+            "证书有效期至": "2027-03-01"}},
         {"asset_type": "person", "action": "update", "fields": {
             "姓名": "赵六",
-            "类型": "一级造价师", "证书名称": "一级造价工程师证",
-            "证书有效期至": "2026-05-01", "编号": "B1"}},
+            "类型": "一级造价师", "编号": "B1", "专业": "土建",
+            "证书有效期至": "2026-05-01"}},
     ]
     result = import_service.confirm_items(db, items)
     assert result["created"] == 1 and result["updated"] == 1
     person = db.get_assets("person")[0]
     certs = person["fields"]["证书"]
     assert len(certs) == 2
-    names = {c["证书名称"] for c in certs}
-    assert names == {"一级建造师执业资格证", "一级造价工程师证"}
+    numbers = {c["编号"] for c in certs}
+    assert numbers == {"A1", "B1"}
     assert person["expiry_date"] == "2026-05-01"  # 最早有效期
 
 
 def test_confirm_same_cert_merges_not_duplicates(db):
     item = {"asset_type": "person", "action": "new", "fields": {
-        "姓名": "孙七", "类型": "一级建造师", "证书名称": "一级建造师执业资格证",
+        "姓名": "孙七", "类型": "一级建造师", "编号": "A1", "专业": "建筑工程",
         "证书有效期至": "2027-03-01"}}
     import_service.confirm_items(db, [item])
-    # 同类型同证书名再次 confirm → 更新而非追加
+    # 同（类型, 编号, 专业）再次 confirm → 更新而非追加
     item2 = {"asset_type": "person", "action": "update", "fields": {
-        "姓名": "孙七", "类型": "一级建造师", "证书名称": "一级建造师执业资格证",
-        "证书有效期至": "2028-03-01", "编号": "NEW1"}}
+        "姓名": "孙七", "类型": "一级建造师", "编号": "A1", "专业": "建筑工程",
+        "证书有效期至": "2028-03-01", "执业时间": "2015-01-01"}}
     import_service.confirm_items(db, [item2])
     certs = db.get_assets("person")[0]["fields"]["证书"]
     assert len(certs) == 1
-    assert certs[0]["有效期至"] == "2028-03-01" and certs[0]["编号"] == "NEW1"
+    assert certs[0]["有效期至"] == "2028-03-01" and certs[0]["执业时间"] == "2015-01-01"
+    # 专业不同 → 追加为新证书
+    item3 = {"asset_type": "person", "action": "update", "fields": {
+        "姓名": "孙七", "类型": "一级建造师", "编号": "A1", "专业": "市政工程",
+        "证书有效期至": "2030-01-01"}}
+    import_service.confirm_items(db, [item3])
+    certs = db.get_assets("person")[0]["fields"]["证书"]
+    assert len(certs) == 2
 
 
-def test_dedup_check_same_type_and_name_only(db):
+def test_dedup_check_same_type_and_number_only(db):
     db.create_asset("person", "赵六", {
-        "证书": [{"类型": "一级建造师", "证书名称": "一级建造师执业资格证",
-                  "有效期至": "2027-03-01", "编号": "A1"}]})
+        "证书": [{"类型": "一级建造师", "编号": "A1", "专业": "建筑工程",
+                  "有效期至": "2027-03-01"}]})
     items = [
         {"id": "1", "asset_type": "person", "file_name": "a.pdf", "warnings": [],
-         "fields": {"姓名": "赵六", "类型": "一级造价师", "证书名称": "一级造价工程师证"}},
+         "fields": {"姓名": "赵六", "类型": "一级造价师", "编号": "B1"}},
         {"id": "2", "asset_type": "person", "file_name": "b.pdf", "warnings": [],
-         "fields": {"姓名": "赵六", "类型": "一级建造师", "证书名称": "一级建造师执业资格证"}},
+         "fields": {"姓名": "赵六", "类型": "一级建造师", "编号": "A1"}},
     ]
     import_service._dedup_check(db, items)
-    assert items[0]["warnings"] == []  # 同人不同类型不同证 → 不算重复
-    assert any("疑似重复" in w for w in items[1]["warnings"])  # 同人同类型同证 → 疑似重复
+    assert items[0]["warnings"] == []  # 同人不同类型不同编号 → 不算重复
+    assert any("疑似重复" in w for w in items[1]["warnings"])  # 同人同类型同编号 → 疑似重复

@@ -44,8 +44,6 @@ DEFAULT_FIELD_CONFIG = {
         {"key": "部门", "type": "text", "options": []},
         {"key": "职称", "type": "text", "options": []},
         {"key": "联系方式", "type": "text", "options": []},
-        {"key": "类型", "type": "dropdown",
-         "options": ["一级造价师", "二级造价师", "一级建造师", "二级建筑师", "监理工程师"]},
     ],
     "contract": [
         {"key": "项目名称", "type": "text", "options": []},

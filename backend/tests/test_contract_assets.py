@@ -67,8 +67,8 @@ def test_import_template_person(client):
     assert "spreadsheetml" in r.headers["content-type"]
     assert "filename*=UTF-8''" in r.headers["content-disposition"]
     assert _sheet_headers(r.content) == [
-        "姓名", "部门", "职称", "联系方式", "类型",
-        "证书.类型", "证书.证书名称", "证书.有效期至", "证书.编号"]
+        "姓名", "部门", "职称", "联系方式",
+        "类型", "证书.编号", "专业", "执业时间", "证书.有效期至"]
 
 
 def test_import_template_contract(client):

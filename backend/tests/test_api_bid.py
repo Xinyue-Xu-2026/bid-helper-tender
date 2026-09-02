@@ -61,7 +61,7 @@ def test_put_get_roundtrip(client):
     far = _days(3650)
     person_id = _make_person(client, "张三", fields={
         "职称": "高级工程师",
-        "证书": [{"类型": "一级建造师", "证书名称": "一级建造师证书", "有效期": far}],
+        "证书": [{"类型": "一级建造师", "编号": "A001", "有效期至": far}],
     })
     contract_id = _make_contract(client, "某市政工程", fields={
         "类型": "编标", "合同金额": "500万", "年份": "2025"})
@@ -80,7 +80,7 @@ def test_put_get_roundtrip(client):
     assert p["role"] == "项目经理"
     assert p["name"] == "张三"
     assert p["fields"]["职称"] == "高级工程师"
-    assert p["fields"]["证书"][0]["有效期"] == far
+    assert p["fields"]["证书"][0]["有效期至"] == far
     assert p["cert_warnings"] == []  # 无投标日且证书长期有效 → 无警告
     assert len(data["contracts"]) == 1
     c = data["contracts"][0]
@@ -167,7 +167,8 @@ def test_export_xlsx(client):
     far = _days(3650)
     person_id = _make_person(client, "张三", fields={
         "职称": "高级工程师",
-        "证书": [{"类型": "一级建造师", "有效期": far}],
+        "证书": [{"类型": "一级建造师", "专业": "建筑工程", "有效期至": far},
+                 {"类型": "监理工程师", "有效期至": far}],
     })
     contract_id = _make_contract(client, "某市政工程", fields={
         "类型": "编标", "合同金额": "500万", "年份": "2025"})
@@ -184,7 +185,8 @@ def test_export_xlsx(client):
     row = [c.value for c in ws[2]]
     assert row[0] == 1 and row[1] == "张三" and row[2] == "项目经理"
     assert row[3] == "高级工程师"
-    assert f"一级建造师（有效期至{far}）" in row[4]
+    assert f"一级建造师·建筑工程（有效期至{far}）" in row[4]
+    assert f"监理工程师（有效期至{far}）" in row[4]
     assert row[5] == "正常"
 
     ws2 = wb["企业业绩"]
@@ -241,15 +243,15 @@ def test_expiring_detail_person_cert_and_credit(client):
     person_expiry = _days(15)
     credit_expiry = _days(20)
     _make_person(client, "张三", fields={
-        "证书": [{"类型": "一级建造师", "证书名称": "一级建造师证书",
-                  "有效期": person_expiry}],
+        "证书": [{"类型": "一级建造师", "编号": "A001",
+                  "有效期至": person_expiry}],
     })
     client.post("/api/assets", json={
         "type": "credit", "name": "安全生产许可证",
         "expiry_date": credit_expiry})
     # 超窗与无日期的干扰项不应出现
     _make_person(client, "李四", fields={
-        "证书": [{"类型": "造价师", "有效期": _days(60)}]})
+        "证书": [{"类型": "造价师", "有效期至": _days(60)}]})
     client.post("/api/assets", json={"type": "credit", "name": "无期限证书"})
 
     rows = client.get("/api/assets/expiring-detail", params={"days": 30}).json()
@@ -258,7 +260,7 @@ def test_expiring_detail_person_cert_and_credit(client):
     person_row, credit_row = rows
     assert person_row["type"] == "person"
     assert person_row["asset_name"] == "张三"
-    assert person_row["cert_name"] == "一级建造师证书"
+    assert person_row["cert_name"] == "一级建造师"
     assert person_row["expiry_date"] == person_expiry
     assert person_row["days_left"] == 15
     assert credit_row["type"] == "credit"
@@ -272,8 +274,8 @@ def test_cert_warning_expired_before_bid_date(client):
     pid = _make_project(client, bid_date=_days(30))
     expiry = _days(10)  # 有效期早于投标日 → expired（最高优先）
     person_id = _make_person(client, "张三", fields={
-        "证书": [{"类型": "一级建造师", "证书名称": "一级建造师证书",
-                  "有效期": expiry}],
+        "证书": [{"类型": "一级建造师", "编号": "A001",
+                  "有效期至": expiry}],
     })
     client.put(_bid_url(pid), json={
         "persons": [{"asset_id": person_id, "role": ""}], "contracts": []})
@@ -283,7 +285,7 @@ def test_cert_warning_expired_before_bid_date(client):
     assert len(warnings) == 1
     w = warnings[0]
     assert w["level"] == "expired"
-    assert w["cert_name"] == "一级建造师证书"
+    assert w["cert_name"] == "一级建造师"
     assert w["expiry"] == expiry
     assert "早于投标日" in w["message"]
 
@@ -293,8 +295,8 @@ def test_cert_warning_soon_with_past_bid_date(client):
     pid = _make_project(client, bid_date=_days(-365))
     expiry = _days(15)
     person_id = _make_person(client, "张三", fields={
-        "证书": [{"类型": "一级建造师", "证书名称": "一级建造师证书",
-                  "有效期": expiry}],
+        "证书": [{"类型": "一级建造师", "编号": "A001",
+                  "有效期至": expiry}],
     })
     client.put(_bid_url(pid), json={
         "persons": [{"asset_id": person_id, "role": ""}], "contracts": []})
@@ -304,6 +306,6 @@ def test_cert_warning_soon_with_past_bid_date(client):
     assert len(warnings) == 1
     w = warnings[0]
     assert w["level"] == "soon"
-    assert w["cert_name"] == "一级建造师证书"
+    assert w["cert_name"] == "一级建造师"
     assert w["days_left"] == 15
     assert "15" in w["message"]

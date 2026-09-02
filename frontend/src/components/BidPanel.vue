@@ -41,7 +41,7 @@ function displayField(v) {
 // 有效期早于投标日 → expired；否则 30 天内到期 → soon；有效期无法解析的证书跳过。
 function certWarning(row, cert) {
   if (!selectedPersonIds.value.has(row.id)) return null
-  const expiry = cert['有效期'] || cert['有效期至']
+  const expiry = cert['有效期至']
   if (!expiry) return null
   const exp = new Date(expiry)
   if (isNaN(exp)) return null
@@ -62,7 +62,7 @@ function certTagType(row, cert) {
 }
 
 function certLabel(row, cert) {
-  const base = cert['类型'] || cert['证书名称'] || '证书'
+  const base = cert['类型'] || '证书'
   const w = certWarning(row, cert)
   return w ? `${base}（${w.text}）` : base
 }

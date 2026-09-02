@@ -16,11 +16,12 @@ COLUMN_MAPS = {
 
 # 人员 Excel 导入的旧列名兼容（字段配置之外的证书列 → 证书数组条目）
 _PERSON_CERT_COLUMN_MAP = {
-    "证书名称": "证书名称", "证书.证书名称": "证书名称",
+    "类型": "类型", "证书.类型": "类型",
     "证书有效期至": "有效期至", "有效期至": "有效期至", "有效期": "有效期至",
     "证书.有效期至": "有效期至",
     "编号": "编号", "证书编号": "编号", "证书.编号": "编号",
-    "证书.类型": "类型",
+    "专业": "专业", "证书.专业": "专业",
+    "执业时间": "执业时间", "证书.执业时间": "执业时间",
 }
 
 
@@ -46,10 +47,11 @@ def _contract_col_map() -> dict:
 
 # ---------- 人员证书（一人多证） ----------
 
-CERT_ITEM_KEYS = ("类型", "证书名称", "有效期至", "编号")
+CERT_ITEM_KEYS = ("类型", "编号", "专业", "执业时间", "有效期至")
 # 旧单值字段 → 证书条目键（懒迁移用）
-LEGACY_CERT_FIELD_MAP = {"证书名称": "证书名称", "证书有效期至": "有效期至",
-                         "证书编号": "编号", "编号": "编号"}
+LEGACY_CERT_FIELD_MAP = {"证书有效期至": "有效期至",
+                         "证书编号": "编号", "编号": "编号",
+                         "类型": "类型", "专业": "专业", "执业时间": "执业时间"}
 
 
 def person_certs(fields: dict) -> list:
@@ -64,8 +66,6 @@ def person_certs(fields: dict) -> list:
         if value not in (None, ""):
             legacy[new_key] = value
     if legacy:
-        # 顶层"类型"即证书类型（field-config 中人员类型为证书类型下拉）
-        legacy["类型"] = fields.get("类型") or ""
         return [legacy]
     return []
 
@@ -122,6 +122,24 @@ def normalize_date(value) -> str:
     return ""
 
 
+_CERT_DATE_KEYS = ("有效期至", "执业时间")
+
+
+def _cert_cell_str(cert_key: str, value) -> str:
+    """证书列值规范化：日期统一 YYYY-MM-DD（含 2013.7.23 形态）；
+    数字（如编号 32092664 / 32092664.0）转字符串并去掉浮点小数点。"""
+    if isinstance(value, (datetime, date)):
+        return normalize_date(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    s = str(value).strip()
+    if cert_key in _CERT_DATE_KEYS:
+        return normalize_date(s) or s
+    return s
+
+
 def import_assets_excel(db: Database, asset_type: str, file_path: str) -> dict:
     if asset_type == "credit":
         col_map = COLUMN_MAPS["credit"]
@@ -158,10 +176,7 @@ def import_assets_excel(db: Database, asset_type: str, file_path: str) -> dict:
             elif target.startswith("cert."):
                 cert_key = target.split(".", 1)[1]
                 if value is not None and str(value).strip():
-                    if isinstance(value, (datetime, date)):
-                        record["cert"][cert_key] = normalize_date(value)
-                    else:
-                        record["cert"][cert_key] = str(value).strip()
+                    record["cert"][cert_key] = _cert_cell_str(cert_key, value)
             else:
                 field_name = target.split(".", 1)[1]
                 if value is not None and str(value).strip():
@@ -189,7 +204,6 @@ def _import_person_row(db: Database, person_ids: dict, record: dict) -> int:
     cert = record["cert"]
     if cert:
         cert.setdefault("类型", fields.get("类型", ""))
-        cert.setdefault("证书名称", "")
         cert.setdefault("编号", "")
         cert["有效期至"] = normalize_date(cert.get("有效期至") or record["expiry_date"])
         fields["证书"] = [cert]
@@ -216,20 +230,26 @@ def _import_person_row(db: Database, person_ids: dict, record: dict) -> int:
 
 
 def merge_certs(existing_certs: list, new_certs: list) -> list:
-    """合并证书数组：同（类型, 证书名称）更新条目，否则追加（不覆盖其他证书）。"""
+    """合并证书数组：同（类型, 编号, 专业）更新条目，否则追加（不覆盖其他证书）。
+    去重键空值归一为 ""。"""
     merged = [dict(c) for c in existing_certs or [] if isinstance(c, dict)]
-    index = {(c.get("类型", ""), c.get("证书名称", "")): i
-             for i, c in enumerate(merged) if c.get("证书名称")}
+
+    def _key(c: dict):
+        return (str(c.get("类型") or ""), str(c.get("编号") or ""),
+                str(c.get("专业") or ""))
+
+    index = {}
+    for i, c in enumerate(merged):
+        index.setdefault(_key(c), i)
     for cert in new_certs or []:
         if not isinstance(cert, dict):
             continue
-        key = (cert.get("类型", ""), cert.get("证书名称", ""))
-        if cert.get("证书名称") and key in index:
+        key = _key(cert)
+        if key in index:
             merged[index[key]].update(
                 {k: v for k, v in cert.items() if v not in (None, "")})
         else:
-            if cert.get("证书名称"):
-                index[key] = len(merged)
+            index[key] = len(merged)
             merged.append(dict(cert))
     return merged
 
@@ -259,7 +279,7 @@ def import_template_headers(asset_type: str) -> list:
     cfg = settings_store.get_field_config()
     if asset_type == "person":
         return (["姓名"] + [f["key"] for f in cfg["person"]]
-                + ["证书.类型", "证书.证书名称", "证书.有效期至", "证书.编号"])
+                + ["类型", "证书.编号", "专业", "执业时间", "证书.有效期至"])
     if asset_type == "contract":
         return [f["key"] for f in cfg["contract"]]
     raise ValueError(f"不支持的模板类型：{asset_type}")

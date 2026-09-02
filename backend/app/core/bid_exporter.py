@@ -34,12 +34,16 @@ def _contract_columns() -> list:
 
 
 def _cert_detail(fields: dict) -> str:
-    """证书明细：每本 "类型（有效期至YYYY-MM-DD）"，多本换行拼接。"""
+    """证书明细：每本 "类型·专业（有效期至YYYY-MM-DD）"（无专业时 "类型（有效期至…）"），
+    多本换行拼接。"""
     parts = []
     for cert in (fields or {}).get("证书") or []:
         if not isinstance(cert, dict):
             continue
-        label = cert.get("类型") or cert.get("证书名称") or "证书"
+        label = cert.get("类型") or "证书"
+        major = cert.get("专业")
+        if major:
+            label = f"{label}·{major}"
         parts.append(f"{label}（有效期至{_cert_expiry(cert)}）")
     return "\n".join(parts)
 

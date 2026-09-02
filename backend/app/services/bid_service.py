@@ -71,13 +71,13 @@ from app.services.asset_service import normalize_date  # noqa: E402
 
 
 def _cert_expiry(cert: dict) -> str:
-    """证书有效期：键名同时接受"有效期"与"有效期至"（裁定），统一为 YYYY-MM-DD。"""
+    """证书有效期：统一取"有效期至"键，规范为 YYYY-MM-DD。"""
     cert = cert or {}
-    return normalize_date(cert.get("有效期") or cert.get("有效期至") or "")
+    return normalize_date(cert.get("有效期至") or "")
 
 
 def _cert_name(cert: dict) -> str:
-    return cert.get("证书名称") or cert.get("类型") or "证书"
+    return cert.get("类型") or "证书"
 
 
 def cert_warnings(person_fields: dict, bid_date: str, today: date, days: int = 30) -> list:

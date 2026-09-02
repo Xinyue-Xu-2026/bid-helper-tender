@@ -27,8 +27,9 @@ PERSON_INFO_FIELDS = ("身份证号", "职称", "联系方式")
 PERF_FIELDS = ("项目名称", "类型", "合同金额", "年份", "甲方", "项目经理")
 
 DEFAULT_PERSON_MAPPING = {
-    "姓名": "姓名", "证书名称": "证书名称", "职称": "职称",
-    "有效期": "证书有效期至", "身份证号": "身份证号", "类型": "类型",
+    "姓名": "姓名", "职称": "职称", "身份证号": "身份证号", "类型": "类型",
+    "编号": "编号", "专业": "专业", "执业时间": "执业时间",
+    "有效期": "证书有效期至", "有效期至": "证书有效期至",
 }
 DEFAULT_CONTRACT_MAPPING = {
     "项目名称": "项目名称", "项目经理": "项目经理", "合同金额": "合同金额",
@@ -61,12 +62,12 @@ def _person_names(db: Database) -> dict:
 
 
 def _existing_person_certs(db: Database) -> set:
-    """{(姓名, 类型, 证书名称)}，用于疑似重复检测（同人同类型同证书名才算重复）。"""
+    """{(姓名, 类型, 编号)}，用于疑似重复检测（同人同类型同编号才算重复）。"""
     result = set()
     for a in db.get_assets(type="person"):
         for cert in person_certs(a.get("fields") or {}):
-            if cert.get("证书名称"):
-                result.add((a["name"], cert.get("类型", ""), cert["证书名称"]))
+            if cert.get("编号"):
+                result.add((a["name"], cert.get("类型", ""), cert["编号"]))
     return result
 
 
@@ -147,24 +148,24 @@ def _process_text_file(db: Database, path: Path, settings: dict,
 
 
 def _dedup_check(db: Database, items: List[dict]):
-    """同人员+同类型+同证书名标"疑似重复"（对照资产库及本次扫描批次），不自动合并。"""
+    """同人员+同类型+同编号标"疑似重复"（对照资产库及本次扫描批次），不自动合并。"""
     existing = _existing_person_certs(db)
     seen_in_batch = {}
     for item in items:
         if item["asset_type"] != "person":
             continue
         name = (item["fields"].get("姓名") or "").strip()
-        cert = (item["fields"].get("证书名称") or "").strip()
+        cert_no = (item["fields"].get("编号") or "").strip()
         cert_type = (item["fields"].get("类型") or "").strip()
-        if not name or not cert:
+        if not name or not cert_no:
             continue
-        key = (name, cert_type, cert)
+        key = (name, cert_type, cert_no)
         if key in existing:
-            item["warnings"].append(f"疑似重复：与现有人员{name}的{cert}证书相同")
+            item["warnings"].append(f"疑似重复：与现有人员{name}的{cert_no}证书相同")
         if key in seen_in_batch:
             other = seen_in_batch[key]
             item["warnings"].append(
-                f"疑似重复：与本次扫描文件「{other}」中的{name}{cert}相同")
+                f"疑似重复：与本次扫描文件「{other}」中的{name}{cert_no}相同")
         else:
             seen_in_batch[key] = item["file_name"]
 
