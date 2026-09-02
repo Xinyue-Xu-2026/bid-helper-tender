@@ -18,6 +18,7 @@ from app.services.asset_service import (
     normalize_person_asset,
     person_perfs,
     solidify_person_fields,
+    validate_contract_subtype,
 )
 
 router = APIRouter()
@@ -89,12 +90,27 @@ def save_field_config(body: FieldConfigIn):
 _TEMPLATE_FILENAMES = {"person": "人员导入模板.xlsx", "contract": "合同导入模板.xlsx"}
 
 
+def _check_subtype(subtype: str | None) -> None:
+    if subtype is None:
+        return
+    try:
+        validate_contract_subtype(subtype)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/import-template")
-def import_template(type: str):
+def import_template(type: str, subtype: str | None = None):
     if type not in _TEMPLATE_FILENAMES:
         raise HTTPException(400, "仅支持 type=person|contract")
-    content = build_import_template(type)
-    filename = quote(_TEMPLATE_FILENAMES[type])
+    _check_subtype(subtype)
+    if subtype is not None and type != "contract":
+        raise HTTPException(400, "仅合同模板支持 subtype 参数")
+    content = build_import_template(type, subtype)
+    base = _TEMPLATE_FILENAMES[type]
+    if subtype:
+        base = base.replace(".xlsx", f"-{subtype}.xlsx")
+    filename = quote(base)
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -103,17 +119,21 @@ def import_template(type: str):
 
 
 @router.post("/import")
-def import_assets(type: str, file: UploadFile, db: Database = Depends(get_db)):
+def import_assets(type: str, file: UploadFile, subtype: str | None = None,
+                  db: Database = Depends(get_db)):
     _check_type(type)
     if type not in ("credit", "person", "contract"):
         raise HTTPException(400, "仅资信证书/常用人员/合同业绩支持 Excel 导入")
+    if subtype is not None and type != "contract":
+        raise HTTPException(400, "仅合同导入支持 subtype 参数")
+    _check_subtype(subtype)
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(400, "仅支持 .xlsx 文件")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
     try:
-        return import_assets_excel(db, type, tmp_path)
+        return import_assets_excel(db, type, tmp_path, subtype=subtype)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 

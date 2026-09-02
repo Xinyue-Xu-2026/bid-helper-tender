@@ -36,13 +36,28 @@ def _person_col_map() -> dict:
     return col_map
 
 
-def _contract_col_map() -> dict:
-    """合同导入列映射：项目名称 → name，field-config 其余 key（含项目经理）→ fields.<key>。"""
+def _contract_col_map(subtype: str | None = None) -> dict:
+    """合同导入列映射：项目名称 → name；有 subtype 时按该子类型字段集映射（序号不入库），
+    否则按 field-config 合同字段映射（含项目经理）→ fields.<key>。"""
     col_map = {"项目名称": "name"}
+    if subtype is not None:
+        validate_contract_subtype(subtype)
+        cfg = settings_store.get_field_config()
+        for f in cfg["contract_subtypes"][subtype]:
+            if f["key"] not in ("项目名称", "序号"):
+                col_map.setdefault(f["key"], f"fields.{f['key']}")
+        return col_map
     for f in settings_store.get_field_config()["contract"]:
         if f["key"] != "项目名称":
             col_map.setdefault(f["key"], f"fields.{f['key']}")
     return col_map
+
+
+def validate_contract_subtype(subtype: str) -> None:
+    """合同子类型合法值校验，非法抛 ValueError（路由层转 422）。"""
+    if subtype not in settings_store.DEFAULT_CONTRACT_SUBTYPE_FIELDS:
+        valid = "/".join(settings_store.DEFAULT_CONTRACT_SUBTYPE_FIELDS)
+        raise ValueError(f"非法合同子类型：{subtype}，可选：{valid}")
 
 
 # ---------- 人员证书（一人多证） ----------
@@ -140,11 +155,12 @@ def _cert_cell_str(cert_key: str, value) -> str:
     return s
 
 
-def import_assets_excel(db: Database, asset_type: str, file_path: str) -> dict:
+def import_assets_excel(db: Database, asset_type: str, file_path: str,
+                        subtype: str | None = None) -> dict:
     if asset_type == "credit":
         col_map = COLUMN_MAPS["credit"]
     elif asset_type == "contract":
-        col_map = _contract_col_map()
+        col_map = _contract_col_map(subtype)
     else:
         col_map = _person_col_map()
     wb = load_workbook(file_path, read_only=True, data_only=True)
@@ -191,6 +207,9 @@ def import_assets_excel(db: Database, asset_type: str, file_path: str) -> dict:
         if asset_type == "person":
             imported += _import_person_row(db, person_ids, record)
         else:
+            if asset_type == "contract" and subtype:
+                # 子类型导入：类型列强制为 subtype（子类型判别字段）
+                record["fields"]["类型"] = subtype
             db.create_asset(asset_type, record["name"], record["fields"],
                             expiry_date=record["expiry_date"])
             imported += 1
@@ -274,18 +293,23 @@ def person_perfs(db: Database, person_name: str) -> list:
 TEMPLATE_TYPES = ("person", "contract")
 
 
-def import_template_headers(asset_type: str) -> list:
-    """按当前 field-config 生成模板表头。"""
+def import_template_headers(asset_type: str, subtype: str | None = None) -> list:
+    """按当前 field-config 生成模板表头；contract 带 subtype 时按子类型字段集
+    （前置 序号/项目名称，序号仅作模板列不入库）。"""
     cfg = settings_store.get_field_config()
     if asset_type == "person":
         return (["姓名"] + [f["key"] for f in cfg["person"]]
                 + ["类型", "证书.编号", "专业", "执业时间", "证书.有效期至"])
     if asset_type == "contract":
+        if subtype is not None:
+            validate_contract_subtype(subtype)
+            keys = [f["key"] for f in cfg["contract_subtypes"][subtype]]
+            return ["序号", "项目名称"] + keys
         return [f["key"] for f in cfg["contract"]]
     raise ValueError(f"不支持的模板类型：{asset_type}")
 
 
-def build_import_template(asset_type: str) -> bytes:
+def build_import_template(asset_type: str, subtype: str | None = None) -> bytes:
     """生成导入模板 xlsx（仅表头行），返回字节流。"""
     from io import BytesIO
 
@@ -294,7 +318,7 @@ def build_import_template(asset_type: str) -> bytes:
     wb = Workbook()
     ws = wb.active
     if ws is not None:
-        ws.append(import_template_headers(asset_type))
+        ws.append(import_template_headers(asset_type, subtype))
     buf = BytesIO()
     wb.save(buf)
     wb.close()

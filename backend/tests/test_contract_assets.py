@@ -82,6 +82,85 @@ def test_import_template_bad_type(client):
     assert client.get("/api/assets/import-template", params={"type": "credit"}).status_code == 400
 
 
+# ---------- 合同子类型导入模板 ----------
+
+_EXPECTED_SUBTYPE_HEADERS = {
+    "编标": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间",
+             "合同编号", "费率", "项目负责人", "工程造价（万元）",
+             "合同扫描件", "OA系统", "备注"],
+    "审标": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间",
+             "合同编号", "费率", "项目负责人", "工程造价（万元）", "建筑面积",
+             "合同扫描件", "OA系统", "备注"],
+    "跟踪": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间",
+             "合同编号", "费率", "咨询类型", "项目负责人", "工程造价（万元）",
+             "建筑面积", "合同扫描件", "OA系统", "备注"],
+    "结算": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间",
+             "合同编号", "费率", "项目负责人", "工程造价（万元）", "建筑面积",
+             "审计委托书", "合同扫描件", "OA系统", "备注"],
+    "水利审计": ["委托单位", "份数", "签订日期", "文号", "委托书编号",
+                 "合同编号", "批复", "备注"],
+    "中标通知书": ["招标人", "中标金额", "份数", "日期", "编号", "合同签订情况", "备注"],
+}
+
+
+def test_import_template_contract_subtypes(client):
+    for subtype, fields in _EXPECTED_SUBTYPE_HEADERS.items():
+        r = client.get("/api/assets/import-template",
+                       params={"type": "contract", "subtype": subtype})
+        assert r.status_code == 200, subtype
+        assert _sheet_headers(r.content) == ["序号", "项目名称"] + fields
+        assert f"合同导入模板-{subtype}.xlsx" in r.headers["content-disposition"] \
+            or "UTF-8''" in r.headers["content-disposition"]
+
+
+def test_import_template_bad_subtype(client):
+    r = client.get("/api/assets/import-template",
+                   params={"type": "contract", "subtype": "不存在"})
+    assert r.status_code == 422
+    # subtype 仅合同支持
+    r = client.get("/api/assets/import-template",
+                   params={"type": "person", "subtype": "编标"})
+    assert r.status_code == 400
+
+
+# ---------- 合同子类型 Excel 导入 ----------
+
+def test_contract_subtype_excel_import(client):
+    content = _xlsx_bytes(
+        ["序号", "项目名称", "委托单位", "咨询单位", "份数", "签订日期",
+         "合同到期时间", "合同编号", "费率", "项目负责人", "工程造价（万元）",
+         "合同扫描件", "OA系统", "备注", "多余列"],
+        [[1, "项目A", "甲公司", "乙咨询", "2", "2024.3.15", "2026.3.14",
+          "HT-001", "0.5%", "张三", "120", "", "已录入", "首单", "忽略我"],
+         [2, "项目B", "丙公司", "乙咨询", "1", "2024-05-01", "",
+          "HT-002", "", "李四", "80", "", "", "", ""]])
+    r = client.post("/api/assets/import",
+                    params={"type": "contract", "subtype": "编标"},
+                    files={"file": ("c.xlsx", content,
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert r.status_code == 200
+    assert r.json()["imported"] == 2
+    assets = client.get("/api/assets", params={"type": "contract"}).json()
+    by_name = {a["name"]: a for a in assets}
+    fa = by_name["项目A"]["fields"]
+    assert fa["类型"] == "编标"  # 子类型自动写入类型字段
+    assert fa["委托单位"] == "甲公司" and fa["合同编号"] == "HT-001"
+    assert fa["签订日期"] == "2024.3.15" and fa["合同到期时间"] == "2026.3.14"
+    assert fa["项目负责人"] == "张三" and fa["工程造价（万元）"] == "120"
+    assert "序号" not in fa and "多余列" not in fa  # 序号与未识别表头不入库
+    assert by_name["项目B"]["fields"]["类型"] == "编标"
+
+
+def test_contract_import_bad_subtype(client):
+    content = _xlsx_bytes(["项目名称"], [["项目A"]])
+    r = client.post("/api/assets/import",
+                    params={"type": "contract", "subtype": "不存在"},
+                    files={"file": ("c.xlsx", content,
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert r.status_code == 422
+    assert client.get("/api/assets", params={"type": "contract"}).json() == []
+
+
 # ---------- contract Excel 导入 ----------
 
 def test_contract_excel_import(client):

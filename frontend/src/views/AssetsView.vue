@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -8,26 +8,99 @@ import {
 } from '../api'
 
 const router = useRouter()
-const tab = ref('credit')
+const tab = ref('person')
 const assets = ref([])
 const dialogVisible = ref(false)
 const editing = ref(null)
 const form = ref({ name: '', fields: {}, expiry_date: '' })
 
 const TABS = [
-  { key: 'credit', label: '资信证书', nameLabel: '证书名称',
+  { key: 'credit', label: '资信证书', nameLabel: '证书名称', hidden: true,
     fieldDefs: ['发证机关', '发证日期'], hasExpiry: true, hasImport: true },
   { key: 'person', label: '常用人员', nameLabel: '姓名',
     fieldDefs: ['部门', '职称', '联系方式'], hasExpiry: true, hasImport: true },
   { key: 'contract', label: '合同业绩', nameLabel: '项目名称',
     fieldDefs: [], hasExpiry: false, hasImport: true },
-  { key: 'info', label: '企业信息', nameLabel: '项目',
+  { key: 'info', label: '企业信息', nameLabel: '项目', hidden: true,
     fieldDefs: ['值'], hasExpiry: false, hasImport: false },
-  { key: 'material', label: '素材库', nameLabel: '素材名称',
+  { key: 'material', label: '素材库', nameLabel: '素材名称', hidden: true,
     fieldDefs: ['备注'], hasExpiry: false, hasImport: false },
 ]
 
+// 隐藏的页签保留代码与路由，仅不在页签栏显示
+const visibleTabs = TABS.filter(t => !t.hidden)
+
 const currentTab = () => TABS.find(t => t.key === tab.value)
+
+// ---------- 合同业绩二级页签：子类型与字段契约（键名与后端约定，勿改） ----------
+const CONTRACT_SUBTYPES = [
+  { key: '编标', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
+      '费率', '项目负责人', '工程造价（万元）', '合同扫描件', 'OA系统', '备注'] },
+  { key: '审标', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
+      '费率', '项目负责人', '工程造价（万元）', '建筑面积', '合同扫描件', 'OA系统', '备注'] },
+  { key: '跟踪', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
+      '费率', '咨询类型', '项目负责人', '工程造价（万元）', '建筑面积', '合同扫描件', 'OA系统', '备注'] },
+  { key: '结算', fields: ['委托单位', '咨询单位', '份数', '签订日期', '合同到期时间', '合同编号',
+      '费率', '项目负责人', '工程造价（万元）', '建筑面积', '审计委托书', '合同扫描件', 'OA系统', '备注'] },
+  { key: '水利审计', fields: ['委托单位', '份数', '签订日期', '文号', '委托书编号', '合同编号', '批复', '备注'] },
+  { key: '中标通知书', fields: ['招标人', '中标金额', '份数', '日期', '编号', '合同签订情况', '备注'] },
+]
+const contractSubtab = ref(CONTRACT_SUBTYPES[0].key)
+const currentSubtype = computed(() =>
+  CONTRACT_SUBTYPES.find(s => s.key === contractSubtab.value) || CONTRACT_SUBTYPES[0])
+// 当前子类型的合同列表：按 fields['类型'] 过滤
+const subtypeAssets = computed(() =>
+  assets.value.filter(a => a.fields && a.fields['类型'] === contractSubtab.value))
+
+// ---------- 合同业绩三级页签：年份（fields['年份'] 去重，前 4 位数字降序，未标注排最后） ----------
+const ALL_YEARS = '全部'
+const UNLABELED_YEAR = '未标注'
+const contractYearTab = ref(ALL_YEARS)
+
+const subtypeYears = computed(() => {
+  const years = new Set()
+  let hasUnlabeled = false
+  for (const a of subtypeAssets.value) {
+    const y = String(a.fields?.['年份'] ?? '').trim()
+    if (y) years.add(y)
+    else hasUnlabeled = true
+  }
+  const sorted = [...years].sort((a, b) => {
+    const ma = a.match(/^(\d{4})/)
+    const mb = b.match(/^(\d{4})/)
+    if (ma && mb) return Number(mb[1]) - Number(ma[1])
+    if (ma) return -1
+    if (mb) return 1
+    return a.localeCompare(b)
+  })
+  if (hasUnlabeled) sorted.push(UNLABELED_YEAR)
+  return sorted
+})
+
+// 当前年份页签的表格数据：「全部」不过滤；「未标注」匹配无年份记录
+const contractTableData = computed(() => {
+  if (contractYearTab.value === ALL_YEARS) return subtypeAssets.value
+  const yearOf = a => String(a.fields?.['年份'] ?? '').trim()
+  if (contractYearTab.value === UNLABELED_YEAR)
+    return subtypeAssets.value.filter(a => !yearOf(a))
+  return subtypeAssets.value.filter(a => yearOf(a) === contractYearTab.value)
+})
+
+// 弹窗年份选项：不含「未标注」占位组
+const yearOptions = computed(() => subtypeYears.value.filter(y => y !== UNLABELED_YEAR))
+
+// 合同表格分页：只渲染当前页，避免全量合同 DOM 爆炸；类型/年份过滤行为不变
+const contractPage = ref(1)
+const contractPageSize = ref(50)
+const pagedContracts = computed(() => {
+  const start = (contractPage.value - 1) * contractPageSize.value
+  return contractTableData.value.slice(start, start + contractPageSize.value)
+})
+// 切换子类型或年份页签时回到第 1 页
+watch([contractSubtab, contractYearTab], () => { contractPage.value = 1 })
+
+// 切换子类型时年份页签回到「全部」
+function onSubtypeChange() { contractYearTab.value = ALL_YEARS }
 
 // ---------- 字段配置（设置页维护，驱动人员/合同业绩的列与表单） ----------
 const fieldConfig = ref({ person: [], contract: [] })
@@ -60,8 +133,8 @@ const performanceCols = computed(() =>
     ? contractCols.value
     : [{ key: '类型', type: 'dropdown', options: DEFAULT_PERFORMANCE_TYPES }, ...contractCols.value])
 
-// 人员/合同业绩 tab 均由字段配置驱动
-const isConfigTab = computed(() => ['person', 'contract'].includes(tab.value))
+// 人员 tab 由字段配置驱动；合同业绩改为二级页签（CONTRACT_SUBTYPES）独立渲染
+const isConfigTab = computed(() => tab.value === 'person')
 const configCols = computed(() => tab.value === 'person' ? personCols.value : contractCols.value)
 
 // 动态表单字段：去掉固定名称列（姓名/项目名称绑 form.name）与结构化数组（证书/业绩单独处理）
@@ -119,6 +192,8 @@ function openDialog(row) {
   if (tab.value === 'person') {
     fields['证书'] = Array.isArray(fields['证书']) ? fields['证书'].map(c => ({ ...c })) : []
   }
+  // 合同新建：年份默认当前年份（可改选已有年份或输入新年份）
+  if (tab.value === 'contract' && !row) fields['年份'] = String(new Date().getFullYear())
   form.value = row
     ? { name: row.name, fields, expiry_date: row.expiry_date }
     : { name: '', fields, expiry_date: '' }
@@ -136,6 +211,10 @@ async function save() {
     payload.fields = { ...payload.fields }
     payload.fields['证书'] = (payload.fields['证书'] || [])
       .filter(c => c['类型'] || c['编号'] || c['专业'] || c['执业时间'] || c['有效期至'])
+  }
+  if (tab.value === 'contract') {
+    // 子类型固定写入 fields['类型']，与各子页面过滤口径一致
+    payload.fields = { ...payload.fields, 类型: contractSubtab.value }
   }
   if (editing.value) await updateAsset(editing.value.id, payload)
   else await createAsset(payload)
@@ -157,7 +236,8 @@ async function onUploadFile(row, options) {
 }
 
 async function onImport(options) {
-  const r = await importAssets(tab.value, options.file)
+  const subtype = tab.value === 'contract' ? contractSubtab.value : undefined
+  const r = await importAssets(tab.value, options.file, subtype)
   ElMessage.success(`导入 ${r.imported} 条` + (r.errors.length ? `，跳过 ${r.errors.length} 行` : ''))
   load()
 }
@@ -299,9 +379,54 @@ onMounted(load)
 <template>
   <h2>资产库</h2>
   <el-tabs v-model="tab" @tab-change="onTabChange">
-    <el-tab-pane v-for="t in TABS" :key="t.key" :label="t.label" :name="t.key" />
+    <el-tab-pane v-for="t in visibleTabs" :key="t.key" :label="t.label" :name="t.key" />
   </el-tabs>
 
+  <!-- 合同业绩：二级页签，每个子类型独立工具栏与表格（按 fields['类型'] 过滤） -->
+  <template v-if="tab === 'contract'">
+    <el-tabs v-model="contractSubtab" @tab-change="onSubtypeChange">
+      <el-tab-pane v-for="s in CONTRACT_SUBTYPES" :key="s.key" :label="s.key" :name="s.key" />
+    </el-tabs>
+    <el-tabs v-model="contractYearTab">
+      <el-tab-pane :label="ALL_YEARS" :name="ALL_YEARS" />
+      <el-tab-pane v-for="y in subtypeYears" :key="y" :label="y" :name="y" />
+    </el-tabs>
+    <el-space style="margin-bottom: 12px">
+      <el-button type="primary" @click="openDialog(null)">新增</el-button>
+      <el-upload :show-file-list="false" accept=".xlsx" :http-request="onImport">
+        <el-button>Excel 导入</el-button>
+      </el-upload>
+      <el-button @click="downloadImportTemplate('contract', contractSubtab)">下载导入模板</el-button>
+      <el-button :loading="scanning" @click="onImportFolder">从共享文件夹导入</el-button>
+    </el-space>
+    <el-table :key="`${contractSubtab}-${contractYearTab}`" :data="pagedContracts"
+              :row-class-name="({ row }) => isExpiringSoon(row) ? 'expiring-row' : ''">
+      <el-table-column prop="name" label="项目名称" min-width="200" show-overflow-tooltip />
+      <el-table-column v-for="k in currentSubtype.fields" :key="k" :label="k" min-width="130"
+                       show-overflow-tooltip>
+        <template #default="{ row }">{{ displayField(row.fields[k]) || '-' }}</template>
+      </el-table-column>
+      <el-table-column label="附件" width="120">
+        <template #default="{ row }">
+          <el-upload :show-file-list="false" :http-request="opt => onUploadFile(row, opt)">
+            <el-button size="small" link type="primary">{{ row.file_path ? '替换' : '上传' }}</el-button>
+          </el-upload>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="140">
+        <template #default="{ row }">
+          <el-button size="small" @click="openDialog(row)">编辑</el-button>
+          <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <el-pagination v-model:current-page="contractPage" v-model:page-size="contractPageSize"
+                   :total="contractTableData.length" :page-sizes="[20, 50, 100]"
+                   layout="total, sizes, prev, pager, next"
+                   style="margin-top: 8px; justify-content: flex-end" />
+  </template>
+
+  <template v-else>
   <el-space style="margin-bottom: 12px">
     <el-button type="primary" @click="openDialog(null)">新增</el-button>
     <el-upload v-if="currentTab().hasImport" :show-file-list="false" accept=".xlsx"
@@ -392,16 +517,31 @@ onMounted(load)
         <el-button size="small" @click="openDialog(row)">编辑</el-button>
         <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
       </template>
-    </el-table-column>
-  </el-table>
+      </el-table-column>
+    </el-table>
+  </template>
 
-  <el-dialog v-model="dialogVisible" :title="editing ? '编辑' : '新增'"
+  <el-dialog v-model="dialogVisible"
+             :title="(editing ? '编辑' : '新增') + (tab === 'contract' ? `（${contractSubtab}）` : '')"
              :width="tab === 'person' ? '680px' : tab === 'contract' ? '560px' : '500px'">
     <el-form label-width="110px">
       <el-form-item :label="currentTab().nameLabel" required>
         <el-input v-model="form.name" />
       </el-form-item>
-      <!-- 人员/合同业绩：按字段配置动态生成 -->
+      <!-- 合同业绩：年份（可选已有年份或输入新年份，保存写入 fields['年份']） -->
+      <el-form-item v-if="tab === 'contract'" label="年份">
+        <el-select v-model="form.fields['年份']" filterable allow-create default-first-option
+                   clearable placeholder="选择或输入年份，如 2026" style="width: 100%">
+          <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
+        </el-select>
+      </el-form-item>
+      <!-- 合同业绩：字段与当前子类型一一对应（均为文本输入），「类型」保存时自动写入 -->
+      <template v-if="tab === 'contract'">
+        <el-form-item v-for="k in currentSubtype.fields" :key="k" :label="k">
+          <el-input v-model="form.fields[k]" />
+        </el-form-item>
+      </template>
+      <!-- 人员：按字段配置动态生成 -->
       <template v-if="isConfigTab">
         <el-form-item v-for="f in configFormFields" :key="f.key" :label="f.key">
           <el-date-picker v-if="f.type === 'date'" v-model="form.fields[f.key]"

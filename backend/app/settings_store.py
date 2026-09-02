@@ -58,6 +58,30 @@ DEFAULT_FIELD_CONFIG = {
 # 姓名内置为资产 name 列，字段配置中不允许出现
 BUILTIN_FIELD_KEYS = ("姓名",)
 
+# ---------- 合同子类型字段集（前后端契约，键名勿改；项目名称=assets.name，序号不入库） ----------
+
+DEFAULT_CONTRACT_SUBTYPE_FIELDS = {
+    "编标": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间", "合同编号",
+             "费率", "项目负责人", "工程造价（万元）", "合同扫描件", "OA系统", "备注"],
+    "审标": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间", "合同编号",
+             "费率", "项目负责人", "工程造价（万元）", "建筑面积", "合同扫描件", "OA系统", "备注"],
+    "跟踪": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间", "合同编号",
+             "费率", "咨询类型", "项目负责人", "工程造价（万元）", "建筑面积",
+             "合同扫描件", "OA系统", "备注"],
+    "结算": ["委托单位", "咨询单位", "份数", "签订日期", "合同到期时间", "合同编号",
+             "费率", "项目负责人", "工程造价（万元）", "建筑面积", "审计委托书",
+             "合同扫描件", "OA系统", "备注"],
+    "水利审计": ["委托单位", "份数", "签订日期", "文号", "委托书编号", "合同编号", "批复", "备注"],
+    "中标通知书": ["招标人", "中标金额", "份数", "日期", "编号", "合同签订情况", "备注"],
+}
+
+CONTRACT_SUBTYPES = tuple(DEFAULT_CONTRACT_SUBTYPE_FIELDS)
+
+
+def _default_subtype_entries(subtype: str) -> list:
+    return [{"key": k, "type": "text", "options": []}
+            for k in DEFAULT_CONTRACT_SUBTYPE_FIELDS[subtype]]
+
 
 def _copy_defaults(kind: str) -> list:
     return [{"key": f["key"], "type": f["type"], "options": list(f["options"])}
@@ -87,20 +111,36 @@ def _normalize_field_list(entries) -> list:
 
 
 def get_field_config() -> dict:
-    """读取统一字段配置；未保存或某类为空时返回该类默认配置。"""
+    """读取统一字段配置；未保存或某类为空时返回该类默认配置。
+    额外含 contract_subtypes：{子类型: [{key, type, options}...]}，未保存回退默认。"""
     raw = load_settings().get("field_config") or {}
     result = {}
     for kind in ("person", "contract"):
         entries = _normalize_field_list(raw.get(kind))
         result[kind] = entries if entries else _copy_defaults(kind)
+    saved_sub = raw.get("contract_subtypes") or {}
+    result["contract_subtypes"] = {
+        st: (_normalize_field_list(saved_sub.get(st)) or _default_subtype_entries(st))
+        for st in CONTRACT_SUBTYPES
+    }
     return result
 
 
 def save_field_config(cfg: dict) -> dict:
     """保存统一字段配置（存 settings 的 field_config 键），返回规范化后的配置。"""
-    normalized = {kind: _normalize_field_list((cfg or {}).get(kind))
+    cfg = cfg or {}
+    normalized = {kind: _normalize_field_list(cfg.get(kind))
                   for kind in ("person", "contract")}
     all_settings = load_settings()
+    if "contract_subtypes" in cfg:
+        raw_sub = cfg.get("contract_subtypes") or {}
+        normalized["contract_subtypes"] = {
+            st: _normalize_field_list(raw_sub.get(st)) for st in CONTRACT_SUBTYPES}
+    else:
+        # 未提交 contract_subtypes 时保留已存值，避免 PUT 旧结构配置时丢失
+        prev = (all_settings.get("field_config") or {}).get("contract_subtypes")
+        if prev:
+            normalized["contract_subtypes"] = prev
     all_settings["field_config"] = normalized
     save_settings(all_settings)
     return normalized
