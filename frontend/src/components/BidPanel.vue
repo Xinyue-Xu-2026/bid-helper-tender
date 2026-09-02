@@ -2,8 +2,9 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  bidExportUrl, exportBidTemplate, getBidAssets, getFieldConfig, listAssets, saveBidAssets,
+  bidExportUrl, exportBidTemplate, getBidAssets, listAssets, saveBidAssets,
 } from '../api'
+import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
 
 const props = defineProps({ projectId: Number, bidDate: String })
 
@@ -12,12 +13,13 @@ const contracts = ref([])
 const selectedPersons = ref([])
 const selectedContracts = ref([])
 const roles = ref({})
-const fieldConfig = ref({ person: [], contract: [] })
 const personTable = ref(null)
 const contractTable = ref(null)
 const loading = ref(false)
 const saving = ref(false)
 const exporting = ref(false)
+// 旧版 Excel/Word 导出按格式记录 loading（导出走后端已保存勾选，故先保存再导出）
+const exportingLegacy = ref('')
 
 const selectedPersonIds = computed(() => new Set(selectedPersons.value.map(r => r.id)))
 const selectedContractIds = computed(() => new Set(selectedContracts.value.map(r => r.id)))
@@ -47,8 +49,19 @@ const CONTRACT_TYPE_OPTIONS = ['编标', '审标', '跟踪', '结算', '水利�
 const typeFilter = ref([])
 const keyword = ref('')
 const yearFilter = ref('')
+const leadFilter = ref('')
 const amountMin = ref(null)
 const amountMax = ref(null)
+
+// 项目负责人选项：全部人员姓名 ∪ 合同中已出现的 fields['项目负责人'] 非空非"/"值，去重排序
+const leadOptions = computed(() => {
+  const names = new Set(persons.value.map(p => p.name).filter(Boolean))
+  for (const c of contracts.value) {
+    const v = String(c.fields?.['项目负责人'] ?? '').trim()
+    if (v && v !== '/') names.add(v)
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh'))
+})
 
 // 年份选项：fields['年份'] 去重，前 4 位数字降序
 const contractYearOptions = computed(() => {
@@ -82,6 +95,8 @@ const filteredContracts = computed(() => {
     if (kw && !(c.name || '').includes(kw)
         && !String(c.fields?.['委托单位'] ?? '').includes(kw)) return false
     if (yearFilter.value && String(c.fields?.['年份'] ?? '').trim() !== yearFilter.value) return false
+    if (leadFilter.value
+        && String(c.fields?.['项目负责人'] ?? '').trim() !== leadFilter.value) return false
     if (useAmount) {
       const amt = parseAmount(c)
       if (amt === null) return false
@@ -100,7 +115,7 @@ const pagedContracts = computed(() => {
   return filteredContracts.value.slice(start, start + contractPageSize.value)
 })
 // 筛选条件变化时回到第 1 页（勾选靠 row-key + reserve-selection 跨页保留）
-watch([typeFilter, keyword, yearFilter, amountMin, amountMax],
+watch([typeFilter, keyword, yearFilter, leadFilter, amountMin, amountMax],
   () => { contractPage.value = 1 }, { deep: true })
 
 // ---------- 小节归属（仅本次导出用，默认小节1） ----------
@@ -111,16 +126,8 @@ function onContractSelectionChange(rows) {
   for (const r of rows) if (!sections.value[r.id]) sections.value[r.id] = 1
 }
 
-// 企业业绩列：复用 AssetsView 的 contractCols 逻辑——字段配置驱动，未配置时用默认列
-const contractCols = computed(() =>
-  fieldConfig.value.contract.length
-    ? fieldConfig.value.contract
-    : [
-        { key: '类型', type: 'dropdown', options: ['编标', '审标', '跟踪', '结算'] },
-        { key: '项目经理', type: 'text', options: [] },
-        { key: '合同金额', type: 'text', options: [] },
-        { key: '年份', type: 'text', options: [] },
-      ])
+// 业绩表格列：[类型, 年份] + 子类型字段有序并集（见 constants/contractSubtypes.js）
+const unionCols = CONTRACT_UNION_FIELDS
 
 // 字段值显示：数组/对象折叠为摘要，避免出现 [object Object]
 function displayField(v) {
@@ -163,15 +170,13 @@ function certLabel(row, cert) {
 async function load() {
   loading.value = true
   try {
-    const [p, c, selected, cfg] = await Promise.all([
+    const [p, c, selected] = await Promise.all([
       listAssets('person'),
       listAssets('contract'),
       getBidAssets(props.projectId),
-      getFieldConfig().catch(() => null),
     ])
     persons.value = p
     contracts.value = c
-    if (cfg) fieldConfig.value = { person: cfg.person || [], contract: cfg.contract || [] }
 
     // 回填已选：勾选状态用 toggleRowSelection（需等表格渲染完成），岗位回填到对应行
     const personSel = new Map((selected.persons || []).map(x => [x.asset_id, x.role || '']))
@@ -197,6 +202,20 @@ async function onSave() {
     ElMessage.success('勾选已保存')
   } finally {
     saving.value = false
+  }
+}
+
+// 导出 Excel/Word：先按当前勾选保存（载荷同 onSave），成功后再触发后端导出
+async function onExport(fmt) {
+  exportingLegacy.value = fmt
+  try {
+    await saveBidAssets(props.projectId, {
+      persons: selectedPersons.value.map(r => ({ asset_id: r.id, role: roles.value[r.id] || '' })),
+      contracts: selectedContracts.value.map(r => r.id),
+    })
+    window.open(bidExportUrl(props.projectId, fmt), '_blank')
+  } catch { /* 保存失败：拦截器已弹错，中止导出 */ } finally {
+    exportingLegacy.value = ''
   }
 }
 
@@ -286,6 +305,10 @@ onMounted(load)
       </el-select>
       <el-input v-model="keyword" clearable placeholder="关键词（项目名称/委托单位）"
                 style="width: 220px" />
+      <el-select v-model="leadFilter" clearable filterable placeholder="项目负责人"
+                 style="width: 150px">
+        <el-option v-for="n in leadOptions" :key="n" :label="n" :value="n" />
+      </el-select>
       <el-select v-model="yearFilter" clearable placeholder="年份" style="width: 130px">
         <el-option v-for="y in contractYearOptions" :key="y" :label="y" :value="y" />
       </el-select>
@@ -299,8 +322,18 @@ onMounted(load)
               @selection-change="onContractSelectionChange">
       <el-table-column type="selection" width="45" reserve-selection />
       <el-table-column prop="name" label="项目名称" min-width="200" show-overflow-tooltip />
-      <el-table-column v-for="f in contractCols" :key="f.key" :label="f.key" min-width="120">
-        <template #default="{ row }">{{ displayField(row.fields[f.key]) || '-' }}</template>
+      <el-table-column label="类型" width="110">
+        <template #default="{ row }">
+          <el-tag v-if="row.fields['类型']" size="small">{{ row.fields['类型'] }}</el-tag>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="年份" width="100">
+        <template #default="{ row }">{{ row.fields['年份'] || '-' }}</template>
+      </el-table-column>
+      <el-table-column v-for="k in unionCols" :key="k" :label="k" min-width="120"
+                       show-overflow-tooltip>
+        <template #default="{ row }">{{ displayField(row.fields[k]) || '-' }}</template>
       </el-table-column>
       <el-table-column label="小节" width="110">
         <template #default="{ row }">
@@ -322,8 +355,8 @@ onMounted(load)
       <el-button type="primary" :loading="saving" @click="onSave">保存勾选</el-button>
       <el-button type="primary" plain :loading="exporting"
                  @click="onExportTemplate">导出商务标（模板）</el-button>
-      <el-button tag="a" :href="bidExportUrl(projectId, 'xlsx')" target="_blank">导出 Excel</el-button>
-      <el-button tag="a" :href="bidExportUrl(projectId, 'docx')" target="_blank">导出 Word</el-button>
+      <el-button :loading="exportingLegacy === 'xlsx'" @click="onExport('xlsx')">导出 Excel</el-button>
+      <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">导出 Word</el-button>
     </el-space>
   </div>
 </template>
