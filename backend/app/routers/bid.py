@@ -1,4 +1,5 @@
 """商务标：项目维度的拟派人员/企业业绩勾选查询、保存与导出（设计文档 §5.1–5.3）。"""
+import json
 import tempfile
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app import config
+from app.core.bid_draft_exporter import fill_draft
 from app.core.bid_exporter import build_bid_docx, build_bid_xlsx
 from app.core.bid_template_exporter import build_bid_docx_from_template
 from app.db import Database
@@ -107,29 +109,50 @@ def export_bid_assets(project_id: int, background_tasks: BackgroundTasks,
 def export_bid_template(project_id: int, body: BidTemplateExportIn,
                         background_tasks: BackgroundTasks,
                         db: Database = Depends(get_db)):
-    """模板式商务标导出：以 data/商务标模板.docx 为底稿填充两节表格。"""
+    """模板式商务标导出：项目有底稿（bid_templates）走绑定驱动新管线
+    （fill_draft + X-Fill-Report 头），否则回退旧模板路径
+    （data/商务标模板.docx + build_bid_docx_from_template，行为不变）。"""
     project = _get_project_or_404(db, project_id)
     if not body.persons and not body.contracts:
         raise HTTPException(422, "请先勾选人员或业绩")
-    template = config.BID_TEMPLATE_PATH
-    if not template.exists():
-        raise HTTPException(503, "商务标模板未配置（data/商务标模板.docx 缺失）")
-    data = bid_service.assemble_bid_template_data(
-        db,
-        [p.model_dump() for p in body.persons],
-        [c.model_dump() for c in body.contracts],
-    )
     effective_name = (body.project_name or "").strip() or project["name"]
-    data["project_no"] = (body.project_no or "").strip()
-    data["project_name"] = effective_name
-    data["doc_date"] = (body.doc_date or "").strip()
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in effective_name)
     dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_商务标.docx"
-    build_bid_docx_from_template(str(template), str(dest), data)
-    background_tasks.add_task(Path(dest).unlink, missing_ok=True)
     filename = quote(f"{effective_name}_商务标.docx")
+    headers = {"Content-Disposition": f"attachment; filename*=utf-8''{filename}"}
+
+    bt = db.get_project_bid_template(project_id)
+    if bt and Path(bt.get("file_path") or "").exists():
+        # 新管线：底稿 + 用户确认 bindings 填充，附填充/校验报告
+        bindings = bt.get("bindings") or {}
+        data = bid_service.assemble_bid_draft_data(
+            db, project_id,
+            [p.model_dump() for p in body.persons],
+            [c.model_dump() for c in body.contracts])
+        report = fill_draft(bt["file_path"], str(dest), bindings, data,
+                            project_no=(body.project_no or "").strip(),
+                            project_name=effective_name,
+                            doc_date=(body.doc_date or "").strip())
+        headers["X-Fill-Report"] = quote(
+            json.dumps(report, ensure_ascii=False))
+    else:
+        # 旧路径：固定模板填充（无底稿时保持原有行为）
+        template = config.BID_TEMPLATE_PATH
+        if not template.exists():
+            raise HTTPException(503, "商务标模板未配置（data/商务标模板.docx 缺失）")
+        data = bid_service.assemble_bid_template_data(
+            db,
+            [p.model_dump() for p in body.persons],
+            [c.model_dump() for c in body.contracts],
+        )
+        data["project_no"] = (body.project_no or "").strip()
+        data["project_name"] = effective_name
+        data["doc_date"] = (body.doc_date or "").strip()
+        build_bid_docx_from_template(str(template), str(dest), data)
+
+    background_tasks.add_task(Path(dest).unlink, missing_ok=True)
     return FileResponse(
         str(dest),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=utf-8''{filename}"},
+        headers=headers,
     )

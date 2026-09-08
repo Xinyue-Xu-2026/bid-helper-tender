@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import config
 from app.db import Database
-from app.routers import assets, bid, compliance, export, imports, materials, mimic, projects, requirements, settings, templates, write
+from app.routers import assets, bid, bid_draft, compliance, export, imports, materials, mimic, projects, requirements, settings, templates, write
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +38,7 @@ app.include_router(mimic.router, prefix="/api", tags=["mimic"])
 app.include_router(materials.router, prefix="/api", tags=["materials"])
 app.include_router(imports.router, prefix="/api/import", tags=["import"])
 app.include_router(bid.router, prefix="/api", tags=["bid"])
+app.include_router(bid_draft.router, prefix="/api", tags=["bid-draft"])
 
 _dist = config.APP_ROOT / "frontend" / "dist"
 if _dist.exists():
