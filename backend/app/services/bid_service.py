@@ -116,7 +116,8 @@ def cert_warnings(person_fields: dict, bid_date: str, today: date, days: int = 3
 
 
 def get_bid_assets(db: Database, project_id: int) -> dict:
-    """设计文档 §5.1：已选人员（含 role 与证书警告）与已选业绩。项目存在性由路由层校验。"""
+    """设计文档 §5.1：已选人员（含 role/is_lead/certs 与证书警告）与已选业绩（含 section）。
+    项目存在性由路由层校验。旧格式存储由 db 层归一化（is_lead=false/certs=null/section=1）。"""
     project = db.get_project(project_id)
     bid_date = (project or {}).get("bid_date") or ""
     today = date.today()
@@ -126,23 +127,26 @@ def get_bid_assets(db: Database, project_id: int) -> dict:
         persons.append({
             "asset_id": row["asset_id"],
             "role": row.get("role") or "",
+            "is_lead": bool(row.get("is_lead")),
+            "certs": row.get("certs"),
             "name": row["name"],
             "fields": fields,
             "expiry_date": row.get("expiry_date") or "",
             "cert_warnings": cert_warnings(fields, bid_date, today, days=30),
         })
     contracts = [
-        {"asset_id": row["asset_id"], "name": row["name"],
-         "fields": row.get("fields") or {}}
+        {"asset_id": row["asset_id"], "section": row.get("section") or 1,
+         "name": row["name"], "fields": row.get("fields") or {}}
         for row in db.get_project_assets(project_id, asset_type="contract")
     ]
     return {"persons": persons, "contracts": contracts}
 
 
 def save_bid_assets(db: Database, project_id: int, persons: list, contracts: list) -> None:
-    """校验后覆盖式保存勾选：asset_id 必须存在且类型匹配（persons→person，contracts→contract）。"""
+    """校验后覆盖式保存勾选：asset_id 必须存在且类型匹配（persons→person，contracts→contract）。
+    persons 条目可含 is_lead/certs；contracts 兼容裸 id 与 {asset_id, section}。"""
     person_ids = [p["asset_id"] for p in persons]
-    contract_ids = list(contracts)
+    contract_ids = [c["asset_id"] if isinstance(c, dict) else c for c in contracts]
     found = {}
     for aid in set(person_ids + contract_ids):
         asset = db.get_asset(aid)
@@ -161,7 +165,7 @@ def save_bid_assets(db: Database, project_id: int, persons: list, contracts: lis
 
 def expiring_detail(db: Database, days: int = 30) -> list:
     """设计文档 §5.4：证书级到期明细。person 逐本证书一行；credit 用其 expiry_date。
-    仅含 0 <= days_left <= days，按 days_left 升序。"""
+    含已到期（days_left < 0）与 days 天内到期，按 days_left 升序。"""
     today = date.today()
     rows = []
     for asset in db.get_assets(type="person"):
@@ -173,7 +177,7 @@ def expiring_detail(db: Database, days: int = 30) -> list:
             if not expiry:
                 continue
             days_left = (date.fromisoformat(expiry) - today).days
-            if not 0 <= days_left <= days:
+            if days_left > days:
                 continue
             rows.append({
                 "type": "person",
@@ -192,7 +196,7 @@ def expiring_detail(db: Database, days: int = 30) -> list:
         except ValueError:
             continue
         days_left = (d - today).days
-        if not 0 <= days_left <= days:
+        if days_left > days:
             continue
         rows.append({
             "type": "credit",
@@ -223,8 +227,29 @@ def service_type_label(contract_fields: dict) -> str:
     return SERVICE_TYPE_MAP.get(t, t)
 
 
+def effective_work_years(fields: dict) -> str:
+    """专业工作年限列：从业年限 + max(0, 今年 - 从业年限基准年)。"""
+    fields = fields or {}
+    base = str(fields.get("从业年限") or "").strip()
+    if not base:
+        return ""
+    try:
+        base_num = int(float(base))
+    except (TypeError, ValueError):
+        return base
+    base_year_raw = str(fields.get("从业年限基准年") or "").strip()
+    effective = base_num
+    if base_year_raw:
+        try:
+            base_year = int(base_year_raw[:4])
+            effective = base_num + max(0, date.today().year - base_year)
+        except (TypeError, ValueError):
+            pass
+    return f"{effective}年"
+
+
 def _cert_qualifications(fields: dict) -> str:
-    """执业资格列：逐本证书 "{专业}专业{类型}"（无专业仅类型），多本换行。"""
+    """执业资格列：逐本证书 "{专业}专业{类型}"，多本换行。"""
     parts = []
     for cert in (fields or {}).get("证书") or []:
         if not isinstance(cert, dict):
@@ -245,7 +270,14 @@ def assemble_bid_template_data(db: Database, person_picks: list,
     for pick in person_picks or []:
         asset = db.get_asset(pick.get("asset_id"))
         if asset and asset.get("type") == "person":
-            persons.append({"name": asset["name"], "fields": asset.get("fields") or {},
+            fields = dict(asset.get("fields") or {})
+            # 证书按用户勾选过滤：certs 为选中下标列表；未传（None）则保留全部
+            indices = pick.get("certs")
+            if indices is not None:
+                certs = fields.get("证书") or []
+                fields["证书"] = [certs[i] for i in indices
+                                  if isinstance(i, int) and 0 <= i < len(certs)]
+            persons.append({"name": asset["name"], "fields": fields,
                             "is_lead": bool(pick.get("is_lead"))})
     persons.sort(key=lambda p: not p["is_lead"])  # 负责人排最前（稳定排序）
 
@@ -257,7 +289,8 @@ def assemble_bid_template_data(db: Database, person_picks: list,
                               "section": pick.get("section")})
 
     def person_row(label: str, p: dict) -> list:
-        return [label, p["name"], str(p["fields"].get("职称") or ""), "",
+        return [label, p["name"], str(p["fields"].get("职称") or ""),
+                effective_work_years(p["fields"]),
                 _cert_qualifications(p["fields"])]
 
     lead = next((p for p in persons if p["is_lead"]), None)
@@ -294,4 +327,4 @@ def assemble_bid_template_data(db: Database, person_picks: list,
     table_c = [perf7(i, c) for i, c in enumerate(lead_contracts, 1)]
 
     return {"a": table_a, "b": table_b, "c": table_c, "d": table_d,
-            "e": table_e, "f": table_f, "g": table_g}
+            "e": table_e, "f": table_f, "g": table_g, "persons": persons}

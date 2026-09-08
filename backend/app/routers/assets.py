@@ -3,8 +3,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from app import config, settings_store
@@ -198,3 +198,72 @@ def upload_asset_file(asset_id: int, file: UploadFile, db: Database = Depends(ge
         shutil.copyfileobj(file.file, f)
     db.update_asset(asset_id, file_path=str(dest))
     return {"file_path": str(dest)}
+
+
+_PERSON_IMAGE_CATEGORIES = {"职称证书", "社保缴纳证明", "身份证"}
+
+
+@router.post("/{asset_id}/person-image")
+def upload_person_image(asset_id: int, file: UploadFile, category: str = Form(...),
+                        db: Database = Depends(get_db)):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "资产不存在")
+    if category not in _PERSON_IMAGE_CATEGORIES:
+        raise HTTPException(400, f"非法图片分类 {category}")
+    config.ensure_dirs()
+    suffix = Path(file.filename or "").suffix.lower() or ".png"
+    dest = config.FILES_DIR / f"person_{asset_id}_{category}{suffix}"
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    fields = dict(asset.get("fields") or {})
+    fields[f"{category}扫描件"] = str(dest)
+    db.update_asset(asset_id, fields=fields)
+    return {"ok": True, "file_path": str(dest)}
+
+
+@router.post("/{asset_id}/cert-image")
+def upload_cert_image(asset_id: int, file: UploadFile, cert_index: int = Form(...),
+                      db: Database = Depends(get_db)):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "资产不存在")
+    fields = dict(asset.get("fields") or {})
+    certs = fields.get("证书")
+    if not isinstance(certs, list) or not (0 <= cert_index < len(certs)):
+        raise HTTPException(400, "证书序号无效")
+    config.ensure_dirs()
+    suffix = Path(file.filename or "").suffix.lower() or ".png"
+    dest = config.FILES_DIR / f"cert_{asset_id}_{cert_index}{suffix}"
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    certs[cert_index] = dict(certs[cert_index])
+    certs[cert_index]["扫描件"] = str(dest)
+    fields["证书"] = certs
+    db.update_asset(asset_id, fields=fields)
+    return {"ok": True, "file_path": str(dest)}
+
+
+@router.get("/{asset_id}/image/{category}")
+def get_person_image(asset_id: int, category: str, db: Database = Depends(get_db)):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "资产不存在")
+    path = (asset.get("fields") or {}).get(f"{category}扫描件") or ""
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(path)
+
+
+@router.get("/{asset_id}/cert-image/{cert_index}")
+def get_cert_image(asset_id: int, cert_index: int, db: Database = Depends(get_db)):
+    asset = db.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(404, "资产不存在")
+    certs = (asset.get("fields") or {}).get("证书") or []
+    if not (isinstance(certs, list) and 0 <= cert_index < len(certs)):
+        raise HTTPException(404, "证书序号无效")
+    path = (certs[cert_index] or {}).get("扫描件") or ""
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(path)

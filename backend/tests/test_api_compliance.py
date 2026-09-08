@@ -32,7 +32,9 @@ def test_compliance_flow(client, db_path):
     assert data["items"][0]["checked"] is True
 
 
-def test_ai_check_placeholder(client):
+def test_ai_check_no_requirements(client):
+    """无待核对要求时直接返回空结果（无需调用 LLM），请求体可省略。"""
     pid = client.post("/api/projects", json={"name": "p"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/compliance/ai-check")
-    assert r.status_code == 501
+    assert r.status_code == 200
+    assert r.json() == {"results": []}

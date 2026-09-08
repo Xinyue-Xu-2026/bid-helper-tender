@@ -3,8 +3,9 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  confirmImport, createAsset, deleteAsset, downloadImportTemplate, getFieldConfig,
-  getImportSettings, importAssets, listAssets, scanImport, updateAsset, uploadAssetFile,
+  certImageUrl, confirmImport, createAsset, deleteAsset, downloadImportTemplate, getFieldConfig,
+  getImportSettings, importAssets, listAssets, personImageUrl, scanImport, updateAsset,
+  uploadAssetFile, uploadCertImage, uploadPersonImage,
 } from '../api'
 import { CONTRACT_SUBTYPES } from '../constants/contractSubtypes'
 
@@ -173,6 +174,29 @@ function tagTypeOf(v, options) {
 function certTagType(v) { return tagTypeOf(v, certTypeOptions) }
 function perfTagType(v) { return tagTypeOf(v, performanceTypeOptions.value) }
 
+// 从业年限有效值：基础年限 + max(0, 当前年份 - 基准年)；空返回 ''，非数字原样返回
+function effectiveYears(fields) {
+  const raw = String(fields?.['从业年限'] ?? '').trim()
+  if (!raw) return ''
+  const base = parseInt(raw.replace(/年$/, ''), 10)
+  if (Number.isNaN(base)) return raw
+  const ref = String(fields?.['从业年限基准年'] ?? '').trim()
+  const m = ref.match(/(\d{4})/)
+  const years = m ? base + Math.max(0, new Date().getFullYear() - Number(m[1])) : base
+  return `${years}年`
+}
+
+// 从业年限有效值（数字）：无有效值返回 null
+function effectiveYearsNumber(fields) {
+  const raw = String(fields?.['从业年限'] ?? '').trim()
+  if (!raw) return null
+  const base = parseInt(raw.replace(/年$/, ''), 10)
+  if (Number.isNaN(base)) return null
+  const ref = String(fields?.['从业年限基准年'] ?? '').trim()
+  const m = ref.match(/(\d{4})/)
+  return m ? base + Math.max(0, new Date().getFullYear() - Number(m[1])) : base
+}
+
 async function load() { assets.value = await listAssets(tab.value) }
 
 function openDialog(row) {
@@ -180,6 +204,11 @@ function openDialog(row) {
   const fields = row ? { ...row.fields } : {}
   if (tab.value === 'person') {
     fields['证书'] = Array.isArray(fields['证书']) ? fields['证书'].map(c => ({ ...c })) : []
+    // 编辑时把「从业年限」显示为当前有效值（含每年自动 +1）
+    if (row) {
+      const n = effectiveYearsNumber(row.fields)
+      if (n !== null) fields['从业年限'] = String(n)
+    }
   }
   // 合同新建：年份默认当前年份（可改选已有年份或输入新年份）
   if (tab.value === 'contract' && !row) fields['年份'] = String(new Date().getFullYear())
@@ -193,6 +222,38 @@ function newCertRow() {
   form.value.fields['证书'].push({ 类型: '', 编号: '', 专业: '', 执业时间: '', 有效期至: '' })
 }
 
+// ---------- 人员图片上传（仅编辑已存在人员时可用，新增时无 id 不上传） ----------
+// 图片 URL 缓存戳：上传后 +1 强制 <img> 重新请求
+const imgVersion = ref(0)
+
+async function onUploadPersonImage(category, options) {
+  if (!editing.value) return
+  await uploadPersonImage(editing.value.id, category, options.file)
+  form.value.fields[`${category}扫描件`] = personImageUrl(editing.value.id, category)
+  imgVersion.value++
+  ElMessage.success('已上传')
+}
+
+async function onUploadCertImage(certIndex, options) {
+  if (!editing.value) return
+  await uploadCertImage(editing.value.id, certIndex, options.file)
+  form.value.fields['证书'][certIndex]['扫描件'] = certImageUrl(editing.value.id, certIndex)
+  imgVersion.value++
+  ElMessage.success('已上传')
+}
+
+// 展开行内直接上传证书扫描件（person 为列表行对象，已有 id）
+async function onUploadRowCertImage(person, certIndex, options) {
+  try {
+    await uploadCertImage(person.id, certIndex, options.file)
+    person.fields['证书'][certIndex]['扫描件'] = certImageUrl(person.id, certIndex)
+    imgVersion.value++
+    ElMessage.success('已上传')
+  } catch {
+    ElMessage.error('上传失败')
+  }
+}
+
 async function save() {
   const payload = { ...form.value, type: tab.value }
   if (tab.value === 'person') {
@@ -200,6 +261,14 @@ async function save() {
     payload.fields = { ...payload.fields }
     payload.fields['证书'] = (payload.fields['证书'] || [])
       .filter(c => c['类型'] || c['编号'] || c['专业'] || c['执业时间'] || c['有效期至'])
+    // 从业年限非空时记录基准年（之后每年自动 +1）
+    if (String(payload.fields['从业年限'] ?? '').trim())
+      payload.fields['从业年限基准年'] = String(new Date().getFullYear())
+    // 扫描件字段仅用于前端预览（真实路径由后端上传接口维护），提交前剔除避免污染数据
+    delete payload.fields['职称证书扫描件']
+    delete payload.fields['社保缴纳证明扫描件']
+    delete payload.fields['身份证扫描件']
+    for (const c of (payload.fields['证书'] || [])) delete c['扫描件']
   }
   if (tab.value === 'contract') {
     // 子类型固定写入 fields['类型']，与各子页面过滤口径一致
@@ -231,10 +300,22 @@ async function onImport(options) {
   load()
 }
 
+// 返回 'expired'（已到期）| 'soon'（0-30 天内到期）| ''（正常或无效日期）
+function expiryState(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(String(dateStr).trim().replace(/\//g, '-'))
+  if (isNaN(d.getTime())) return ''
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  d.setHours(0, 0, 0, 0)
+  const days = (d - today) / 86400000
+  if (days < 0) return 'expired'
+  if (days <= 30) return 'soon'
+  return ''
+}
+
 function isExpiringSoon(row) {
-  if (!row.expiry_date) return false
-  const days = (new Date(row.expiry_date) - new Date()) / 86400000
-  return days >= 0 && days <= 30
+  return expiryState(row.expiry_date) === 'soon'
 }
 
 function onTabChange() { load() }
@@ -389,7 +470,7 @@ onMounted(load)
       <el-button :loading="scanning" @click="onImportFolder">从共享文件夹导入</el-button>
     </el-space>
     <el-table :key="`${contractSubtab}-${contractYearTab}`" :data="pagedContracts"
-              :row-class-name="({ row }) => isExpiringSoon(row) ? 'expiring-row' : ''">
+              :row-class-name="({ row }) => expiryState(row.expiry_date) ? 'expiring-row' : ''">
       <el-table-column prop="name" label="项目名称" min-width="200" show-overflow-tooltip />
       <el-table-column v-for="k in currentSubtype.fields" :key="k" :label="k" min-width="130"
                        show-overflow-tooltip>
@@ -426,7 +507,8 @@ onMounted(load)
     <el-button :loading="scanning" @click="onImportFolder">从共享文件夹导入</el-button>
   </el-space>
 
-  <el-table :key="tab" :data="assets" :row-class-name="({ row }) => isExpiringSoon(row) ? 'expiring-row' : ''">
+  <el-table :key="tab" :data="assets"
+            :row-class-name="({ row }) => tab !== 'person' && expiryState(row.expiry_date) ? 'expiring-row' : ''">
     <!-- 人员：展开显示证书与业绩明细 -->
     <el-table-column v-if="tab === 'person'" type="expand">
       <template #default="{ row }">
@@ -449,8 +531,34 @@ onMounted(load)
               <el-table-column label="执业时间" width="120">
                 <template #default="{ row: c }">{{ c['执业时间'] || '-' }}</template>
               </el-table-column>
-              <el-table-column label="有效期至" width="120">
-                <template #default="{ row: c }">{{ c['有效期至'] || '-' }}</template>
+              <el-table-column label="有效期至" width="170">
+                <template #default="{ row: c }">
+                  <template v-if="c['有效期至']">
+                    {{ c['有效期至'] }}
+                    <el-tag v-if="expiryState(c['有效期至']) === 'expired'" type="danger" size="small"
+                            style="margin-left: 4px">已到期</el-tag>
+                    <el-tag v-else-if="expiryState(c['有效期至']) === 'soon'" type="warning" size="small"
+                            style="margin-left: 4px">即将到期</el-tag>
+                  </template>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="扫描件" width="120">
+                <template #default="certScope">
+                  <div style="display: flex; align-items: center; gap: 6px">
+                    <el-image v-if="certScope.row['扫描件']"
+                              :src="certImageUrl(row.id, certScope.$index) + '?t=' + imgVersion"
+                              :preview-src-list="[certImageUrl(row.id, certScope.$index) + '?t=' + imgVersion]"
+                              preview-teleported fit="cover"
+                              style="width: 48px; height: 34px; border-radius: 4px; flex-shrink: 0" />
+                    <el-upload :show-file-list="false" accept="image/*"
+                               :http-request="opt => onUploadRowCertImage(row, certScope.$index, opt)">
+                      <el-button size="small" link type="primary">
+                        {{ certScope.row['扫描件'] ? '重新上传' : '上传' }}
+                      </el-button>
+                    </el-upload>
+                  </div>
+                </template>
               </el-table-column>
             </el-table>
             <div v-else class="expand-empty">暂无证书记录</div>
@@ -473,6 +581,9 @@ onMounted(load)
       </template>
     </el-table-column>
     <el-table-column prop="name" :label="currentTab().nameLabel" width="180" />
+    <el-table-column v-if="tab === 'person'" label="从业年限" width="100">
+      <template #default="{ row }">{{ effectiveYears(row.fields) || '-' }}</template>
+    </el-table-column>
     <template v-if="isConfigTab">
       <el-table-column v-for="f in configCols" :key="f.key" :label="f.key" min-width="120">
         <template #default="{ row }">
@@ -487,14 +598,19 @@ onMounted(load)
         <template #default="{ row }">{{ displayField(row.fields[f]) }}</template>
       </el-table-column>
     </template>
-    <el-table-column v-if="currentTab().hasExpiry" label="有效期至" width="130">
+    <el-table-column v-if="currentTab().hasExpiry && tab !== 'person'" label="有效期至" width="130">
       <template #default="{ row }">
-        <span :style="isExpiringSoon(row) ? 'color: #f56c6c; font-weight: bold' : ''">
-          {{ row.expiry_date }}{{ isExpiringSoon(row) ? '（即将到期）' : '' }}
+        <span v-if="expiryState(row.expiry_date) === 'expired'"
+              style="color: #f56c6c; font-weight: bold; background: #fde2e2; padding: 1px 6px; border-radius: 4px">
+          {{ row.expiry_date }}（已到期）
         </span>
+        <span v-else-if="isExpiringSoon(row)" style="color: #f56c6c; font-weight: bold">
+          {{ row.expiry_date }}（即将到期）
+        </span>
+        <span v-else>{{ row.expiry_date }}</span>
       </template>
     </el-table-column>
-    <el-table-column label="附件" width="120">
+    <el-table-column v-if="tab !== 'person'" label="附件" width="120">
       <template #default="{ row }">
         <el-upload :show-file-list="false" :http-request="opt => onUploadFile(row, opt)">
           <el-button size="small" link type="primary">{{ row.file_path ? '替换' : '上传' }}</el-button>
@@ -517,6 +633,48 @@ onMounted(load)
       <el-form-item :label="currentTab().nameLabel" required>
         <el-input v-model="form.name" />
       </el-form-item>
+      <el-form-item v-if="tab === 'person'" label="从业年限">
+        <el-input v-model="form.fields['从业年限']" placeholder="如：15" style="width: 100%" />
+        <div style="color: #909399; font-size: 12px; line-height: 1.4">
+          按当前年份填写，之后每年自动 +1
+        </div>
+      </el-form-item>
+      <!-- 人员分类图片（职称证书/社保缴纳证明/身份证）：仅编辑已存在人员时可上传 -->
+      <template v-if="tab === 'person' && editing">
+        <el-form-item label="职称证书扫描件">
+          <div>
+            <el-upload :show-file-list="false" accept="image/*"
+                       :http-request="opt => onUploadPersonImage('职称证书', opt)">
+              <el-button size="small">{{ form.fields['职称证书扫描件'] ? '替换' : '上传' }}</el-button>
+            </el-upload>
+            <img v-if="form.fields['职称证书扫描件']"
+                 :src="form.fields['职称证书扫描件'] + '?t=' + imgVersion"
+                 style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
+          </div>
+        </el-form-item>
+        <el-form-item label="社保缴纳证明">
+          <div>
+            <el-upload :show-file-list="false" accept="image/*"
+                       :http-request="opt => onUploadPersonImage('社保缴纳证明', opt)">
+              <el-button size="small">{{ form.fields['社保缴纳证明扫描件'] ? '替换' : '上传' }}</el-button>
+            </el-upload>
+            <img v-if="form.fields['社保缴纳证明扫描件']"
+                 :src="form.fields['社保缴纳证明扫描件'] + '?t=' + imgVersion"
+                 style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
+          </div>
+        </el-form-item>
+        <el-form-item label="身份证">
+          <div>
+            <el-upload :show-file-list="false" accept="image/*"
+                       :http-request="opt => onUploadPersonImage('身份证', opt)">
+              <el-button size="small">{{ form.fields['身份证扫描件'] ? '替换' : '上传' }}</el-button>
+            </el-upload>
+            <img v-if="form.fields['身份证扫描件']"
+                 :src="form.fields['身份证扫描件'] + '?t=' + imgVersion"
+                 style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
+          </div>
+        </el-form-item>
+      </template>
       <!-- 合同业绩：年份（可选已有年份或输入新年份，保存写入 fields['年份']） -->
       <el-form-item v-if="tab === 'contract'" label="年份">
         <el-select v-model="form.fields['年份']" filterable allow-create default-first-option
@@ -575,6 +733,19 @@ onMounted(load)
                 <template #default="{ row: c }">
                   <el-date-picker v-model="c['有效期至']" size="small" value-format="YYYY-MM-DD"
                                   placeholder="有效期至" style="width: 100%" />
+                </template>
+              </el-table-column>
+              <el-table-column label="扫描件" width="130">
+                <template #default="{ row: c, $index }">
+                  <template v-if="editing">
+                    <el-upload :show-file-list="false" accept="image/*"
+                               :http-request="opt => onUploadCertImage($index, opt)">
+                      <el-button size="small" link type="primary">{{ c['扫描件'] ? '替换' : '上传' }}</el-button>
+                    </el-upload>
+                    <img v-if="c['扫描件']" :src="c['扫描件'] + '?t=' + imgVersion"
+                         style="max-width: 80px; max-height: 100px; display: block" />
+                  </template>
+                  <span v-else style="color:#c0c4cc; font-size:12px">保存后上传</span>
                 </template>
               </el-table-column>
               <el-table-column label="" width="60">

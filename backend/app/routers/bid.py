@@ -18,19 +18,10 @@ from app.services import bid_service
 router = APIRouter()
 
 
-class PersonPick(BaseModel):
-    asset_id: int
-    role: str = ""
-
-
-class BidAssetsIn(BaseModel):
-    persons: list[PersonPick] = []
-    contracts: list[int] = []
-
-
 class TemplatePersonPick(BaseModel):
     asset_id: int
     is_lead: bool = False
+    certs: list[int] | None = None
 
 
 class TemplateContractPick(BaseModel):
@@ -38,9 +29,25 @@ class TemplateContractPick(BaseModel):
     section: int = 1
 
 
+class PersonPick(BaseModel):
+    asset_id: int
+    role: str = ""
+    is_lead: bool = False
+    certs: list[int] | None = None  # None=全部证书；数组=勾选的证书下标
+
+
+class BidAssetsIn(BaseModel):
+    persons: list[PersonPick] = []
+    # 兼容旧格式裸 id（section 视为 1）
+    contracts: list[int | TemplateContractPick] = []
+
+
 class BidTemplateExportIn(BaseModel):
     persons: list[TemplatePersonPick] = []
     contracts: list[TemplateContractPick] = []
+    project_no: str = ""      # 项目编号（空则不替换模板残留编号）
+    project_name: str = ""    # 项目名称覆盖（空则用数据库项目名）
+    doc_date: str = ""        # 文档日期 YYYY-MM-DD（空则不替换模板残留日期）
 
 
 def _get_project_or_404(db: Database, project_id: int) -> dict:
@@ -61,11 +68,13 @@ def save_bid_assets(project_id: int, body: BidAssetsIn,
                     db: Database = Depends(get_db)):
     _get_project_or_404(db, project_id)
     persons = [p.model_dump() for p in body.persons]
+    contracts = [c.model_dump() if isinstance(c, TemplateContractPick) else c
+                 for c in body.contracts]
     try:
-        bid_service.save_bid_assets(db, project_id, persons, body.contracts)
+        bid_service.save_bid_assets(db, project_id, persons, contracts)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    return {"ok": True, "persons": len(persons), "contracts": len(body.contracts)}
+    return {"ok": True, "persons": len(persons), "contracts": len(contracts)}
 
 
 @router.get("/projects/{project_id}/bid-assets/export")
@@ -110,11 +119,15 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
         [p.model_dump() for p in body.persons],
         [c.model_dump() for c in body.contracts],
     )
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in project["name"])
+    effective_name = (body.project_name or "").strip() or project["name"]
+    data["project_no"] = (body.project_no or "").strip()
+    data["project_name"] = effective_name
+    data["doc_date"] = (body.doc_date or "").strip()
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in effective_name)
     dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_商务标.docx"
     build_bid_docx_from_template(str(template), str(dest), data)
     background_tasks.add_task(Path(dest).unlink, missing_ok=True)
-    filename = quote(f"{project['name']}_商务标.docx")
+    filename = quote(f"{effective_name}_商务标.docx")
     return FileResponse(
         str(dest),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

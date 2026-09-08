@@ -110,12 +110,31 @@ class Database:
                     asset_id INTEGER NOT NULL,
                     role TEXT DEFAULT '',
                     sort_order INTEGER DEFAULT 0,
+                    is_lead INTEGER NOT NULL DEFAULT 0,
+                    certs TEXT,
+                    section INTEGER NOT NULL DEFAULT 1,
                     UNIQUE (project_id, asset_id),
                     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
                     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
                 )
             """)
+        self._migrate_project_assets_columns()
         self._migrate_perfs_to_contracts()
+
+    def _migrate_project_assets_columns(self):
+        """幂等迁移：旧库的 project_assets 表补 is_lead/certs/section 三列。
+        is_lead=是否项目负责人；certs=JSON 数组（勾选证书下标），NULL=全部证书；
+        section=业绩所在章节（默认 1）。"""
+        with self._connect() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(project_assets)")}
+            if "is_lead" not in cols:
+                conn.execute("ALTER TABLE project_assets "
+                             "ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0")
+            if "certs" not in cols:
+                conn.execute("ALTER TABLE project_assets ADD COLUMN certs TEXT")
+            if "section" not in cols:
+                conn.execute("ALTER TABLE project_assets "
+                             "ADD COLUMN section INTEGER NOT NULL DEFAULT 1")
 
     def _migrate_perfs_to_contracts(self):
         """一次性迁移：person.fields["业绩"] 数组 → contract 资产（幂等）。
@@ -329,9 +348,11 @@ class Database:
 
     # ---------- 商务标勾选（project_assets） ----------
     def get_project_assets(self, project_id: int, asset_type: Optional[str] = None) -> List[dict]:
-        """项目已勾选的资产（JOIN assets，fields 已解析为 dict），按 sort_order、id 升序。"""
+        """项目已勾选的资产（JOIN assets，fields 已解析为 dict），按 sort_order、id 升序。
+        附带勾选元数据：is_lead(bool)、certs(list|None，None=全部证书)、section(int)。"""
         sql = """
             SELECT pa.id, pa.project_id, pa.asset_id, pa.role, pa.sort_order,
+                   pa.is_lead, pa.certs, pa.section,
                    a.name, a.type, a.fields, a.expiry_date
             FROM project_assets pa
             JOIN assets a ON a.id = pa.asset_id
@@ -344,25 +365,51 @@ class Database:
         sql += " ORDER BY pa.sort_order, pa.id"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            return [self._asset_row(r) for r in conn.execute(sql, params).fetchall()]
+            rows = [self._asset_row(r) for r in conn.execute(sql, params).fetchall()]
+        for d in rows:
+            d["is_lead"] = bool(d.get("is_lead"))
+            raw = d.get("certs")
+            if isinstance(raw, str):
+                try:
+                    d["certs"] = json.loads(raw)
+                except json.JSONDecodeError:
+                    d["certs"] = None
+            elif raw is not None and not isinstance(raw, list):
+                d["certs"] = None
+            section = d.get("section")
+            d["section"] = section if isinstance(section, int) and section else 1
+        return rows
 
     def replace_project_assets(self, project_id: int, persons: list, contracts: list):
-        """在单个事务内先删后插项目商务标勾选。persons=[{asset_id, role}]，
-        contracts=[asset_id]（role 置 ''）；sort_order 按传入顺序从 0 连续递增。"""
+        """在单个事务内先删后插项目商务标勾选。
+        persons=[{asset_id, role, is_lead?, certs?}]（certs=None 表示全部证书）；
+        contracts=[asset_id 或 {asset_id, section}]（旧格式裸 id 兼容，section 默认 1）；
+        sort_order 按传入顺序从 0 连续递增。"""
         with self._connect() as conn:
             conn.execute("DELETE FROM project_assets WHERE project_id = ?", (project_id,))
             sort_order = 0
             for p in persons:
+                certs = p.get("certs")
+                certs_json = (json.dumps(certs, ensure_ascii=False)
+                              if isinstance(certs, list) else None)
                 conn.execute(
-                    "INSERT INTO project_assets (project_id, asset_id, role, sort_order) "
-                    "VALUES (?, ?, ?, ?)",
-                    (project_id, p["asset_id"], p.get("role") or "", sort_order))
+                    "INSERT INTO project_assets "
+                    "(project_id, asset_id, role, sort_order, is_lead, certs, section) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (project_id, p["asset_id"], p.get("role") or "", sort_order,
+                     1 if p.get("is_lead") else 0, certs_json))
                 sort_order += 1
-            for asset_id in contracts:
+            for c in contracts:
+                if isinstance(c, dict):
+                    asset_id = c["asset_id"]
+                    section = int(c.get("section") or 1)
+                else:
+                    asset_id, section = c, 1
                 conn.execute(
-                    "INSERT INTO project_assets (project_id, asset_id, role, sort_order) "
-                    "VALUES (?, ?, '', ?)",
-                    (project_id, asset_id, sort_order))
+                    "INSERT INTO project_assets "
+                    "(project_id, asset_id, role, sort_order, is_lead, certs, section) "
+                    "VALUES (?, ?, '', ?, 0, NULL, ?)",
+                    (project_id, asset_id, sort_order, section))
                 sort_order += 1
 
     # ---------- 废标核对 ----------

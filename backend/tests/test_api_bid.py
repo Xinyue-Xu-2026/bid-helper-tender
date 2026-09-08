@@ -87,6 +87,75 @@ def test_put_get_roundtrip(client):
     assert c["asset_id"] == contract_id
     assert c["name"] == "某市政工程"
     assert c["fields"]["合同金额"] == "500万"
+    # 旧格式 PUT（无 is_lead/certs、裸 id 合同）→ GET 归一化默认值
+    assert p["is_lead"] is False
+    assert p["certs"] is None
+    assert c["section"] == 1
+
+
+def test_put_get_roundtrip_with_export_selections(client):
+    """新格式 PUT：is_lead/certs/section 持久化并在 GET 还原。"""
+    pid = _make_project(client)
+    person_a = _make_person(client, "张三", fields={
+        "证书": [{"类型": "一级造价师"}, {"类型": "监理工程师"}]})
+    person_b = _make_person(client, "李四")
+    contract_a = _make_contract(client, "业绩A")
+    contract_b = _make_contract(client, "业绩B")
+
+    r = client.put(_bid_url(pid), json={
+        "persons": [
+            {"asset_id": person_a, "role": "项目经理",
+             "is_lead": True, "certs": [1]},
+            {"asset_id": person_b, "role": "组员", "certs": None},
+        ],
+        "contracts": [
+            {"asset_id": contract_a, "section": 2},
+            {"asset_id": contract_b},  # section 缺省 → 1
+        ],
+    })
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "persons": 2, "contracts": 2}
+
+    data = client.get(_bid_url(pid)).json()
+    pa, pb = data["persons"]
+    assert pa["asset_id"] == person_a
+    assert pa["is_lead"] is True
+    assert pa["certs"] == [1]
+    assert pb["asset_id"] == person_b
+    assert pb["is_lead"] is False
+    assert pb["certs"] is None  # null=全部证书
+    ca, cb = data["contracts"]
+    assert (ca["asset_id"], ca["section"]) == (contract_a, 2)
+    assert (cb["asset_id"], cb["section"]) == (contract_b, 1)
+
+
+def test_get_normalizes_old_format_stored_rows(client, db_path):
+    """模拟旧库数据：db 层以旧格式（无 is_lead/certs、裸 id 合同）写入，
+    再走原始 SQL 插一行不含新列的记录，GET 均应按默认值归一化。"""
+    pid = _make_project(client)
+    person_id = _make_person(client, "张三")
+    contract_id = _make_contract(client, "旧业绩")
+
+    from app.db import Database
+    db = Database(db_path)
+    # 旧形状调用（历史 save_bid_assets 的落库方式）
+    db.replace_project_assets(pid, [{"asset_id": person_id, "role": "项目经理"}],
+                              [contract_id])
+    # 更旧：连新列都不写的原始行（依赖列默认值）
+    person2 = _make_person(client, "李四")
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO project_assets (project_id, asset_id, role, sort_order) "
+            "VALUES (?, ?, ?, ?)", (pid, person2, "组员", 99))
+
+    data = client.get(_bid_url(pid)).json()
+    persons = {p["asset_id"]: p for p in data["persons"]}
+    assert persons[person_id]["is_lead"] is False
+    assert persons[person_id]["certs"] is None
+    assert persons[person2]["is_lead"] is False
+    assert persons[person2]["certs"] is None
+    assert data["contracts"][0]["asset_id"] == contract_id
+    assert data["contracts"][0]["section"] == 1
 
 
 # ---------- 2. PUT 覆盖语义 ----------

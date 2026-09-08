@@ -43,6 +43,23 @@ export const uploadAssetFile = (id, file) => {
   fd.append('file', file)
   return api.post(`/assets/${id}/file`, fd).then(r => r.data)
 }
+// 人员分类图片（职称证书/社保缴纳证明/身份证）
+export const uploadPersonImage = (id, category, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('category', category)
+  return api.post(`/assets/${id}/person-image`, fd).then(r => r.data)
+}
+// 每本证书扫描件
+export const uploadCertImage = (id, certIndex, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('cert_index', certIndex)
+  return api.post(`/assets/${id}/cert-image`, fd).then(r => r.data)
+}
+// 图片预览 URL（带缓存戳避免上传后不刷新）
+export const personImageUrl = (id, category) => `/api/assets/${id}/image/${category}`
+export const certImageUrl = (id, certIndex) => `/api/assets/${id}/cert-image/${certIndex}`
 export const importAssets = (type, file, subtype) => {
   const fd = new FormData()
   fd.append('file', file)
@@ -62,6 +79,9 @@ export const downloadImportTemplate = (type, subtype) =>
 // 废标核对
 export const getCompliance = (pid) => api.get(`/projects/${pid}/compliance`).then(r => r.data)
 export const setCompliance = (rid, checked) => api.put(`/compliance/${rid}`, { checked }).then(r => r.data)
+// AI 判定：requirement_ids 为空数组表示判定所有「需人工确认」项
+export const aiCheckCompliance = (pid, requirementIds = []) =>
+  api.post(`/projects/${pid}/compliance/ai-check`, { requirement_ids: requirementIds }).then(r => r.data)
 
 // 设置
 export const getSettings = () => api.get('/settings').then(r => r.data)

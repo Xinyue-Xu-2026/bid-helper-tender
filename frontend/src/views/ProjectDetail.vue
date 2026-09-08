@@ -139,7 +139,7 @@ onBeforeUnmount(() => { if (es) es.close() })
       <MaterialsPanel :project-id="pid" />
     </el-tab-pane>
     <el-tab-pane label="商务标">
-      <BidPanel :project-id="pid" :bid-date="project.bid_date" />
+      <BidPanel :project-id="pid" :bid-date="project.bid_date" :project-name="project.name" />
     </el-tab-pane>
   </el-tabs>
 </template>

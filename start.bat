@@ -23,7 +23,7 @@ if not errorlevel 1 (
 echo 后端启动中，3 秒后自动打开浏览器 http://127.0.0.1:8366
 echo.
 echo 本机访问:  http://127.0.0.1:8366
-echo 局域网访问: http://192.168.0.177:8366  (同一 WiFi/内网下的其他电脑可用)
+echo 局域网访问: http://192.168.0.162:8366  (同一 WiFi/内网下的其他电脑可用，已设固定IP)
 start "" cmd /c "ping -n 4 127.0.0.1 >nul & start http://127.0.0.1:8366"
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8366
 if errorlevel 1 (

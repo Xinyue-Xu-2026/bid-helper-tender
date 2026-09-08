@@ -6,14 +6,12 @@ import {
 } from '../api'
 import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
 
-const props = defineProps({ projectId: Number, bidDate: String })
+const props = defineProps({ projectId: Number, bidDate: String, projectName: { type: String, default: '' } })
 
 const persons = ref([])
 const contracts = ref([])
-const selectedPersons = ref([])
 const selectedContracts = ref([])
 const roles = ref({})
-const personTable = ref(null)
 const contractTable = ref(null)
 const loading = ref(false)
 const saving = ref(false)
@@ -21,27 +19,39 @@ const exporting = ref(false)
 // 旧版 Excel/Word 导出按格式记录 loading（导出走后端已保存勾选，故先保存再导出）
 const exportingLegacy = ref('')
 
-const selectedPersonIds = computed(() => new Set(selectedPersons.value.map(r => r.id)))
 const selectedContractIds = computed(() => new Set(selectedContracts.value.map(r => r.id)))
 
-// 人员姓名多选：与表格勾选联动（value = 资产 id）
+// 人员姓名多选：搜索式添加（value = 资产 id），已选列表完全由它驱动
 const personPick = ref([])
+// 已选人员：按 personPick 顺序映射出行对象（保持用户添加顺序）
+const selectedPersons = computed(() => {
+  const byId = new Map(persons.value.map(p => [p.id, p]))
+  return personPick.value.map(id => byId.get(id)).filter(Boolean)
+})
+const selectedPersonIds = computed(() => new Set(personPick.value))
 // 项目负责人：仅一名，且只能从未勾选外的已勾选行中选择
 const leadPersonId = ref(null)
 
 function onPersonPick(ids) {
-  const want = new Set(ids)
-  for (const row of persons.value) {
-    const should = want.has(row.id)
-    if (should !== selectedPersonIds.value.has(row.id))
-      personTable.value?.toggleRowSelection(row, should)
-  }
+  if (leadPersonId.value && !ids.includes(leadPersonId.value)) leadPersonId.value = null
 }
 
-function onPersonSelectionChange(rows) {
-  selectedPersons.value = rows
-  personPick.value = rows.map(r => r.id)
-  if (leadPersonId.value && !rows.some(r => r.id === leadPersonId.value)) leadPersonId.value = null
+// 从已选人员中移除（同步处理负责人失效）
+function removePerson(id) {
+  personPick.value = personPick.value.filter(x => x !== id)
+  if (leadPersonId.value === id) leadPersonId.value = null
+}
+
+// 从业年限有效值：基础年限 + max(0, 当前年份 - 基准年)；空返回 ''，非数字原样返回
+function effectiveYears(fields) {
+  const raw = String(fields?.['从业年限'] ?? '').trim()
+  if (!raw) return ''
+  const base = parseInt(raw.replace(/年$/, ''), 10)
+  if (Number.isNaN(base)) return raw
+  const ref = String(fields?.['从业年限基准年'] ?? '').trim()
+  const m = ref.match(/(\d{4})/)
+  const years = m ? base + Math.max(0, new Date().getFullYear() - Number(m[1])) : base
+  return `${years}年`
 }
 
 // ---------- 业绩筛选 ----------
@@ -126,8 +136,9 @@ function onContractSelectionChange(rows) {
   for (const r of rows) if (!sections.value[r.id]) sections.value[r.id] = 1
 }
 
-// 业绩表格列：[类型, 年份] + 子类型字段有序并集（见 constants/contractSubtypes.js）
-const unionCols = CONTRACT_UNION_FIELDS
+// 业绩表格列：[类型, 年份] + 子类型字段有序并集（见 constants/contractSubtypes.js），隐藏不展示的 5 列
+const HIDDEN_CONTRACT_COLS = ['咨询单位', '份数', '合同到期时间', 'OA系统', '合同签订情况']
+const unionCols = CONTRACT_UNION_FIELDS.filter(k => !HIDDEN_CONTRACT_COLS.includes(k))
 
 // 字段值显示：数组/对象折叠为摘要，避免出现 [object Object]
 function displayField(v) {
@@ -156,19 +167,44 @@ function certWarning(row, cert) {
   return null
 }
 
-function certTagType(row, cert) {
-  const w = certWarning(row, cert)
-  return w ? (w.level === 'expired' ? 'danger' : 'warning') : ''
+// 证书显示名：「专业+证书名称」（如"土建专业一级造价工程师"），不含有效期
+function certName(cert) {
+  const ctype = cert['类型'] || ''
+  const major = cert['专业'] || ''
+  return major ? `${major}专业${ctype}` : ctype
 }
 
-function certLabel(row, cert) {
-  const base = cert['类型'] || '证书'
-  const w = certWarning(row, cert)
-  return w ? `${base}（${w.text}）` : base
+// Web 显示名：证书名 + 有效期（用于提醒临期；导出不含有效期）
+function certWebLabel(cert) {
+  const expiry = cert['有效期至'] || ''
+  return expiry ? `${certName(cert)}（有效期至 ${expiry}）` : certName(cert)
 }
+
+// ---------- 证书勾选（personId -> 选中下标数组；未定义 = 从未调整，保存时传 null，后端按全部证书处理） ----------
+const certPick = ref({})
+
+function isCertSelected(personId, idx) {
+  const sel = certPick.value[personId]
+  return sel === undefined ? false : sel.includes(idx)
+}
+
+function toggleCert(personId, idx, checked) {
+  const sel = certPick.value[personId] || []
+  const next = checked ? [...new Set([...sel, idx])].sort((a, b) => a - b) : sel.filter(i => i !== idx)
+  certPick.value = { ...certPick.value, [personId]: next }
+}
+
+// 导出时只传勾选的证书下标（默认不选）
+function exportCertIndices(personId) {
+  return certPick.value[personId] || []
+}
+
+// 回填期间置位，抑制自动保存 watcher（load 内所有状态回填完成后复位）
+let restoring = false
 
 async function load() {
   loading.value = true
+  restoring = true
   try {
     const [p, c, selected] = await Promise.all([
       listAssets('person'),
@@ -178,58 +214,108 @@ async function load() {
     persons.value = p
     contracts.value = c
 
-    // 回填已选：勾选状态用 toggleRowSelection（需等表格渲染完成），岗位回填到对应行
+    // 回填已选：人员回填到搜索多选框，业绩勾选状态用 toggleRowSelection（需等表格渲染完成）
     const personSel = new Map((selected.persons || []).map(x => [x.asset_id, x.role || '']))
     const contractSel = new Set((selected.contracts || []).map(x => x.asset_id))
+    personPick.value = (selected.persons || []).map(x => x.asset_id)
     for (const row of persons.value) roles.value[row.id] = personSel.get(row.id) || ''
+    // 回填导出相关状态：负责人 / 证书勾选（certs 为 null 表示从未调整，保持未定义）/ 业绩小节
+    leadPersonId.value = null
+    certPick.value = {}
+    for (const x of selected.persons || []) {
+      if (x.is_lead) leadPersonId.value = x.asset_id
+      if (Array.isArray(x.certs)) certPick.value[x.asset_id] = x.certs
+    }
+    sections.value = {}
+    for (const x of selected.contracts || [])
+      sections.value[x.asset_id] = Number(x.section || 1)
     await nextTick()
-    for (const row of persons.value)
-      if (personSel.has(row.id)) personTable.value.toggleRowSelection(row, true)
     for (const row of contracts.value)
       if (contractSel.has(row.id)) contractTable.value.toggleRowSelection(row, true)
   } finally {
     loading.value = false
+    restoring = false
+  }
+}
+
+// 保存载荷：人员含岗位/负责人/证书勾选（certs 为 null 表示从未调整，后端按全部证书处理），
+// 业绩为 {asset_id, section}（默认小节1）
+function buildSavePayload() {
+  return {
+    persons: selectedPersons.value.map(r => ({
+      asset_id: r.id, role: roles.value[r.id] || '',
+      is_lead: r.id === leadPersonId.value,
+      certs: certPick.value[r.id] ?? null,
+    })),
+    contracts: selectedContracts.value.map(r => ({
+      asset_id: r.id, section: Number(sections.value[r.id] || 1),
+    })),
   }
 }
 
 async function onSave() {
   saving.value = true
   try {
-    await saveBidAssets(props.projectId, {
-      persons: selectedPersons.value.map(r => ({ asset_id: r.id, role: roles.value[r.id] || '' })),
-      contracts: selectedContracts.value.map(r => r.id),
-    })
+    await saveBidAssets(props.projectId, buildSavePayload())
     ElMessage.success('勾选已保存')
   } finally {
     saving.value = false
   }
 }
 
+// 负责人 / 证书勾选 / 业绩小节变化时自动静默保存（不弹成功提示；保存失败由拦截器弹错）。
+// flush: 'sync' 保证 load() 回填期间的变更被同步抑制，不受 watcher 默认异步 flush 时序影响
+function persistSilently() {
+  if (restoring) return
+  saveBidAssets(props.projectId, buildSavePayload()).catch(() => { /* 拦截器已弹错 */ })
+}
+watch(leadPersonId, persistSilently, { flush: 'sync' })
+watch(certPick, persistSilently, { deep: true, flush: 'sync' })
+watch(sections, persistSilently, { deep: true, flush: 'sync' })
+
 // 导出 Excel/Word：先按当前勾选保存（载荷同 onSave），成功后再触发后端导出
 async function onExport(fmt) {
   exportingLegacy.value = fmt
   try {
-    await saveBidAssets(props.projectId, {
-      persons: selectedPersons.value.map(r => ({ asset_id: r.id, role: roles.value[r.id] || '' })),
-      contracts: selectedContracts.value.map(r => r.id),
-    })
+    await saveBidAssets(props.projectId, buildSavePayload())
     window.open(bidExportUrl(props.projectId, fmt), '_blank')
   } catch { /* 保存失败：拦截器已弹错，中止导出 */ } finally {
     exportingLegacy.value = ''
   }
 }
 
-// 导出商务标（模板）：is_lead / section 仅本次导出使用，不写入保存载荷
+// ---------- 导出商务标对话框：每次打开时按当前项目信息重新初始化 ----------
+const exportDialogVisible = ref(false)
+const exportForm = ref({ project_no: '', project_name: '', doc_date: '' })
+
+watch(exportDialogVisible, v => {
+  if (!v) return
+  exportForm.value = {
+    project_no: '',
+    project_name: props.projectName,
+    doc_date: props.bidDate || '',
+  }
+})
+
+// 导出商务标：is_lead / certs / section 与保存载荷同源（均已持久化），另加对话框字段
 async function onExportTemplate() {
+  if (!exportForm.value.project_name.trim()) {
+    ElMessage.warning('请填写项目名称')
+    return
+  }
   exporting.value = true
   try {
     const payload = {
       persons: selectedPersons.value.map(r => ({
         asset_id: r.id, is_lead: r.id === leadPersonId.value,
+        certs: exportCertIndices(r.id),
       })),
       contracts: selectedContracts.value.map(r => ({
         asset_id: r.id, section: Number(sections.value[r.id] || 1),
       })),
+      project_no: exportForm.value.project_no,
+      project_name: exportForm.value.project_name.trim(),
+      doc_date: exportForm.value.doc_date || '',
     }
     const r = await exportBidTemplate(props.projectId, payload)
     const cd = r.headers['content-disposition'] || ''
@@ -241,6 +327,7 @@ async function onExportTemplate() {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
+    exportDialogVisible.value = false
   } catch (e) {
     // blob 错误响应：转 json 读 detail 弹错（拦截器的通用提示不含 detail）
     if (e.response?.data instanceof Blob) {
@@ -264,20 +351,25 @@ onMounted(load)
                style="width: 100%; margin-bottom: 8px" @change="onPersonPick">
       <el-option v-for="p in persons" :key="p.id" :label="p.name" :value="p.id" />
     </el-select>
-    <el-table ref="personTable" :data="persons" row-key="id" max-height="40vh"
-              @selection-change="onPersonSelectionChange">
-      <el-table-column type="selection" width="45" reserve-selection />
-      <el-table-column prop="name" label="姓名" width="110" />
-      <el-table-column label="职称" width="140">
+    <el-table :data="selectedPersons" row-key="id">
+      <el-table-column prop="name" label="姓名" width="100" />
+      <el-table-column label="从业年限" width="90">
+        <template #default="{ row }">{{ effectiveYears(row.fields) || '-' }}</template>
+      </el-table-column>
+      <el-table-column label="职称" width="120">
         <template #default="{ row }">{{ row.fields['职称'] || '-' }}</template>
       </el-table-column>
-      <el-table-column label="证书" min-width="280">
+      <el-table-column label="证书" min-width="320">
         <template #default="{ row }">
           <template v-if="(row.fields['证书'] || []).length">
-            <el-tag v-for="(cert, i) in row.fields['证书']" :key="i" size="small"
-                    :type="certTagType(row, cert)" style="margin: 2px 6px 2px 0">
-              {{ certLabel(row, cert) }}
-            </el-tag>
+            <el-checkbox v-for="(cert, i) in row.fields['证书']" :key="i"
+                         :model-value="isCertSelected(row.id, i)"
+                         @change="v => toggleCert(row.id, i, v)"
+                         style="margin-right: 14px; margin-bottom: 2px">
+              <span :style="certWarning(row, cert) ? 'color: #f56c6c; font-weight: 500' : ''">
+                {{ certWebLabel(cert) }}<template v-if="certWarning(row, cert)">（{{ certWarning(row, cert).text }}）</template>
+              </span>
+            </el-checkbox>
           </template>
           <span v-else>-</span>
         </template>
@@ -295,7 +387,15 @@ onMounted(load)
                     :disabled="!selectedPersonIds.has(row.id)" />
         </template>
       </el-table-column>
+      <el-table-column label="操作" width="70" align="center">
+        <template #default="{ row }">
+          <el-button size="small" type="danger" link @click="removePerson(row.id)">删除</el-button>
+        </template>
+      </el-table-column>
     </el-table>
+    <div v-if="!selectedPersons.length" style="padding: 16px 0; color: #909399; font-size: 13px">
+      尚未添加人员
+    </div>
 
     <h3 style="margin-top: 24px">企业业绩</h3>
     <el-space style="margin-bottom: 8px" wrap>
@@ -354,9 +454,28 @@ onMounted(load)
     <el-space style="margin-top: 16px">
       <el-button type="primary" :loading="saving" @click="onSave">保存勾选</el-button>
       <el-button type="primary" plain :loading="exporting"
-                 @click="onExportTemplate">导出商务标（模板）</el-button>
+                 @click="exportDialogVisible = true">导出商务标</el-button>
       <el-button :loading="exportingLegacy === 'xlsx'" @click="onExport('xlsx')">导出 Excel</el-button>
       <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">导出 Word</el-button>
     </el-space>
+
+    <el-dialog v-model="exportDialogVisible" title="导出商务标" width="440px">
+      <el-form label-width="80px">
+        <el-form-item label="项目编号">
+          <el-input v-model="exportForm.project_no" placeholder="请输入项目编号" />
+        </el-form-item>
+        <el-form-item label="项目名称">
+          <el-input v-model="exportForm.project_name" placeholder="请输入项目名称" />
+        </el-form-item>
+        <el-form-item label="日期">
+          <el-date-picker v-model="exportForm.doc_date" type="date" value-format="YYYY-MM-DD"
+                          placeholder="选择日期" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="exportDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="exporting" @click="onExportTemplate">确定导出</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

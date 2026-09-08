@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { createProject, deleteProject, getExpiringDetail, listProjects } from '../api'
@@ -9,6 +9,16 @@ const projects = ref([])
 const expiring = ref([])
 const dialogVisible = ref(false)
 const form = ref({ name: '', client: '', bid_date: '', project_type: '服务', notes: '' })
+
+// 已到期（days_left < 0）与即将到期（0 <= days_left）分开显示
+const expired = computed(() => expiring.value.filter(a => a.days_left < 0))
+const expiringSoon = computed(() => expiring.value.filter(a => a.days_left >= 0))
+
+function itemLabel(a) {
+  return a.type === 'person'
+    ? `【人员】${a.asset_name} · ${a.cert_type || a.cert_name}`
+    : `【资信】${a.cert_name}`
+}
 
 async function load() {
   projects.value = await listProjects()
@@ -35,13 +45,19 @@ onMounted(load)
 
 <template>
   <h2>我的项目</h2>
-  <el-alert v-if="expiring.length" type="warning" :closable="false" style="margin-bottom: 16px">
+  <el-alert v-if="expired.length" type="error" :closable="false" style="margin-bottom: 12px">
     <template #title>
-      以下证书/资质将在 30 天内到期：
-      <span v-for="(a, i) in expiring" :key="i" style="margin-right: 12px">
-        <template v-if="a.type === 'person'">【人员】{{ a.asset_name }} · {{ a.cert_type || a.cert_name }}</template>
-        <template v-else>【资信】{{ a.cert_name }}</template>
-        （剩 {{ a.days_left }} 天）
+      <span style="font-size: 16px; font-weight: 700">已到期（{{ expired.length }} 本）：</span>
+      <span v-for="(a, i) in expired" :key="i" style="font-size: 15px; margin-right: 14px">
+        {{ itemLabel(a) }}（已过期 {{ -a.days_left }} 天）
+      </span>
+    </template>
+  </el-alert>
+  <el-alert v-if="expiringSoon.length" type="warning" :closable="false" style="margin-bottom: 16px">
+    <template #title>
+      <span style="font-size: 16px; font-weight: 700">即将到期（{{ expiringSoon.length }} 本）：</span>
+      <span v-for="(a, i) in expiringSoon" :key="i" style="font-size: 15px; margin-right: 14px">
+        {{ itemLabel(a) }}（剩 {{ a.days_left }} 天）
       </span>
     </template>
   </el-alert>

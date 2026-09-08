@@ -2,6 +2,7 @@
 覆盖表A/D 人员填充、执业资格拼接、表E 主要内容生成、表F/G 按 section 分填、
 负责人业绩匹配/无匹配清空、空选择 422、模板缺失 503、服务类型映射。"""
 from io import BytesIO
+from urllib.parse import quote
 
 import pytest
 from docx import Document
@@ -30,13 +31,26 @@ def _add_table(doc, headers, data_rows=1):
 
 
 def _build_template(path):
-    """构造含全部定位锚点与七张表的最小模板文档。"""
+    """构造含全部定位锚点与七张表的最小模板文档（含残留的上次投标文本）。"""
+    from docx.enum.style import WD_STYLE_TYPE
     doc = Document()
+    # 封面残留：旧项目名/旧编号/旧日期
+    doc.add_paragraph("项 目 名 称：旧项目名AAA")
+    doc.add_paragraph("编       号：OLD-2020-001号")
+    doc.add_paragraph("日      期 ：2020年1月2日")
+    # 目录条目（toc 样式）：含日期样式文本，替换必须跳过
+    doc.styles.add_style("toc 1", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("一、开标一览表\t1", style="toc 1")
+    doc.add_paragraph("日 期：2020年1月2日\t3", style="toc 1")
     doc.add_heading("商务标", level=1)
     doc.add_paragraph("一、投标函")
     doc.add_heading("三、人员配备表", level=1)
     doc.add_paragraph("项目人员基本情况表")
     _add_table(doc, PERSON_HEADERS)                       # 表A
+    doc.add_paragraph("项目名称：旧项目名AAA")
+    doc.add_paragraph("项目编号：OLD-2020-001号")
+    doc.add_paragraph("日 期：\t2020年1月2日")
+    doc.add_paragraph("本单位参与本次 旧项目名AAA项目投标活动")
     doc.add_heading("2、项目负责人", level=2)
     doc.add_heading("（1）项目负责人基本情况", level=3)
     doc.add_heading("（2）项目负责人业绩", level=3)
@@ -45,6 +59,9 @@ def _build_template(path):
     doc.add_paragraph("业绩证明材料表")
     _add_table(doc, PERF7_HEADERS)                        # 表C
     doc.add_heading("3、项目组人员", level=2)
+    doc.add_heading("（1）项目组其他人员-旧甲", level=3)
+    doc.add_heading("（2）项目组其他人员-旧乙", level=3)
+    doc.add_heading("（3）社保缴纳证明", level=3)
     _add_table(doc, PERSON_HEADERS)                       # 表D
     doc.add_heading("四、相关业绩一览表", level=1)
     _add_table(doc, PERF5_HEADERS)                        # 表E
@@ -245,8 +262,126 @@ def test_export_template_missing_503(client, monkeypatch, tmp_path):
     assert "模板" in r.json()["detail"]
 
 
-# ---------- 服务类型映射 ----------
+# ---------- 残留文本替换（project_no / project_name / doc_date / 人员子标题） ----------
 
+def _post_full(client, pid, persons, contracts, **extra):
+    payload = {"persons": persons, "contracts": contracts}
+    payload.update(extra)
+    return client.post(f"/api/projects/{pid}/bid-assets/export-template",
+                       json=payload)
+
+
+def test_export_template_replaces_stale_text(client, template_path):
+    """新字段全给：编号/名称/日期替换 + 人员子标题改名 + 目录日期不动。"""
+    pid = _make_project(client, name="库项目名")
+    zhang, li, ca, _, _ = _seed(client)
+    r = _post_full(client, pid,
+                   persons=[{"asset_id": li, "is_lead": False},
+                            {"asset_id": zhang, "is_lead": True}],
+                   contracts=[{"asset_id": ca, "section": 1}],
+                   project_no="NEW-2026-123",
+                   project_name="新项目XYZ",
+                   doc_date="2026-09-08")
+    assert r.status_code == 200
+    # 下载文件名使用覆盖后的项目名
+    assert quote("新项目XYZ") in r.headers["content-disposition"]
+
+    doc = Document(BytesIO(r.content))
+    texts = [p.text for p in doc.paragraphs]
+    # 项目编号：封面与正文均替换，保留模板尾字「号」风格
+    assert "编       号：NEW-2026-123号" in texts
+    assert "项目编号：NEW-2026-123号" in texts
+    # 项目名称：封面（字间空格）/正文标签行/承诺书裸名句子均替换
+    assert "项 目 名 称：新项目XYZ" in texts
+    assert "项目名称：新项目XYZ" in texts
+    assert "本单位参与本次 新项目XYZ项目投标活动" in texts
+    # 日期：封面与页脚均替换为 Y年M月D日（月日不补零），保留标签与原空白
+    assert "日      期 ：2026年9月8日" in texts
+    assert "日 期：\t2026年9月8日" in texts
+    # 旧文本无残留
+    assert not any("OLD-2020-001" in t for t in texts)
+    assert not any("旧项目名AAA" in t for t in texts)
+    # 人员子标题：非负责人按顺序改名，多余标题保持原样，社保标题不动
+    assert "（1）项目组其他人员-李四" in texts
+    assert "（2）项目组其他人员-旧乙" in texts
+    assert "（3）社保缴纳证明" in texts
+    # 目录（toc 样式）日期行不受影响
+    toc_texts = [p.text for p in doc.paragraphs
+                 if (p.style.name or "").lower().startswith("toc")]
+    assert any("2020年1月2日" in t for t in toc_texts)
+    assert not any("2026年9月8日" in t for t in toc_texts)
+
+
+def test_export_template_optional_fields_empty_keep_stale(client, template_path):
+    """新字段缺省：编号/日期不动，项目名称回落为数据库项目名。"""
+    pid = _make_project(client, name="库项目名")
+    zhang, _, ca, _, _ = _seed(client)
+    r = _post_full(client, pid,
+                   persons=[{"asset_id": zhang, "is_lead": True}],
+                   contracts=[{"asset_id": ca, "section": 1}])
+    assert r.status_code == 200
+    # 文件名回落为数据库项目名
+    assert quote("库项目名") in r.headers["content-disposition"]
+
+    doc = Document(BytesIO(r.content))
+    texts = [p.text for p in doc.paragraphs]
+    # project_no / doc_date 为空：模板残留原样保留
+    assert "编       号：OLD-2020-001号" in texts
+    assert "日      期 ：2020年1月2日" in texts
+    # project_name 为空：以数据库项目名替换残留旧名
+    assert "项 目 名 称：库项目名" in texts
+    assert "本单位参与本次 库项目名项目投标活动" in texts
+    assert not any("旧项目名AAA" in t for t in texts)
+
+
+def test_export_template_member_headings_more_members_than_headings(
+        client, template_path):
+    """非负责人多于子标题时：标题改完即止，不报错。"""
+    pid = _make_project(client)
+    zhang, li, _, _, _ = _seed(client)
+    wang = _make_person(client, "王五", {"职称": "工程师"})
+    zhao = _make_person(client, "赵六", {"职称": "工程师"})
+    r = _post_full(client, pid,
+                   persons=[{"asset_id": zhang, "is_lead": True},
+                            {"asset_id": li}, {"asset_id": wang},
+                            {"asset_id": zhao}],
+                   contracts=[])
+    assert r.status_code == 200
+    doc = Document(BytesIO(r.content))
+    texts = [p.text for p in doc.paragraphs]
+    assert "（1）项目组其他人员-李四" in texts
+    assert "（2）项目组其他人员-王五" in texts
+    # 赵六没有对应标题，仅出现在表A/表D 数据行中
+    rows_a = _data_rows(doc.tables[0])
+    assert [row[1] for row in rows_a] == ["张三", "李四", "王五", "赵六"]
+
+
+def test_replace_stale_text_in_table_cells(tmp_path):
+    """表格单元格内的残留编号/名称/日期同样替换（直接调导出器）。"""
+    from app.core.bid_template_exporter import build_bid_docx_from_template
+    doc = Document()
+    doc.add_paragraph("项目编号：OLD-2020-001号")
+    doc.add_paragraph("项目名称：旧项目名AAA")  # 带标签的旧名，供运行时提取
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "项目编号"
+    t.cell(0, 1).text = "OLD-2020-001号"
+    t.cell(1, 0).text = "项目名称"
+    t.cell(1, 1).text = "旧项目名AAA"
+    src = tmp_path / "src.docx"
+    doc.save(src)
+    dest = tmp_path / "out.docx"
+    build_bid_docx_from_template(str(src), str(dest), {
+        "project_no": "NEW-2026-123",
+        "project_name": "新项目XYZ",
+        "doc_date": "2026-09-08",
+    })
+    out = Document(dest)
+    assert out.tables[0].cell(0, 1).text == "NEW-2026-123号"
+    assert out.tables[0].cell(1, 1).text == "新项目XYZ"
+    assert out.paragraphs[0].text == "项目编号：NEW-2026-123号"
+
+
+# ---------- 服务类型映射 ----------
 def test_service_type_label():
     assert bid_service.service_type_label({"类型": "跟踪"}) == "跟踪审计"
     assert bid_service.service_type_label({"类型": "结算"}) == "结算审核"
