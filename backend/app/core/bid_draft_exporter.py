@@ -206,12 +206,15 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         if role == "ignore":
             continue
         idx = binding.get("table_index")
-        bound_indices.add(idx)
         if not isinstance(idx, int) or not 0 <= idx < len(tables):
             report["skipped"].append({
                 "table_index": idx, "role": role,
                 "reason": "表不存在，可能底稿已重新生成"})
             continue
+        # 仅 fill 实际会改动的表豁免防篡改校验；quote（手工填写）与未知
+        # 角色不改动 → 不豁免，未绑定表同等受校验保护
+        if role in ("person_roster", "perf_list", "lead_resume", "image_slot"):
+            bound_indices.add(idx)
         table = tables[idx]
         if role == "person_roster":
             picked = _scope_persons(persons, binding.get("person_scope") or "all")

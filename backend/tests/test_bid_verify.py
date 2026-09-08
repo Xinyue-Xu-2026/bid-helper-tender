@@ -28,7 +28,7 @@ def test_clean_output_ok(tmp_path):
     assert result["ok"] is True
     assert result["issues"] == []
     assert result["checked_tables"] == 1        # 仅承诺函表未绑定
-    assert result["checked_paragraphs"] == 5    # 3 封面 + 2 toc
+    assert result["checked_paragraphs"] == 3    # 3 封面（toc 段恒跳过）
 
 
 # ---------- 2. 篡改产物未绑定正文段 → 逮住 ----------
@@ -97,3 +97,60 @@ def test_swap_toc_no_false_positive(tmp_path):
     assert result["issues"] == []
     # 承诺函表仍未被触碰
     assert Document(out).tables[4].cell(0, 0).text == PROMISE_TEXT
+
+
+# ---------- 7. 未绑定表单元格残留替换不误报（F1 回归） ----------
+
+def test_unbound_table_stale_replacement_no_false_positive(tmp_path):
+    """未绑定承诺函表单元格含残留日期 + doc_date 替换 → verify ok=true
+    （底稿侧表文本套用同一套 compute_text_subs 规则后再比对）。"""
+    draft = _build_draft(tmp_path / "draft.docx")
+    doc = Document(draft)
+    doc.tables[4].cell(0, 0).text = f"{PROMISE_TEXT}日期：2020年1月2日"
+    doc.save(draft)
+    out = str(tmp_path / "out.docx")
+    params = {"project_no": "", "project_name": "", "doc_date": "2026-09-08"}
+    fill_draft(draft, out, _bindings(), _data(), **params)
+    # 确认替换确实落到了未绑定表单元格
+    assert "2026年9月8日" in Document(out).tables[4].cell(0, 0).text
+    result = verify_draft_fill(draft, out, BOUND, params)
+    assert result["ok"] is True
+    assert result["issues"] == []
+
+
+# ---------- 8. quote 绑定不豁免校验（F2 回归） ----------
+
+def test_quote_table_tamper_detected(tmp_path):
+    """quote 表虽被绑定（skipped 手工填写）但 fill 从不改动它，
+    因此不豁免防篡改校验：篡改 quote 表必须被逮住。"""
+    bindings = _bindings()
+    bindings["tables"].append(
+        {"table_index": 4, "role": "quote", "columns": {},
+         "person_scope": "", "perf_scope": "", "label_kind": "",
+         "person": "", "confirmed": True})
+    draft, out = _produce(tmp_path, bindings=bindings)
+    doc = Document(out)
+    doc.tables[4].cell(0, 0).text = "篡改报价承诺"
+    doc.save(out)
+    result = verify_draft_fill(draft, out, BOUND, NO_REPLACE)
+    assert result["ok"] is False
+    assert any("表格[4]" in issue for issue in result["issues"])
+
+
+# ---------- 9. toc 段残留项目名不误报（F3 回归） ----------
+
+def test_toc_stale_name_no_false_positive(tmp_path):
+    """toc 段含残留旧项目名且 swapped_toc=False：_replace_stale_text 恒跳过
+    toc 段，校验底稿侧同样恒跳过 → 不报假警。"""
+    draft = _build_draft(tmp_path / "draft.docx")
+    doc = Document(draft)
+    doc.add_paragraph("旧项目名AAA\t3", style="toc 1")
+    doc.save(draft)
+    out = str(tmp_path / "out.docx")
+    params = {"project_no": "", "project_name": "新项目XYZ", "doc_date": ""}
+    fill_draft(draft, out, _bindings(), _data(), **params)
+    # 确认 toc 段残留名未被替换（导出从不触碰 toc 段）
+    assert "旧项目名AAA" in Document(out).paragraphs[-1].text
+    result = verify_draft_fill(draft, out, BOUND, params)
+    assert result["ok"] is True
+    assert result["issues"] == []

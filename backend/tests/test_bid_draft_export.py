@@ -307,8 +307,8 @@ def test_report_structure_and_quote_skip(tmp_path):
     verify = report["verify"]
     assert verify["ok"] is True
     assert verify["issues"] == []
-    assert verify["checked_paragraphs"] == 5   # 3 封面 + 2 toc
-    assert verify["checked_tables"] == 0       # 五张表全部绑定
+    assert verify["checked_paragraphs"] == 3   # 3 封面（toc 段恒跳过）
+    assert verify["checked_tables"] == 1  # quote 表不再豁免校验（fill 不改动它）
 
 
 def test_verify_counts_unbound_table(tmp_path):
