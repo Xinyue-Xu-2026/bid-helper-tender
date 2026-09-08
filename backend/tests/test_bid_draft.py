@@ -117,6 +117,38 @@ def test_find_format_chapter_end_none_when_last_chapter(tmp_path):
     assert found["end"] is None
 
 
+def test_find_format_chapter_ignores_numbered_items(tmp_path):
+    """章内数字编号条目（"1.法人或者……"、"2.上一年度……" 等，文本兜底判为
+    H1）不作章结束边界——真实招标文件（GZ511/JY22）回归。"""
+    doc = Document()
+    doc.add_heading("第一章 招标公告", level=1)
+    doc.add_heading("第六章 竞争性磋商响应文件格式", level=1)
+    doc.add_paragraph("1.法人或者其他组织的营业执照等证明文件，自然人的身份证明")
+    doc.add_paragraph("2.上一年度的财务状况报告（供应商成立不满一年无需提供）")
+    doc.add_paragraph("一、投标函")
+    doc.add_paragraph("投标函正文。")
+    path = tmp_path / "tender.docx"
+    doc.save(str(path))
+    found = find_format_chapter(list_headings(str(path)))
+    assert found is not None
+    assert "格式" in found["start"]["title"]
+    assert found["end"] is None  # 数字条目不是边界；其后无章节 → 裁到文末
+
+
+def test_find_format_chapter_numbered_items_then_next_chapter(tmp_path):
+    """数字编号条目之后若还有真正的"第X章"，仍以它为结束边界。"""
+    doc = Document()
+    doc.add_heading("第三章 投标文件格式", level=1)
+    doc.add_paragraph("1.投标函；")
+    doc.add_paragraph("2.针对本项目的授权委托书；")
+    doc.add_heading("第四章 合同条款", level=1)
+    path = tmp_path / "tender.docx"
+    doc.save(str(path))
+    found = find_format_chapter(list_headings(str(path)))
+    assert found["end"] is not None
+    assert found["end"]["title"] == "第四章 合同条款"
+
+
 # ---------- cut_draft ----------
 
 def test_cut_draft_keeps_format_chapter_only(tmp_path):

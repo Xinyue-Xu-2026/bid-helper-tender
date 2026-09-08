@@ -27,6 +27,21 @@ FORMAT_CHAPTER_KEYWORDS = (
 
 _WS_RE = re.compile(r"\s+")
 
+_FAMILY_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零]+[章篇部]")
+_FAMILY_NUMBERED_RE = re.compile(r"^\d+(?:\.\d+)*[、．.\s]")
+
+
+def _title_family(title: str) -> str:
+    """标题族判定：numbered = 数字编号条目（"1.投标函；""1、适用范围"等）。
+    此类条目多为章内列表项（真实招标文件里被文本兜底判为 H1），
+    不应作为格式章节的结束边界。"""
+    t = (title or "").strip()
+    if _FAMILY_CHAPTER_RE.match(t):
+        return "chapter"
+    if _FAMILY_NUMBERED_RE.match(t):
+        return "numbered"
+    return "other"
+
 
 def list_headings(docx_path: str) -> list:
     """扫描 body 顶层子元素，返回标题列表 [{"index", "level", "title"}]。
@@ -57,6 +72,7 @@ def find_format_chapter(headings: list):
     FORMAT_CHAPTER_KEYWORDS 任一关键词；多个命中取最后一个。
     返回 {"start": {...}, "end": {...} | None}；end = 其后的、
     level <= start.level 的第一个标题（无 → None，表示到文档末尾）；
+    数字编号条目（"1.××"）不作 end 边界（除非起始标题本身也是数字编号族）。
     无命中 → None。
     """
     start = None
@@ -70,13 +86,17 @@ def find_format_chapter(headings: list):
         return None
     end = None
     seen_start = False
+    start_fam = _title_family(start["title"])
     for h in headings:
         if h is start:
             seen_start = True
             continue
-        if seen_start and h["level"] <= start["level"]:
-            end = h
-            break
+        if not seen_start or h["level"] > start["level"]:
+            continue
+        if start_fam != "numbered" and _title_family(h["title"]) == "numbered":
+            continue  # 章内数字编号条目不是结构边界
+        end = h
+        break
     return {"start": start, "end": end}
 
 

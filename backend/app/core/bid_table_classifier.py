@@ -70,7 +70,7 @@ PERSON_COL_KEYWORDS = {
 }
 PERF_COL_KEYWORDS = {
     "seq": ("序号",), "project_name": ("项目名称",),
-    "client": ("委托单位", "业主单位", "建设单位", "委托人"),
+    "client": ("委托单位", "业主单位", "建设单位", "委托人", "项目单位"),
     "client_contact": ("联系方式",), "sign_date": ("合同签订", "签订时间", "签订日期"),
     "amount": ("合同金额", "工程造价", "金额"), "project_type": ("项目类型",),
     "service_type": ("服务类型",), "content": ("主要内容", "服务内容"),

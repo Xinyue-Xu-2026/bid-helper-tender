@@ -83,6 +83,21 @@ def test_perf_list_seven_columns(tmp_path):
     assert item["confidence"] == "高"
 
 
+def test_perf_list_client_xiangmu_danwei(tmp_path):
+    """业绩表委托方列关键词"项目单位"（真实招标文件 GZ511 业绩表回归：
+    表头 编号|项目名称|项目单位|服务总价 原为 ignore，属关键词库缺口）。"""
+    doc = Document()
+    _make_table(doc, [
+        ["编号", "项目名称", "项目单位", "服务总价"],
+        ["1", "某项目", "某单位", "100万"],
+    ])
+    result = classify_tables(_save(doc, tmp_path))
+    item = result[0]
+    assert item["role"] == "perf_list"
+    assert item["columns"]["project_name"] == 1
+    assert item["columns"]["client"] == 2
+
+
 # ---------- 4. 报价表（表头含"报价" / 前两行单元格含"费率"） ----------
 
 def test_quote_by_header_and_by_cell(tmp_path):
@@ -152,7 +167,6 @@ def test_perf_list_split_header_rows(tmp_path):
 
 
 # ---------- 8. 无关键词普通表 → ignore ----------
-
 def test_plain_table_ignore(tmp_path):
     doc = Document()
     _make_table(doc, [

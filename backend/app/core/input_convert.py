@@ -17,12 +17,15 @@ def _cache_key(src: Path) -> str:
 
 
 def _convert_doc(src: Path, dest: Path) -> None:
-    """.doc → .docx：Word COM 自动化。任何失败（含 pywin32 缺失）统一转为 InputConvertError。"""
+    """.doc → .docx：Word COM 自动化。任何失败（如 pywin32 缺失）统一转为 InputConvertError。
+    COM 需在线程内显式 CoInitialize（API 工作线程中二次转换否则失败）。"""
     _err = "无法转换 .doc 文件：需要本机安装 Microsoft Word，或将文件另存为 .docx 后重新上传"
     try:
+        import pythoncom
         import win32com.client
     except ImportError as exc:
         raise InputConvertError(_err) from exc
+    pythoncom.CoInitialize()
     word = None
     try:
         word = win32com.client.DispatchEx("Word.Application")
@@ -40,6 +43,7 @@ def _convert_doc(src: Path, dest: Path) -> None:
                 word.Quit()
             except Exception:
                 pass
+        pythoncom.CoUninitialize()
 
 
 def _convert_pdf(src: Path, dest: Path) -> None:
