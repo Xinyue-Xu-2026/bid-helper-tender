@@ -251,8 +251,13 @@ def _classify_table(table, table_index: int, heading: str,
                  for idx, text in pairs]
     person_map, perf_map = _match_columns(pairs)
 
-    # 规则 4：命中数判定人员表 / 业绩表
+    # 规则 4：命中数判定人员表 / 业绩表。
+    # 共享键归属裁定（T5）："序号"两族共有且匹配时 person 族优先锁定，
+    # 纯业绩表会因此丢 seq。表角色判定完成后，把败方仅命中 seq 的共享键
+    # 列补给胜方 columns。
     if len(person_map) >= 2 and len(person_map) >= len(perf_map):
+        if "seq" not in person_map and set(perf_map) == {"seq"}:
+            person_map = {**person_map, "seq": perf_map["seq"]}
         item["role"] = "person_roster"
         item["columns"] = person_map
         item["confidence"] = "高" if len(person_map) >= 3 else "低"
@@ -264,6 +269,8 @@ def _classify_table(table, table_index: int, heading: str,
             item["person_scope"] = "all"
         return item
     if len(perf_map) >= 2:
+        if "seq" not in perf_map and set(person_map) == {"seq"}:
+            perf_map = {**perf_map, "seq": person_map["seq"]}
         item["role"] = "perf_list"
         item["columns"] = perf_map
         item["confidence"] = "高" if len(perf_map) >= 3 else "低"

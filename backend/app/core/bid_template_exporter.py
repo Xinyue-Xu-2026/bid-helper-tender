@@ -305,9 +305,11 @@ def _discover_stale_values(doc) -> tuple:
     return stale_no, stale_name
 
 
-def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
-                        doc_date: str = "") -> None:
-    """替换模板中残留的上次投标文本。project_no/doc_date 为空则跳过对应替换。"""
+def compute_text_subs(doc, project_no: str = "", project_name: str = "",
+                      doc_date: str = "") -> list:
+    """计算残留文本替换规则 [(pattern, repl)]（含 stale 编号/名称运行时发现）。
+    _replace_stale_text 调本函数再逐段应用；导出与防篡改校验（bid_verify）
+    共用同一套规则，保证"导出改了什么"与"校验豁免什么"一致。"""
     subs = []
     stale_no, stale_name = _discover_stale_values(doc)
     if project_no and stale_no:
@@ -321,6 +323,15 @@ def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
             y, mo, d = (int(g) for g in m.groups())
             date_text = f"{y}年{mo}月{d}日"
             subs.append((_DOC_DATE_RE, lambda match: match.group(1) + date_text))
+    return subs
+
+
+def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
+                        doc_date: str = "") -> None:
+    """替换模板中残留的上次投标文本：规则由 compute_text_subs 统一计算，
+    此处仅逐段（含表格单元格，跳过 toc 段）应用。project_no/doc_date 为空
+    则跳过对应替换，project_name 为空则不替换。"""
+    subs = compute_text_subs(doc, project_no, project_name, doc_date)
     if not subs:
         return
     for para in _iter_all_paragraphs(doc):
