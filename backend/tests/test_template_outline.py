@@ -184,6 +184,14 @@ def test_para_heading_level_heading_style():
     assert para_heading_level(doc.paragraphs[2]) == 3
 
 
+def test_para_heading_level_chinese_heading_style():
+    from docx.enum.style import WD_STYLE_TYPE
+    doc = Document()
+    doc.styles.add_style("标题 4", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("四、深层标题", style="标题 4")
+    assert para_heading_level(doc.paragraphs[0]) == 4
+
+
 def test_para_heading_level_text_fallback():
     doc = Document()
     doc.add_paragraph("第三章 投标文件格式")
@@ -198,10 +206,15 @@ def test_para_heading_level_text_fallback():
 
 def test_para_heading_level_long_body_returns_zero():
     doc = Document()
-    doc.add_paragraph("这里是超过六十字的正文内容" + "长" * 60)
+    # 以标题模式开头：只有 60 字长度守卫能拒绝它（否则文本兜底会误判为 1 级）
+    doc.add_paragraph("第三章" + "长" * 60)          # 63 字 → 守卫拒绝
+    doc.add_paragraph("第三章" + "长" * 58)          # 61 字 → 守卫拒绝
+    doc.add_paragraph("第三章" + "长" * 57)          # 恰好 60 字 → 守卫放行，兜底判 1 级
     doc.add_paragraph("普通正文")
     assert para_heading_level(doc.paragraphs[0]) == 0
     assert para_heading_level(doc.paragraphs[1]) == 0
+    assert para_heading_level(doc.paragraphs[2]) == 1
+    assert para_heading_level(doc.paragraphs[3]) == 0
 
 
 def test_para_heading_level_toc_para_always_zero():
