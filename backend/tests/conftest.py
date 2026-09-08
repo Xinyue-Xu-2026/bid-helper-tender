@@ -18,5 +18,6 @@ def _isolate_data_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.TEMPLATES_DIR", data / "templates")
     monkeypatch.setattr("app.config.MATERIALS_DIR", data / "materials")
     monkeypatch.setattr("app.config.FILES_DIR", data / "files")
+    monkeypatch.setattr("app.config.BID_DRAFTS_DIR", data / "bid_drafts")
     monkeypatch.setattr("app.config.DB_PATH", data / "app.db")
 
