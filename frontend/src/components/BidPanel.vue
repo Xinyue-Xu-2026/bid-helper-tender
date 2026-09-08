@@ -398,7 +398,8 @@ const imagePersonOptions = computed(() => {
 function needManualConfirm(row) {
   if (row.confirmed) return false
   const c = row.confidence
-  return c === 'low' || (typeof c === 'number' && c < 0.6)
+  // 后端分类器输出中文 "高"/"低"；'low'/数值分支为防御性兜底
+  return c === '低' || c === 'low' || (typeof c === 'number' && c < 0.6)
 }
 
 // GET /bid-draft：有底稿返回预览对象本身，无底稿返回 { draft: null }
