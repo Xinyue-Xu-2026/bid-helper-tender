@@ -149,8 +149,21 @@ export const getBidAssets = (pid) => api.get(`/projects/${pid}/bid-assets`).then
 export const saveBidAssets = (pid, data) => api.put(`/projects/${pid}/bid-assets`, data).then(r => r.data)
 export const bidExportUrl = (pid, format) => `/api/projects/${pid}/bid-assets/export?format=${format}`
 // 商务标模板导出：payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}] }
-// 返回完整响应（blob + headers），调用方从 Content-Disposition 取文件名
+// 返回完整响应（blob + headers），调用方从 Content-Disposition 取文件名；
+// 有底稿时响应头带 X-Fill-Report（URL 编码的 fill_report JSON），旧模板路径无此头
 export const exportBidTemplate = (pid, payload) =>
   api.post(`/projects/${pid}/bid-assets/export-template`, payload, { responseType: 'blob' })
+// 商务标底稿：headings 供手动选择裁切起止（suggested 为自动定位建议，可能为 null）
+export const getBidDraftHeadings = (pid) => api.get(`/projects/${pid}/bid-draft/headings`).then(r => r.data)
+// 生成底稿：body {start_heading, end_heading}，空=自动定位/到末尾；422=未识别格式章节需手动起止
+export const generateBidDraft = (pid, data) => api.post(`/projects/${pid}/bid-draft/generate`, data).then(r => r.data)
+export const uploadBidDraft = (pid, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post(`/projects/${pid}/bid-draft/upload`, fd).then(r => r.data)
+}
+// 有底稿返回预览对象；无底稿返回 { draft: null }
+export const getBidDraft = (pid) => api.get(`/projects/${pid}/bid-draft`).then(r => r.data)
+export const saveBidDraftBindings = (pid, data) => api.put(`/projects/${pid}/bid-draft/bindings`, data).then(r => r.data)
 // 证书级到期明细（首页提醒条）：[{ type, asset_name, cert_type, cert_name, expiry_date, days_left }]
 export const getExpiringDetail = (days = 30) => api.get('/assets/expiring-detail', { params: { days } }).then(r => r.data)

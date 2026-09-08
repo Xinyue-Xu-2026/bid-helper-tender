@@ -1,8 +1,9 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  bidExportUrl, exportBidTemplate, getBidAssets, listAssets, saveBidAssets,
+  bidExportUrl, exportBidTemplate, generateBidDraft, getBidAssets, getBidDraft,
+  getBidDraftHeadings, listAssets, saveBidAssets, saveBidDraftBindings, uploadBidDraft,
 } from '../api'
 import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
 
@@ -328,6 +329,14 @@ async function onExportTemplate() {
     a.click()
     URL.revokeObjectURL(url)
     exportDialogVisible.value = false
+    // 有底稿时响应头带 X-Fill-Report（URL 编码 JSON）→ 弹出填充报告；旧模板路径无此头，维持现状
+    const fr = r.headers['x-fill-report']
+    if (fr) {
+      try {
+        fillReport.value = JSON.parse(decodeURIComponent(fr))
+        reportDialogVisible.value = true
+      } catch { /* 报告解析失败不阻塞下载结果 */ }
+    }
   } catch (e) {
     // blob 错误响应：转 json 读 detail 弹错（拦截器的通用提示不含 detail）
     if (e.response?.data instanceof Blob) {
@@ -341,11 +350,229 @@ async function onExportTemplate() {
   }
 }
 
-onMounted(load)
+// ---------- 商务标底稿：生成 / 上传 / 预览确认 / 绑定保存 ----------
+const DRAFT_ROLE_OPTIONS = [
+  { value: 'person_roster', label: '人员一览表' },
+  { value: 'lead_resume', label: '负责人简历表' },
+  { value: 'perf_list', label: '业绩一览表' },
+  { value: 'quote', label: '报价表' },
+  { value: 'image_slot', label: '图片占位' },
+  { value: 'ignore', label: '忽略' },
+]
+const PERSON_SCOPE_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'lead', label: '仅负责人' },
+  { value: 'members', label: '仅成员' },
+]
+const PERF_SCOPE_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'lead', label: '负责人业绩' },
+  { value: 'section1', label: '小节1' },
+  { value: 'section2', label: '小节2' },
+]
+const LABEL_KIND_OPTIONS = ['职称证书', '社保', '身份证', '注册证书']
+
+function roleLabel(v) {
+  return DRAFT_ROLE_OPTIONS.find(o => o.value === v)?.label || v || '-'
+}
+
+const draft = ref(null)              // 底稿预览对象；null = 无底稿
+const draftLoading = ref(false)      // 底稿卡片加载/生成/上传中
+const draftDialogVisible = ref(false)
+const draftHeadings = ref([])        // 裁切起止候选标题 [{index, level, title}]
+const draftRange = ref({ start: '', end: '' })  // 裁切起止（值=标题文本；end '' = 文档末尾）
+const bindingRows = ref([])          // 对话框内可编辑的表格绑定行（基于预览 tables 拷贝）
+const swapToc = ref(false)
+const regenerating = ref(false)
+const bindingsSaving = ref(false)
+
+// 图片占位「归属人员」选项：负责人 + 成员0..N（按当前已选非负责人数量）
+const imagePersonOptions = computed(() => {
+  const opts = [{ value: 'lead', label: '负责人' }]
+  const n = selectedPersons.value.filter(p => p.id !== leadPersonId.value).length
+  for (let i = 0; i < n; i++) opts.push({ value: `member:${i}`, label: `成员${i}` })
+  return opts
+})
+
+// 低置信度建议行弱提示（未确认时才需要人工核对）
+function needManualConfirm(row) {
+  if (row.confirmed) return false
+  const c = row.confidence
+  return c === 'low' || (typeof c === 'number' && c < 0.6)
+}
+
+// GET /bid-draft：有底稿返回预览对象本身，无底稿返回 { draft: null }
+async function loadDraft() {
+  draftLoading.value = true
+  try {
+    const r = await getBidDraft(props.projectId)
+    draft.value = (r && 'draft' in r) ? r.draft : r
+  } catch { /* 拦截器已弹错 */ } finally {
+    draftLoading.value = false
+  }
+}
+
+// 用预览对象刷新卡片与对话框状态（bindings 拷贝为可编辑行）
+function applyDraftPreview(preview) {
+  draft.value = preview
+  bindingRows.value = (preview.tables || []).map(t => ({ ...t }))
+  swapToc.value = !!preview.swap_toc
+  draftRange.value = { start: preview.cut_start || '', end: preview.cut_end || '' }
+}
+
+// 拉取裁切起止候选标题（失败不阻塞对话框，起止选择留空）
+async function fetchDraftHeadings() {
+  try {
+    const r = await getBidDraftHeadings(props.projectId)
+    draftHeadings.value = r.headings || []
+    return r.suggested || null
+  } catch { /* 拦截器已弹错 */ }
+  return null
+}
+
+// 打开预览与确认对话框：有底稿按其刷新绑定行；同时加载 headings
+async function openDraftDialog() {
+  if (draft.value) applyDraftPreview(draft.value)
+  draftDialogVisible.value = true
+  await fetchDraftHeadings()
+}
+
+// 「生成底稿」：先尝试自动定位（空参）；422 未识别格式章节 → 打开对话框手动选起止
+async function onGenerateDraft() {
+  draftLoading.value = true
+  try {
+    const preview = await generateBidDraft(props.projectId, { start_heading: '', end_heading: '' })
+    applyDraftPreview(preview)
+    ElMessage.success('底稿已生成，请预览并确认表格绑定')
+    openDraftDialog()
+  } catch (e) {
+    if (e?.response?.status === 422) {
+      const suggested = await fetchDraftHeadings()
+      draftRange.value = { start: suggested?.start || '', end: suggested?.end || '' }
+      draftDialogVisible.value = true
+    }
+  } finally {
+    draftLoading.value = false
+  }
+}
+
+// 「重新生成」（卡片入口）：二次确认后按当前裁切范围重新生成（清空已确认绑定）
+async function onRegenerateDraft() {
+  try {
+    await ElMessageBox.confirm('重新生成将清空已确认的表格绑定，确定继续？', '重新生成底稿',
+      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' })
+  } catch { return }
+  draftLoading.value = true
+  try {
+    const preview = await generateBidDraft(props.projectId, {
+      start_heading: draft.value?.cut_start || '',
+      end_heading: draft.value?.cut_end || '',
+    })
+    applyDraftPreview(preview)
+    ElMessage.success('底稿已重新生成，请重新确认表格绑定')
+  } catch (e) {
+    if (e?.response?.status === 422) {
+      const suggested = await fetchDraftHeadings()
+      draftRange.value = { start: suggested?.start || '', end: suggested?.end || '' }
+      draftDialogVisible.value = true
+    }
+  } finally {
+    draftLoading.value = false
+  }
+}
+
+// 对话框内「按此范围重新生成」：手动起止生成（无底稿时即首次生成）
+async function onRegenerateWithRange() {
+  regenerating.value = true
+  try {
+    const preview = await generateBidDraft(props.projectId, {
+      start_heading: draftRange.value.start || '',
+      end_heading: draftRange.value.end || '',
+    })
+    applyDraftPreview(preview)
+    ElMessage.success('已按所选范围生成，请确认表格绑定')
+  } catch { /* 拦截器已弹错 */ } finally {
+    regenerating.value = false
+  }
+}
+
+// 上传底稿（.docx，替换现有底稿）→ 成功后打开预览对话框
+async function onUploadDraft(uploadFile) {
+  const file = uploadFile.raw
+  if (!file) return
+  draftLoading.value = true
+  try {
+    const preview = await uploadBidDraft(props.projectId, file)
+    applyDraftPreview(preview)
+    ElMessage.success('底稿已上传，请预览并确认表格绑定')
+    openDraftDialog()
+  } catch { /* 拦截器已弹错 */ } finally {
+    draftLoading.value = false
+  }
+}
+
+// 角色切换时重置该行的条件字段为默认值（避免残留其它角色的条件）
+function onBindingRoleChange(row) {
+  row.person_scope = 'all'
+  row.perf_scope = 'all'
+  row.label_kind = LABEL_KIND_OPTIONS[0]
+  row.person = 'lead'
+}
+
+// 「确认并保存绑定」：整表提交，所有行 confirmed=true（提交后即生效，未确认的表不会被填充）
+async function onSaveBindings() {
+  bindingsSaving.value = true
+  try {
+    await saveBidDraftBindings(props.projectId, {
+      tables: bindingRows.value.map(r => ({
+        table_index: r.table_index,
+        role: r.role,
+        columns: r.columns,
+        person_scope: r.person_scope,
+        perf_scope: r.perf_scope,
+        label_kind: r.label_kind,
+        person: r.person,
+        confirmed: true,
+      })),
+      swap_toc: swapToc.value,
+    })
+    ElMessage.success('绑定已保存，导出时将按确认结果填充')
+    draftDialogVisible.value = false
+    loadDraft()
+  } catch { /* 拦截器已弹错 */ } finally {
+    bindingsSaving.value = false
+  }
+}
+
+// ---------- 导出填充报告对话框 ----------
+const reportDialogVisible = ref(false)
+const fillReport = ref(null)
+
+onMounted(() => { load(); loadDraft() })
 </script>
 
 <template>
   <div v-loading="loading">
+    <el-card shadow="never" style="margin-bottom: 16px" v-loading="draftLoading">
+      <div v-if="!draft" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+        <span style="color: #909399; font-size: 13px">尚未生成商务标底稿（生成后可按底稿表格结构精确填充导出）</span>
+        <el-button type="primary" size="small" :loading="draftLoading" @click="onGenerateDraft">生成底稿</el-button>
+        <el-upload :show-file-list="false" accept=".docx" :auto-upload="false" :on-change="onUploadDraft">
+          <el-button size="small">上传底稿</el-button>
+        </el-upload>
+      </div>
+      <div v-else style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+        <span style="font-size: 13px">
+          底稿：{{ draft.name || '-' }}　裁切范围：{{ draft.cut_start || '自动定位' }} ～ {{ draft.cut_end || '文档末尾' }}　来源：{{ draft.source === 'upload' ? '手动上传' : '招标文件自动生成' }}
+        </span>
+        <el-button type="primary" size="small" plain @click="openDraftDialog">预览与确认</el-button>
+        <el-button size="small" :loading="draftLoading" @click="onRegenerateDraft">重新生成</el-button>
+        <el-upload :show-file-list="false" accept=".docx" :auto-upload="false" :on-change="onUploadDraft">
+          <el-button size="small">上传底稿</el-button>
+        </el-upload>
+      </div>
+    </el-card>
+
     <h3>拟派人员</h3>
     <el-select v-model="personPick" multiple filterable placeholder="按姓名搜索并添加人员"
                style="width: 100%; margin-bottom: 8px" @change="onPersonPick">
@@ -453,8 +680,10 @@ onMounted(load)
 
     <el-space style="margin-top: 16px">
       <el-button type="primary" :loading="saving" @click="onSave">保存勾选</el-button>
-      <el-button type="primary" plain :loading="exporting"
-                 @click="exportDialogVisible = true">导出商务标</el-button>
+      <el-tooltip :disabled="!!draft" content="未生成底稿，使用内置模板导出" placement="top">
+        <el-button type="primary" plain :loading="exporting"
+                   @click="exportDialogVisible = true">导出商务标</el-button>
+      </el-tooltip>
       <el-button :loading="exportingLegacy === 'xlsx'" @click="onExport('xlsx')">导出 Excel</el-button>
       <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">导出 Word</el-button>
     </el-space>
@@ -475,6 +704,141 @@ onMounted(load)
       <template #footer>
         <el-button @click="exportDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="exporting" @click="onExportTemplate">确定导出</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="draftDialogVisible" title="商务标底稿预览与确认" width="760px">
+      <!-- 顶部工具区：裁切起止 + 按范围（重新）生成 -->
+      <el-space wrap style="margin-bottom: 12px">
+        <el-select v-model="draftRange.start" filterable placeholder="起始标题" style="width: 240px">
+          <el-option v-for="h in draftHeadings" :key="h.index" :label="h.title" :value="h.title" />
+        </el-select>
+        <span>～</span>
+        <el-select v-model="draftRange.end" filterable placeholder="截至标题" style="width: 240px">
+          <el-option label="文档末尾" value="" />
+          <el-option v-for="h in draftHeadings" :key="h.index" :label="h.title" :value="h.title" />
+        </el-select>
+        <el-button type="primary" plain :loading="regenerating" @click="onRegenerateWithRange">
+          {{ draft ? '按此范围重新生成' : '按此范围生成' }}
+        </el-button>
+      </el-space>
+
+      <template v-if="!draft">
+        <el-alert type="info" :closable="false"
+                  title="尚未生成底稿：请选择裁切起止标题后点击「按此范围生成」。" />
+      </template>
+      <template v-else>
+        <el-alert v-for="(w, i) in draft.warnings || []" :key="i" type="warning" :closable="false"
+                  :title="w" style="margin-bottom: 6px" />
+        <el-alert type="info" :closable="false" style="margin-bottom: 10px"
+                  title="以下为建议绑定，未点击「确认并保存绑定」前不会生效；未确认的表格导出时不会被填充。" />
+
+        <h4 style="margin: 8px 0 4px">大纲</h4>
+        <div style="max-height: 160px; overflow: auto; font-size: 12px; color: #606266; border: 1px solid #ebeef5; border-radius: 4px; padding: 6px 10px">
+          <div v-for="(o, i) in draft.outline || []" :key="i"
+               :style="{ paddingLeft: `${(Number(o[0]) - 1) * 16}px` }">{{ o[1] }}</div>
+        </div>
+
+        <h4 style="margin: 12px 0 4px">表格绑定</h4>
+        <el-table :data="bindingRows" size="small" max-height="320">
+          <el-table-column prop="table_index" label="#" width="50" />
+          <el-table-column label="表头预览" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">{{ (row.header || []).join(' / ') || '-' }}</template>
+          </el-table-column>
+          <el-table-column prop="context_heading" label="前文标题" min-width="120"
+                           show-overflow-tooltip>
+            <template #default="{ row }">{{ row.context_heading || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="角色" width="140">
+            <template #default="{ row }">
+              <el-select v-model="row.role" size="small" @change="onBindingRoleChange(row)">
+                <el-option v-for="o in DRAFT_ROLE_OPTIONS" :key="o.value"
+                           :label="o.label" :value="o.value" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="条件" min-width="190">
+            <template #default="{ row }">
+              <el-select v-if="row.role === 'person_roster'" v-model="row.person_scope"
+                         size="small" placeholder="人员范围">
+                <el-option v-for="o in PERSON_SCOPE_OPTIONS" :key="o.value"
+                           :label="o.label" :value="o.value" />
+              </el-select>
+              <el-select v-else-if="row.role === 'perf_list'" v-model="row.perf_scope"
+                         size="small" placeholder="业绩范围">
+                <el-option v-for="o in PERF_SCOPE_OPTIONS" :key="o.value"
+                           :label="o.label" :value="o.value" />
+              </el-select>
+              <el-space v-else-if="row.role === 'image_slot'" wrap>
+                <el-select v-model="row.label_kind" size="small" placeholder="图片类型"
+                           style="width: 110px">
+                  <el-option v-for="k in LABEL_KIND_OPTIONS" :key="k" :label="k" :value="k" />
+                </el-select>
+                <el-select v-model="row.person" size="small" placeholder="归属人员"
+                           style="width: 90px">
+                  <el-option v-for="o in imagePersonOptions" :key="o.value"
+                             :label="o.label" :value="o.value" />
+                </el-select>
+              </el-space>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.confirmed" type="success" size="small">已确认</el-tag>
+              <el-tag v-else-if="needManualConfirm(row)" type="warning" size="small">需人工确认</el-tag>
+              <el-tag v-else type="info" size="small">建议</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-checkbox v-model="swapToc" style="margin-top: 10px">
+          将目录页替换为自动目录（导出后请在 Word 中按 F9 更新页码）
+        </el-checkbox>
+      </template>
+
+      <template #footer>
+        <el-button @click="draftDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="bindingsSaving" :disabled="!draft"
+                   @click="onSaveBindings">确认并保存绑定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="reportDialogVisible" title="导出填充报告" width="560px">
+      <template v-if="fillReport">
+        <el-alert v-if="fillReport.verify && fillReport.verify.ok === false" type="error"
+                  :closable="false" title="校验未通过：检测到未授权改动，请勿使用该文件。"
+                  style="margin-bottom: 10px" />
+        <ul v-if="fillReport.verify && (fillReport.verify.issues || []).length"
+            style="margin: 0 0 10px; padding-left: 20px; color: #f56c6c; font-size: 13px">
+          <li v-for="(s, i) in fillReport.verify.issues" :key="i">{{ s }}</li>
+        </ul>
+
+        <template v-if="(fillReport.filled || []).length">
+          <h4 style="margin: 8px 0 4px">已填充</h4>
+          <div v-for="(f, i) in fillReport.filled" :key="i" style="font-size: 13px; margin: 2px 0">
+            表格#{{ f.table_index }}（{{ roleLabel(f.role) }}）：填充 {{ f.rows }} 行
+          </div>
+        </template>
+
+        <template v-if="(fillReport.images || []).length">
+          <h4 style="margin: 8px 0 4px">图片</h4>
+          <div v-for="(im, i) in fillReport.images" :key="i"
+               :style="`font-size: 13px; margin: 2px 0; ${im.ok ? '' : 'color: #f56c6c'}`">
+            #{{ im.table_index }} {{ im.person }} · {{ im.label_kind }}{{ im.ok ? '' : ' 插入失败' }}
+          </div>
+        </template>
+
+        <template v-if="(fillReport.skipped || []).length">
+          <h4 style="margin: 8px 0 4px">已跳过</h4>
+          <div v-for="(s, i) in fillReport.skipped" :key="i"
+               style="font-size: 13px; margin: 2px 0; color: #909399">
+            表格#{{ s.table_index }}（{{ roleLabel(s.role) }}）：{{ s.reason }}
+          </div>
+        </template>
+      </template>
+      <template #footer>
+        <el-button type="primary" @click="reportDialogVisible = false">知道了</el-button>
       </template>
     </el-dialog>
   </div>
