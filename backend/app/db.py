@@ -118,6 +118,21 @@ class Database:
                     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bid_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    file_path TEXT DEFAULT '',
+                    source TEXT DEFAULT 'tender-cut',
+                    source_path TEXT DEFAULT '',
+                    cut_start TEXT DEFAULT '',
+                    cut_end TEXT DEFAULT '',
+                    bindings TEXT DEFAULT '{}',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+            """)
         self._migrate_project_assets_columns()
         self._migrate_perfs_to_contracts()
 
@@ -462,6 +477,67 @@ class Database:
     def delete_template(self, template_id: int):
         with self._connect() as conn:
             conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+
+    # ---------- 商务标底稿 ----------
+    @staticmethod
+    def _bid_template_row(row) -> dict:
+        """bindings JSON 列解析为 dict（解析失败回退 {}）。"""
+        d = dict(row)
+        try:
+            d["bindings"] = json.loads(d.get("bindings") or "{}")
+        except json.JSONDecodeError:
+            d["bindings"] = {}
+        return d
+
+    def create_bid_template(self, project_id: int, name: str, file_path: str,
+                            source: str = "tender-cut", source_path: str = "",
+                            cut_start: str = "", cut_end: str = "",
+                            bindings: dict = None) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO bid_templates "
+                "(project_id, name, file_path, source, source_path, "
+                "cut_start, cut_end, bindings) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (project_id, name, file_path, source, source_path,
+                 cut_start, cut_end,
+                 json.dumps(bindings or {}, ensure_ascii=False)))
+            return cur.lastrowid
+
+    def get_bid_template(self, bid_template_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM bid_templates WHERE id = ?",
+                (bid_template_id,)).fetchone()
+            return self._bid_template_row(row) if row else None
+
+    def get_project_bid_template(self, project_id: int) -> Optional[dict]:
+        """项目当前底稿（id 最大一条）；无返回 None。"""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM bid_templates WHERE project_id = ? "
+                "ORDER BY id DESC LIMIT 1", (project_id,)).fetchone()
+            return self._bid_template_row(row) if row else None
+
+    def update_bid_template(self, bid_template_id: int, **kwargs):
+        """allowed = {"name", "file_path", "cut_start", "cut_end", "bindings"}；
+        bindings 为 dict 时自动 json.dumps。"""
+        allowed = {"name", "file_path", "cut_start", "cut_end", "bindings"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if "bindings" in fields and isinstance(fields["bindings"], dict):
+            fields["bindings"] = json.dumps(fields["bindings"], ensure_ascii=False)
+        if not fields:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE bid_templates SET {set_clause} WHERE id = ?",
+                         list(fields.values()) + [bid_template_id])
+
+    def delete_bid_template(self, bid_template_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM bid_templates WHERE id = ?", (bid_template_id,))
 
     # ---------- 项目资料 ----------
     def create_material(self, project_id: int, file_path: str, file_type: str) -> int:
