@@ -194,3 +194,14 @@ def section_target_chars(docx_path: str, title: str, level: "int | None" = None)
     if not pool:
         return DEFAULT_TARGET_CHARS
     return max(int(sum(pool) / len(pool)), 1)
+
+
+def para_heading_level(para) -> int:
+    """标题层级判定（0=正文）：样式优先（Heading/标题 1-4），无样式命中时
+    文本模式兜底（第X章/X、/（X）/数字编号，≤60 字）。TOC 段落恒返回 0。
+    供商务标底稿裁切复用；与既有 _para_level 不同：无条件启用文本兜底
+    （裁切场景面对样式不规范的招标文件原文）。"""
+    style_name = _style_name_of(para)
+    if _is_toc_para(para, style_name):
+        return 0
+    return _para_level(para, text_fallback=True, style_name=style_name)

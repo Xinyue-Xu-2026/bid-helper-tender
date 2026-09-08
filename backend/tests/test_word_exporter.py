@@ -2,7 +2,7 @@
 import pytest
 from docx import Document
 
-from app.core.word_exporter import export_word
+from app.core.word_exporter import export_word, insert_toc_field_at
 
 
 SECTIONS = [
@@ -119,3 +119,27 @@ def test_export_word_markdown_table_and_bullets(tmp_path):
     # 普通段落按行拆分
     texts = [p.text for p in doc.paragraphs]
     assert "说明段落一" in texts and "收尾段落" in texts
+
+
+# ---------- insert_toc_field_at（公开化的 TOC 域插入） ----------
+
+def test_insert_toc_field_at_clears_and_inserts():
+    doc = Document()
+    para = doc.add_paragraph("原有段落内容")
+    para.add_run("追加的run")
+    insert_toc_field_at(para)
+    xml = para._p.xml
+    assert "instrText" in xml and "TOC" in xml   # TOC 域存在
+    assert 'TOC \\o "1-4" \\h \\z \\u' in xml     # 域代码完整
+    assert "原有段落内容" not in para.text        # 原 run 内容被清空
+    assert "追加的run" not in para.text
+    assert para.text == ""
+
+
+def test_insert_toc_field_at_empty_para():
+    doc = Document()
+    para = doc.add_paragraph()
+    insert_toc_field_at(para)
+    xml = para._p.xml
+    assert "instrText" in xml and "TOC" in xml
+    assert xml.count("instrText") == 2            # 开闭标签各一次，仅一个域

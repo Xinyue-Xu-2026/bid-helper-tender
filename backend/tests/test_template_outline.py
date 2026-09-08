@@ -6,6 +6,7 @@ from app.core.template_outline import (
     DEFAULT_TARGET_CHARS,
     TemplateOutlineError,
     build_tree,
+    para_heading_level,
     parse_outline,
     section_target_chars,
 )
@@ -169,3 +170,45 @@ def test_strip_tab_pageno_defensive():
     assert _strip_tab_pageno("第三章 目标控制措施和手段\t1") == "第三章 目标控制措施和手段"
     assert _strip_tab_pageno("（一）政府审计核减控制目标\t12 ") == "（一）政府审计核减控制目标"
     assert _strip_tab_pageno("一、审计质量目标") == "一、审计质量目标"
+
+
+# ---------- para_heading_level（公开化的标题判定） ----------
+
+def test_para_heading_level_heading_style():
+    doc = Document()
+    doc.add_heading("第一章 项目概述", level=1)
+    doc.add_heading("1.1 项目背景", level=2)
+    doc.add_heading("1.1.1 架构设计", level=3)
+    assert para_heading_level(doc.paragraphs[0]) == 1
+    assert para_heading_level(doc.paragraphs[1]) == 2
+    assert para_heading_level(doc.paragraphs[2]) == 3
+
+
+def test_para_heading_level_text_fallback():
+    doc = Document()
+    doc.add_paragraph("第三章 投标文件格式")
+    doc.add_paragraph("一、投标函")
+    doc.add_paragraph("（一）投标函附录")
+    doc.add_paragraph("1.2 建设目标")
+    assert para_heading_level(doc.paragraphs[0]) == 1
+    assert para_heading_level(doc.paragraphs[1]) == 2
+    assert para_heading_level(doc.paragraphs[2]) == 3
+    assert para_heading_level(doc.paragraphs[3]) == 2
+
+
+def test_para_heading_level_long_body_returns_zero():
+    doc = Document()
+    doc.add_paragraph("这里是超过六十字的正文内容" + "长" * 60)
+    doc.add_paragraph("普通正文")
+    assert para_heading_level(doc.paragraphs[0]) == 0
+    assert para_heading_level(doc.paragraphs[1]) == 0
+
+
+def test_para_heading_level_toc_para_always_zero():
+    from docx.enum.style import WD_STYLE_TYPE
+    doc = Document()
+    doc.styles.add_style("toc 1", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("第三章 投标文件格式\t1", style="toc 1")
+    doc.add_paragraph("一、审计质量目标\t1")  # 制表符页码特征
+    assert para_heading_level(doc.paragraphs[0]) == 0
+    assert para_heading_level(doc.paragraphs[1]) == 0

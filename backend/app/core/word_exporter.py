@@ -65,9 +65,9 @@ def _clear_body_keep_cover(doc):
         body.remove(el)
 
 
-def _insert_toc_field(doc):
-    """插入 Word 原生 TOC 域（用户在 Word 中「更新域」生成目录，含 1-4 级标题）。"""
-    para = doc.add_paragraph()
+def insert_toc_field_at(para) -> None:
+    """在既有段落 para 内插入 Word 原生 TOC 域（清空原段落内容）。"""
+    para.clear()
     run = para.add_run()
     begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
     instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve")
@@ -75,6 +75,11 @@ def _insert_toc_field(doc):
     separate = OxmlElement("w:fldChar"); separate.set(qn("w:fldCharType"), "separate")
     end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
     run._r.append(begin); run._r.append(instr); run._r.append(separate); run._r.append(end)
+
+
+def _insert_toc_field(doc):
+    """插入 Word 原生 TOC 域（用户在 Word 中「更新域」生成目录，含 1-4 级标题）。"""
+    insert_toc_field_at(doc.add_paragraph())
 
 
 def _style_names(doc, style_type=None) -> set:
