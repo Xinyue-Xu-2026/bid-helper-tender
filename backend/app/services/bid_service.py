@@ -328,3 +328,132 @@ def assemble_bid_template_data(db: Database, person_picks: list,
 
     return {"a": table_a, "b": table_b, "c": table_c, "d": table_d,
             "e": table_e, "f": table_f, "g": table_g, "persons": persons}
+
+
+# ---------- 底稿驱动商务标导出：列语义数据组装 ----------
+
+# 人员表列语义键（与 T5 bindings schema 的 columns 语义键一致）
+PERSON_SEM_KEYS = ("seq", "label", "name", "gender", "age", "education",
+                   "title", "work_years", "certs", "role")
+# 业绩表列语义键
+PERF_SEM_KEYS = ("seq", "project_name", "client", "client_contact", "sign_date",
+                 "amount", "project_type", "service_type", "content",
+                 "proof_page")
+
+
+def person_semantics(p: dict, seq: int, role: str = "") -> dict:
+    """p={"name","fields","is_lead"} → {sem_key: str}（语义键全集含空值，供表格直接落列）。
+    seq: 行序号（1 起）；label: "1.项目负责人"（is_lead）/"N.项目组其他人员"（沿用旧措辞）；
+    gender/age/education: fields 直取（缺→""）；title: fields["职称"]；
+    work_years: effective_work_years(fields)；certs: _cert_qualifications(fields)；
+    role: 入参 role（默认""）。"""
+    fields = p.get("fields") or {}
+    label = (f"{seq}.项目负责人" if p.get("is_lead")
+             else f"{seq}.项目组其他人员")
+    return {
+        "seq": str(seq),
+        "label": label,
+        "name": str(p.get("name") or ""),
+        "gender": str(fields.get("性别") or ""),
+        "age": str(fields.get("年龄") or ""),
+        "education": str(fields.get("学历") or ""),
+        "title": str(fields.get("职称") or ""),
+        "work_years": effective_work_years(fields),
+        "certs": _cert_qualifications(fields),
+        "role": str(role or ""),
+    }
+
+
+def contract_semantics(c: dict, seq: int) -> dict:
+    """c={"name","fields","section"} → {sem_key: str}。
+    seq: 行序号（1 起）；project_name: c["name"]；client: fields["委托单位"]；
+    sign_date: fields["签订日期"]（原样字符串）；
+    amount: fields["工程造价（万元）"] 优先，缺省回落 fields["合同金额"]；
+    service_type: service_type_label(fields)；
+    content: f"提供{name}的{service_type_label}服务"（沿用 perf 措辞）；
+    project_type: fields["项目类型"]；client_contact/proof_page: 资产库未建模 → ""。"""
+    fields = c.get("fields") or {}
+    name = str(c.get("name") or "")
+    svc = service_type_label(fields)
+    amount = str(fields.get("工程造价（万元）") or fields.get("合同金额") or "")
+    return {
+        "seq": str(seq),
+        "project_name": name,
+        "client": str(fields.get("委托单位") or ""),
+        "client_contact": "",
+        "sign_date": str(fields.get("签订日期") or ""),
+        "amount": amount,
+        "project_type": str(fields.get("项目类型") or ""),
+        "service_type": svc,
+        "content": f"提供{name}的{svc}服务",
+        "proof_page": "",
+    }
+
+
+def _perf_year(fields: dict) -> str:
+    """业绩年份：优先 fields["年份"]，否则取 签订日期 前 4 位数字。"""
+    year = str((fields or {}).get("年份") or "").strip()
+    if year:
+        return year
+    sign = str((fields or {}).get("签订日期") or "").strip()
+    return sign[:4] if len(sign) >= 4 and sign[:4].isdigit() else ""
+
+
+def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
+                            contract_picks: list) -> dict:
+    """底稿驱动导出的列语义数据组装。签名定稿：(db, project_id, person_picks,
+    contract_picks)——必须接收 project_id 以便查 db.get_project_assets(project_id)
+    已保存勾选补全人员 role；picks 沿用 export-template 载荷形态
+    （persons: {asset_id, is_lead, certs?}；contracts: {asset_id, section}）。
+    返回 {"persons": [{"name","fields","is_lead","role","sem"}],
+           "contracts": [{"name","fields","section","sem"}],
+           "lead_perfs_text": str}。
+    persons 负责人优先稳定排序（同 assemble_bid_template_data）；sem 为
+    person_semantics/contract_semantics 产出的列语义行。
+    lead_perfs_text = 负责人名下匹配业绩逐行 "项目名称（年份）"（\n 连接，
+    匹配规则同 assemble_bid_template_data：fields["项目负责人"]==负责人姓名）；
+    无负责人或无匹配 → ""。"""
+    saved_roles = {
+        row["asset_id"]: row.get("role") or ""
+        for row in db.get_project_assets(project_id, asset_type="person")
+    }
+
+    persons = []
+    for pick in person_picks or []:
+        asset = db.get_asset(pick.get("asset_id"))
+        if asset and asset.get("type") == "person":
+            fields = dict(asset.get("fields") or {})
+            # 证书按用户勾选过滤：certs 为选中下标列表；未传（None）则保留全部
+            indices = pick.get("certs")
+            if indices is not None:
+                certs = fields.get("证书") or []
+                fields["证书"] = [certs[i] for i in indices
+                                  if isinstance(i, int) and 0 <= i < len(certs)]
+            persons.append({"name": asset["name"], "fields": fields,
+                            "is_lead": bool(pick.get("is_lead")),
+                            "role": saved_roles.get(pick.get("asset_id"), "")})
+    persons.sort(key=lambda p: not p["is_lead"])  # 负责人排最前（稳定排序）
+    for i, p in enumerate(persons, 1):
+        p["sem"] = person_semantics(p, i, role=p["role"])
+
+    contracts = []
+    for pick in contract_picks or []:
+        asset = db.get_asset(pick.get("asset_id"))
+        if asset and asset.get("type") == "contract":
+            contracts.append({"name": asset["name"],
+                              "fields": asset.get("fields") or {},
+                              "section": pick.get("section")})
+    for i, c in enumerate(contracts, 1):
+        c["sem"] = contract_semantics(c, i)
+
+    lead = next((p for p in persons if p["is_lead"]), None)
+    lead_lines = []
+    if lead is not None:
+        for c in contracts:
+            if str(c["fields"].get("项目负责人") or "").strip() == lead["name"]:
+                year = _perf_year(c["fields"])
+                lead_lines.append(
+                    f"{c['name']}（{year}）" if year else c["name"])
+
+    return {"persons": persons, "contracts": contracts,
+            "lead_perfs_text": "\n".join(lead_lines)}
