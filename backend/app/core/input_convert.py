@@ -2,6 +2,7 @@
 转换结果按内容缓存（dest_dir/<sha1>.docx），重复调用不重复转换。"""
 import hashlib
 import shutil
+import uuid
 from pathlib import Path
 
 
@@ -84,8 +85,17 @@ def ensure_docx(src_path: str, dest_dir: str) -> Path:
     dest = dest_dir_path / f"{_cache_key(src)}.docx"
     if dest.exists():
         return dest
-    if suffix == ".doc":
-        _convert_doc(src, dest)
-    else:
-        _convert_pdf(src, dest)
+    # 原子化写入：先转临时文件（保留 .docx 后缀供 Word/pdf2docx 识别，
+    # 随机段避免并发冲突），成功后 rename 到缓存键；失败清理半成品，
+    # 防止坏缓存被同键后续调用永久命中。
+    tmp = dest_dir_path / f"{_cache_key(src)}.{uuid.uuid4().hex[:8]}.tmp.docx"
+    try:
+        if suffix == ".doc":
+            _convert_doc(src, tmp)
+        else:
+            _convert_pdf(src, tmp)
+        tmp.replace(dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     return dest

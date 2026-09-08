@@ -265,8 +265,41 @@ def test_stale_replacement_and_unbound_table_untouched(tmp_path):
     assert doc.tables[4].cell(0, 0).text == PROMISE_TEXT
 
 
-# ---------- 8. swap_toc → toc 段替换为 TOC 域 ----------
+def test_stale_value_discovered_before_fill(tmp_path):
+    """替换规则对称性回归（I-1）：旧项目名的唯一"项目名称："标签段落藏在
+    被绑定人员表的数据单元格内。填充会覆写该单元格——若替换规则在填充后
+    才计算（旧顺序），stale 名无法被发现，封面裸名不被替换且 verify 误报。
+    修复后规则基于填充前的底稿计算，与 verify 同源。"""
+    doc = Document()
+    doc.add_paragraph("编       号：OLD-2020-001号")
+    doc.add_paragraph("本单位参与本次 旧项目名AAA项目投标活动")
+    table = doc.add_table(rows=2, cols=3)
+    for j, h in enumerate(["序号", "姓名", "说明"]):
+        table.cell(0, j).text = h
+    table.cell(1, 0).text = "1"
+    table.cell(1, 1).text = "旧人"
+    table.cell(1, 2).text = "项目名称：旧项目名AAA"  # 唯一标签来源（在绑定表内）
+    draft = str(tmp_path / "draft.docx")
+    doc.save(draft)
+    bindings = {"tables": [
+        {"table_index": 0, "role": "person_roster",
+         "columns": {"seq": 0, "name": 1},
+         "person_scope": "all", "perf_scope": "", "label_kind": "",
+         "person": "", "confirmed": True},
+    ], "swap_toc": False}
+    out = str(tmp_path / "out.docx")
+    report = fill_draft(draft, out, bindings, _data(),
+                        project_name="新项目XYZ")
+    texts = [p.text for p in Document(out).paragraphs]
+    # 封面裸名已被替换（规则在填充前从绑定表单元格中发现旧名）
+    assert "本单位参与本次 新项目XYZ项目投标活动" in texts
+    assert not any("旧项目名AAA" in t for t in texts)
+    # verify 与导出同源计算规则 → 不误报
+    assert report["verify"]["ok"] is True
+    assert report["verify"]["issues"] == []
 
+
+# ---------- 8. swap_toc → toc 段替换为 TOC 域 ----------
 def test_swap_toc(tmp_path):
     bindings = _bindings(swap_toc=True)
     draft = _build_draft(tmp_path / "draft.docx")

@@ -197,6 +197,14 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     contracts = data.get("contracts") or []
     report = {"filled": [], "images": [], "skipped": [], "verify": None}
 
+    # 残留文本替换须在填充之前执行：替换规则（compute_text_subs）基于
+    # 填充前的底稿计算，与 verify_draft_fill 的底稿侧同源——否则 stale 值
+    # 仅存在于绑定表数据单元格时，填充覆写后规则发现不到旧值，
+    # 封面/正文残留不被替换且 verify 误报。填充整体覆写数据单元格，
+    # 提前替换不改变产物内容。
+    _replace_stale_text(doc, project_no=project_no,
+                        project_name=project_name, doc_date=doc_date)
+
     image_slots = []
     bound_indices = set()
     for binding in (bindings or {}).get("tables") or []:
@@ -246,8 +254,6 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
             image_slots.append((binding, table))
 
     _fill_image_slots(doc, image_slots, persons, report)
-    _replace_stale_text(doc, project_no=project_no,
-                        project_name=project_name, doc_date=doc_date)
     swap_toc = bool((bindings or {}).get("swap_toc"))
     if swap_toc:
         _swap_toc(doc)

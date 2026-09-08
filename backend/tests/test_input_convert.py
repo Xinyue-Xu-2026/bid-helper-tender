@@ -102,3 +102,29 @@ def test_pdf_cache_hit_skips_conversion(tmp_path, monkeypatch):
     r2 = ensure_docx(str(src), str(dest_dir))
     assert calls["n"] == 1
     assert r1 == r2 and r1.exists()
+
+
+def test_failed_conversion_leaves_no_poisoned_cache(tmp_path, monkeypatch):
+    """转换中途写了一半即失败：缓存目标不得残留半成品（否则同路径+大小+
+    mtime 的下次调用会永久命中坏缓存）；失败后重试须可成功。"""
+    src = tmp_path / "bid.pdf"
+    _make_text_pdf(src, ["缓存原子性测试文本"] * 10)
+
+    def _broken(s, d):
+        Path(d).write_bytes(b"partial-broken")  # 写了一半就崩
+        raise RuntimeError("转换中途失败")
+
+    monkeypatch.setattr(input_convert, "_convert_pdf", _broken)
+    dest_dir = tmp_path / "cache"
+    with pytest.raises(RuntimeError, match="转换中途失败"):
+        ensure_docx(str(src), str(dest_dir))
+    # 最终缓存键不得存在；半成品临时文件也被清理
+    assert not list(dest_dir.glob("*.docx"))
+
+    def _good(s, d):
+        Document().save(str(d))
+
+    monkeypatch.setattr(input_convert, "_convert_pdf", _good)
+    result = ensure_docx(str(src), str(dest_dir))
+    assert result.exists()
+    assert Document(str(result)) is not None  # 重试成功且产物可解析
