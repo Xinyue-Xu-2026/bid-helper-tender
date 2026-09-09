@@ -9,6 +9,8 @@ FILES_DIR = DATA_DIR / "files"
 BID_DRAFTS_DIR = DATA_DIR / "bid_drafts"
 DB_PATH = DATA_DIR / "app.db"
 BID_TEMPLATE_PATH = DATA_DIR / "商务标模板.docx"
+# 宏信天德页眉/页脚移植参考（logo/绿字/绿线 + PAGE 域页脚的来源包）
+BID_HEADER_SOURCE_PATH = DATA_DIR / "商务标页眉参考.docx"
 
 
 def ensure_dirs() -> None:

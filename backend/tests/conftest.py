@@ -20,4 +20,7 @@ def _isolate_data_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.FILES_DIR", data / "files")
     monkeypatch.setattr("app.config.BID_DRAFTS_DIR", data / "bid_drafts")
     monkeypatch.setattr("app.config.DB_PATH", data / "app.db")
+    # 指向不存在的路径 → 页眉移植走降级分支；需要真实参考的用例自行 monkeypatch
+    monkeypatch.setattr("app.config.BID_HEADER_SOURCE_PATH",
+                        data / "商务标页眉参考.docx")
 

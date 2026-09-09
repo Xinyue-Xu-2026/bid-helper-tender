@@ -17,6 +17,7 @@ from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
     _replace_stale_text, _set_cell_text,
 )
+from app.core.bid_page_setup import apply_page_setup
 from app.core.bid_verify import verify_draft_fill
 from app.core.word_exporter import insert_toc_field_at
 
@@ -222,7 +223,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     data = data or {}
     persons = data.get("persons") or []
     contracts = data.get("contracts") or []
-    report = {"filled": [], "images": [], "skipped": [], "verify": None}
+    report = {"filled": [], "images": [], "skipped": [], "verify": None,
+              "page_setup": None}
 
     # 残留文本替换须在填充之前执行：替换规则（compute_text_subs）基于
     # 填充前的底稿计算，与 verify_draft_fill 的底稿侧同源——否则 stale 值
@@ -287,6 +289,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     if swap_toc:
         _swap_toc(doc)
     doc.save(str(dest_path))
+    # 页眉移植 + 分节页码（参考缺失自动降级，见 bid_page_setup）
+    report["page_setup"] = apply_page_setup(str(dest_path))
     report["verify"] = verify_draft_fill(
         str(draft_path), str(dest_path),
         bound_table_indices=bound_indices,

@@ -3,12 +3,20 @@
 替换规则后必须逐一相等；正文段落文本同样套规则后比对。
 命中差异即不得修改内容被改动。"""
 from docx import Document
+from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from app.core.bid_template_exporter import (
     _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs, _para_text,
     compute_text_subs,
 )
+
+
+def _is_section_break_para(para) -> bool:
+    """分节符段落（pPr 内含 sectPr，无正文内容）——页面设置（P2）拆节
+    会在产物中插入此类段落，属格式变化而非内容改动，比对时跳过。"""
+    pPr = para._p.find(qn("w:pPr"))
+    return pPr is not None and pPr.find(qn("w:sectPr")) is not None
 
 
 def _apply_subs(text: str, subs) -> str:
@@ -87,9 +95,12 @@ def verify_draft_fill(draft_path: str, out_path: str,
             issues.append(f"表格[{i}] 未绑定但内容被改动")
 
     # 段落：toc 样式段两侧恒跳过（_replace_stale_text 从不触碰 toc 段；
-    # swapped_toc 时产物 toc 段整组换为 TOC 域，同样被跳过覆盖）
-    d_paras = [p for p in d_paras if not _is_toc_paragraph(p)]
-    o_paras = [p for p in o_paras if not _is_toc_paragraph(p)]
+    # swapped_toc 时产物 toc 段整组换为 TOC 域，同样被跳过覆盖）；
+    # 分节符段落（P2 拆节插入）同样跳过
+    d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
+               and not _is_section_break_para(p)]
+    o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
+               and not _is_section_break_para(p)]
     if len(d_paras) != len(o_paras):
         issues.append(
             f"段落数量不一致：底稿 {len(d_paras)} 段，产物 {len(o_paras)} 段")
