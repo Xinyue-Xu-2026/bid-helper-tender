@@ -266,6 +266,48 @@ def test_stale_replacement_and_unbound_table_untouched(tmp_path):
     assert doc.tables[4].cell(0, 0).text == PROMISE_TEXT
 
 
+def test_tenderer_bidder_fill_and_verify(tmp_path):
+    """招标人/投标人名称标签空白填充（P3）：底稿含"招标人：____"与
+    "投标人名称：____" → 导出填入；toc 样式段不替换；verify.ok=true
+    （compute_text_subs 双侧同源）。"""
+    doc = Document()
+    doc.add_paragraph("招标人：____")
+    doc.add_paragraph("投标人名称：＿＿＿＿")
+    doc.add_paragraph("日      期 ：2020年1月2日")
+    from docx.enum.style import WD_STYLE_TYPE
+    doc.styles.add_style("toc 1", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("招标人：____\t3", style="toc 1")  # toc 段不替换
+    draft = str(tmp_path / "draft.docx")
+    doc.save(draft)
+    out = str(tmp_path / "out.docx")
+    report = fill_draft(draft, out, {"tables": [], "swap_toc": False}, _data(),
+                        tenderer="高邮市水利建设服务中心",
+                        bidder_name="宏信天德工程顾问有限公司")
+    doc_out = Document(out)
+    texts = [p.text for p in doc_out.paragraphs]
+    assert "招标人：高邮市水利建设服务中心" in texts
+    assert "投标人名称：宏信天德工程顾问有限公司" in texts
+    toc_texts = [p.text for p in doc_out.paragraphs
+                 if (p.style.name or "").lower().startswith("toc")]
+    assert toc_texts and "____" in toc_texts[0]  # toc 段保持原样
+    assert report["verify"]["ok"] is True
+    assert report["verify"]["issues"] == []
+
+
+def test_tenderer_bidder_empty_no_replace(tmp_path):
+    """tenderer/bidder_name 为空 → 不替换，空白占位保持原样。"""
+    doc = Document()
+    doc.add_paragraph("招标人：____")
+    doc.add_paragraph("投标人名称：____")
+    draft = str(tmp_path / "draft.docx")
+    doc.save(draft)
+    out = str(tmp_path / "out.docx")
+    fill_draft(draft, out, {"tables": [], "swap_toc": False}, _data())
+    texts = [p.text for p in Document(out).paragraphs]
+    assert "招标人：____" in texts
+    assert "投标人名称：____" in texts
+
+
 def test_stale_value_discovered_before_fill(tmp_path):
     """替换规则对称性回归（I-1）：旧项目名的唯一"项目名称："标签段落藏在
     被绑定人员表的数据单元格内。填充会覆写该单元格——若替换规则在填充后

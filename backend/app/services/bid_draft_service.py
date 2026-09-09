@@ -11,7 +11,8 @@ from docx import Document
 
 from app import config
 from app.core.bid_draft import (
-    cut_draft, find_format_chapter, list_headings, resolve_heading_index,
+    cut_draft, extract_tenderer, find_format_chapter, list_headings,
+    resolve_heading_index,
 )
 from app.core.bid_table_classifier import classify_tables
 from app.core.bid_template_exporter import _is_toc_paragraph
@@ -92,7 +93,8 @@ class BidDraftService:
 
     def _store(self, project: dict, source: str, source_path: str,
                cut_start: str, cut_end: str, outline: list,
-               toc_paragraphs: int, suggestions: list) -> dict:
+               toc_paragraphs: int, suggestions: list,
+               tenderer: str = "") -> dict:
         """落库新底稿行并返回预览结构（调用方须已 _drop_old_draft）。"""
         name = f"{project['name']}_商务标底稿"
         file_path = str(config.BID_DRAFTS_DIR
@@ -102,12 +104,13 @@ class BidDraftService:
         row_id = self.db.create_bid_template(
             project["id"], name, file_path, source=source,
             source_path=source_path, cut_start=cut_start, cut_end=cut_end,
-            bindings=bindings)
+            bindings=bindings, tenderer=tenderer)
         warnings = [_TOC_WARNING] if toc_paragraphs > 0 else []
         return {"id": row_id, "name": name, "cut_start": cut_start,
                 "cut_end": cut_end, "source": source, "warnings": warnings,
                 "outline": outline, "tables": suggestions,
-                "bindings": bindings, "swap_toc": bindings["swap_toc"]}
+                "bindings": bindings, "swap_toc": bindings["swap_toc"],
+                "tenderer": tenderer}
 
     # ---------- 生成 / 上传 ----------
 
@@ -175,7 +178,8 @@ class BidDraftService:
                            cut_start=cut_start, cut_end=cut_end,
                            outline=stats["outline"],
                            toc_paragraphs=stats["toc_paragraphs"],
-                           suggestions=suggestions)
+                           suggestions=suggestions,
+                           tenderer=extract_tenderer(str(docx)))
 
     def upload_draft(self, project_id: int, src_path: str,
                      filename: str) -> dict:
@@ -190,7 +194,8 @@ class BidDraftService:
         return self._store(project, source="upload", source_path=filename,
                            cut_start="", cut_end="", outline=outline,
                            toc_paragraphs=toc_paragraphs,
-                           suggestions=suggestions)
+                           suggestions=suggestions,
+                           tenderer=extract_tenderer(str(dest)))
 
     # ---------- 预览 ----------
 
@@ -224,4 +229,5 @@ class BidDraftService:
                 "cut_end": row.get("cut_end") or "",
                 "source": row.get("source") or "", "warnings": warnings,
                 "outline": outline, "tables": merged, "bindings": stored,
-                "swap_toc": bool(stored.get("swap_toc"))}
+                "swap_toc": bool(stored.get("swap_toc")),
+                "tenderer": row.get("tenderer") or ""}

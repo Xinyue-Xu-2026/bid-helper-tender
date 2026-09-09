@@ -129,12 +129,22 @@ class Database:
                     cut_start TEXT DEFAULT '',
                     cut_end TEXT DEFAULT '',
                     bindings TEXT DEFAULT '{}',
+                    tenderer TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
                 )
             """)
         self._migrate_project_assets_columns()
         self._migrate_perfs_to_contracts()
+        self._migrate_bid_templates_columns()
+
+    def _migrate_bid_templates_columns(self):
+        """幂等迁移：旧库的 bid_templates 表补 tenderer 列（P3 招标人名称）。"""
+        with self._connect() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(bid_templates)")}
+            if "tenderer" not in cols:
+                conn.execute("ALTER TABLE bid_templates "
+                             "ADD COLUMN tenderer TEXT DEFAULT ''")
 
     def _migrate_project_assets_columns(self):
         """幂等迁移：旧库的 project_assets 表补 is_lead/certs/section 三列。
@@ -492,16 +502,16 @@ class Database:
     def create_bid_template(self, project_id: int, name: str, file_path: str,
                             source: str = "tender-cut", source_path: str = "",
                             cut_start: str = "", cut_end: str = "",
-                            bindings: dict = None) -> int:
+                            bindings: dict = None, tenderer: str = "") -> int:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO bid_templates "
                 "(project_id, name, file_path, source, source_path, "
-                "cut_start, cut_end, bindings) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "cut_start, cut_end, bindings, tenderer) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (project_id, name, file_path, source, source_path,
                  cut_start, cut_end,
-                 json.dumps(bindings or {}, ensure_ascii=False)))
+                 json.dumps(bindings or {}, ensure_ascii=False), tenderer))
             return cur.lastrowid
 
     def get_bid_template(self, bid_template_id: int) -> Optional[dict]:
@@ -522,9 +532,10 @@ class Database:
             return self._bid_template_row(row) if row else None
 
     def update_bid_template(self, bid_template_id: int, **kwargs):
-        """allowed = {"name", "file_path", "cut_start", "cut_end", "bindings"}；
-        bindings 为 dict 时自动 json.dumps。"""
-        allowed = {"name", "file_path", "cut_start", "cut_end", "bindings"}
+        """allowed = {"name", "file_path", "cut_start", "cut_end", "bindings",
+        "tenderer"}；bindings 为 dict 时自动 json.dumps。"""
+        allowed = {"name", "file_path", "cut_start", "cut_end", "bindings",
+                   "tenderer"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if "bindings" in fields and isinstance(fields["bindings"], dict):
             fields["bindings"] = json.dumps(fields["bindings"], ensure_ascii=False)

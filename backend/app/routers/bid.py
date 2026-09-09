@@ -50,6 +50,8 @@ class BidTemplateExportIn(BaseModel):
     project_no: str = ""      # 项目编号（空则不替换模板残留编号）
     project_name: str = ""    # 项目名称覆盖（空则用数据库项目名）
     doc_date: str = ""        # 文档日期 YYYY-MM-DD（空则不替换模板残留日期）
+    tenderer: str = ""        # 招标人名称（空则不填充"招标人：____"空白）
+    bidder_name: str = ""     # 投标人名称（空则不填充"投标人名称：____"空白）
 
 
 def _get_project_or_404(db: Database, project_id: int) -> dict:
@@ -132,7 +134,9 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
         report = fill_draft(bt["file_path"], str(dest), bindings, data,
                             project_no=(body.project_no or "").strip(),
                             project_name=effective_name,
-                            doc_date=(body.doc_date or "").strip())
+                            doc_date=(body.doc_date or "").strip(),
+                            tenderer=(body.tenderer or "").strip(),
+                            bidder_name=(body.bidder_name or "").strip())
         headers["X-Fill-Report"] = quote(
             json.dumps(report, ensure_ascii=False))
     else:

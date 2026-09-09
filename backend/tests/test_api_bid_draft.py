@@ -30,10 +30,12 @@ def client(db_path):
     app.dependency_overrides.clear()
 
 
-def _build_tender(path, with_format_chapter=True):
+def _build_tender(path, with_format_chapter=True, tenderer=""):
     """程序化招标文件：第一章 招标公告 + 第三章 投标文件格式（含人员表）。"""
     doc = Document()
     doc.add_heading("第一章 招标公告", level=1)
+    if tenderer:
+        doc.add_paragraph(f"招标人：{tenderer}")
     doc.add_paragraph("招标正文……")
     if with_format_chapter:
         doc.add_heading("第三章 投标文件格式", level=1)
@@ -60,8 +62,8 @@ def _make_person(client, name, fields=None):
         "type": "person", "name": name, "fields": fields or {}}).json()["id"]
 
 
-def _upload_tender(client, pid, tmp_path, with_format_chapter=True):
-    path = _build_tender(tmp_path / "tender.docx", with_format_chapter)
+def _upload_tender(client, pid, tmp_path, with_format_chapter=True, tenderer=""):
+    path = _build_tender(tmp_path / "tender.docx", with_format_chapter, tenderer)
     with open(path, "rb") as f:
         r = client.post(f"/api/projects/{pid}/tender",
                         files={"file": ("tender.docx", f.read(), DOCX_MIME)})
@@ -128,6 +130,26 @@ def test_generate_no_format_chapter_422(client, tmp_path):
     r = client.post(f"/api/projects/{pid}/bid-draft/generate", json={})
     assert r.status_code == 422
     assert "格式" in r.json()["detail"]
+
+
+# ---------- 招标人提取（P3） ----------
+
+def test_generate_extracts_tenderer(client, tmp_path):
+    """招标文件封面"招标人：XXX"（前 30 个非空段落内）→ 底稿行与预览回显。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path, tenderer="高邮市水利建设服务中心")
+    data = _generate(client, pid)
+    assert data["tenderer"] == "高邮市水利建设服务中心"
+    g = client.get(f"/api/projects/{pid}/bid-draft").json()
+    assert g["tenderer"] == "高邮市水利建设服务中心"
+
+
+def test_generate_tenderer_absent_empty(client, tmp_path):
+    """招标文件无"招标人："行 → tenderer 为空串。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    data = _generate(client, pid)
+    assert data["tenderer"] == ""
 
 
 def test_generate_with_explicit_indices(client, tmp_path):
@@ -302,7 +324,9 @@ def test_export_template_with_draft_uses_fill_pipeline(client, tmp_path):
     r = client.post(f"/api/projects/{pid}/bid-assets/export-template",
                     json={"persons": [{"asset_id": person_id,
                                        "is_lead": True}],
-                          "contracts": []})
+                          "contracts": [],
+                          "tenderer": "某服务中心",
+                          "bidder_name": "宏信天德工程顾问有限公司"})
     assert r.status_code == 200
     header = r.headers.get("x-fill-report")
     assert header, "有底稿导出必须带 X-Fill-Report"

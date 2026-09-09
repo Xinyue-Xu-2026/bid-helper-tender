@@ -62,7 +62,9 @@ def verify_draft_fill(draft_path: str, out_path: str,
         draft,
         project_no=str(params.get("project_no") or ""),
         project_name=str(params.get("project_name") or ""),
-        doc_date=str(params.get("doc_date") or ""))
+        doc_date=str(params.get("doc_date") or ""),
+        tenderer=str(params.get("tenderer") or ""),
+        bidder_name=str(params.get("bidder_name") or ""))
 
     def _split(doc):
         paras, tables = [], []

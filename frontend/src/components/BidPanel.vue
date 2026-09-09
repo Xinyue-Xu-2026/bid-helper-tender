@@ -3,7 +3,8 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   bidExportUrl, exportBidTemplate, generateBidDraft, getBidAssets, getBidDraft,
-  getBidDraftHeadings, listAssets, saveBidAssets, saveBidDraftBindings, uploadBidDraft,
+  getBidDraftHeadings, getProject, listAssets, saveBidAssets, saveBidDraftBindings,
+  uploadBidDraft,
 } from '../api'
 import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
 
@@ -287,14 +288,23 @@ async function onExport(fmt) {
 
 // ---------- 导出商务标对话框：每次打开时按当前项目信息重新初始化 ----------
 const exportDialogVisible = ref(false)
-const exportForm = ref({ project_no: '', project_name: '', doc_date: '' })
+const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '' })
 
-watch(exportDialogVisible, v => {
+watch(exportDialogVisible, async v => {
   if (!v) return
   exportForm.value = {
     project_no: '',
     project_name: props.projectName,
     doc_date: props.bidDate || '',
+    // 招标人：底稿提取值优先，缺省回落项目委托人（下方异步补齐）
+    tenderer: draft.value?.tenderer || '',
+    bidder_name: '宏信天德工程顾问有限公司',
+  }
+  if (!exportForm.value.tenderer) {
+    try {
+      const p = await getProject(props.projectId)
+      exportForm.value.tenderer = p.client || ''
+    } catch { /* 拦截器已弹错；留空可手填 */ }
   }
 })
 
@@ -317,6 +327,8 @@ async function onExportTemplate() {
       project_no: exportForm.value.project_no,
       project_name: exportForm.value.project_name.trim(),
       doc_date: exportForm.value.doc_date || '',
+      tenderer: exportForm.value.tenderer.trim(),
+      bidder_name: exportForm.value.bidder_name.trim(),
     }
     const r = await exportBidTemplate(props.projectId, payload)
     const cd = r.headers['content-disposition'] || ''
@@ -736,6 +748,12 @@ onMounted(() => { load(); loadDraft() })
         </el-form-item>
         <el-form-item label="项目名称">
           <el-input v-model="exportForm.project_name" placeholder="请输入项目名称" />
+        </el-form-item>
+        <el-form-item label="招标人">
+          <el-input v-model="exportForm.tenderer" placeholder="请输入招标人名称（留空则不填充）" />
+        </el-form-item>
+        <el-form-item label="投标人">
+          <el-input v-model="exportForm.bidder_name" placeholder="请输入投标人名称（留空则不填充）" />
         </el-form-item>
         <el-form-item label="日期">
           <el-date-picker v-model="exportForm.doc_date" type="date" value-format="YYYY-MM-DD"

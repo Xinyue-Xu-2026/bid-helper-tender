@@ -150,6 +150,26 @@ def cut_draft(tender_docx: str, dest_path: str,
             "toc_paragraphs": toc_paragraphs}
 
 
+_TENDERER_RE = re.compile(r"^招标人[：:]\s*(\S.+)$")
+_TENDERER_SCAN_LIMIT = 30
+
+
+def extract_tenderer(docx_path: str) -> str:
+    """从招标文件前 ~30 个非空段落提取"招标人：XXX"（封面标签行）；无 → ""。"""
+    count = 0
+    for para in Document(docx_path).paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        count += 1
+        if count > _TENDERER_SCAN_LIMIT:
+            break
+        m = _TENDERER_RE.match(text)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
 def resolve_heading_index(headings: list, title: str, doc=None) -> int:
     """按标题文本（strip）在 list_headings 结果中解析 body 下标；
     无命中 → BidDraftError。

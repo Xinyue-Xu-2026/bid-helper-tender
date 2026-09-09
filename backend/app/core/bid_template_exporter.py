@@ -230,6 +230,10 @@ _PROJECT_NAME_LABEL_RE = re.compile(r"项\s*目\s*名\s*称\s*[：:]\s*(\S+)")
 _DOC_DATE_RE = re.compile(
     r"(日\s*期\s*[：:]\s*)\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 _MEMBER_HEADING_RE = re.compile(r"^（\d+）项目组其他人员-")
+# 标签式空白占位（P3）：仅当标签后是空白/下划线占位（或行尾）时填充，
+# 已含真实值的行（如"招标人：某某中心"）不动
+_TENDERER_LABEL_RE = re.compile(r"(招标人[：:])(?=[\s_　＿]|$)[\s_　＿]*")
+_BIDDER_LABEL_RE = re.compile(r"(投标人名称[：:])(?=[\s_　＿]|$)[\s_　＿]*")
 
 
 def _iter_cell_paragraphs(cell):
@@ -306,10 +310,13 @@ def _discover_stale_values(doc) -> tuple:
 
 
 def compute_text_subs(doc, project_no: str = "", project_name: str = "",
-                      doc_date: str = "") -> list:
+                      doc_date: str = "", tenderer: str = "",
+                      bidder_name: str = "") -> list:
     """计算残留文本替换规则 [(pattern, repl)]（含 stale 编号/名称运行时发现）。
     _replace_stale_text 调本函数再逐段应用；导出与防篡改校验（bid_verify）
-    共用同一套规则，保证"导出改了什么"与"校验豁免什么"一致。"""
+    共用同一套规则，保证"导出改了什么"与"校验豁免什么"一致。
+    tenderer/bidder_name 非空时追加标签式空白占位填充规则
+    （招标人：____ / 投标人名称：____）。"""
     subs = []
     stale_no, stale_name = _discover_stale_values(doc)
     if project_no and stale_no:
@@ -323,15 +330,24 @@ def compute_text_subs(doc, project_no: str = "", project_name: str = "",
             y, mo, d = (int(g) for g in m.groups())
             date_text = f"{y}年{mo}月{d}日"
             subs.append((_DOC_DATE_RE, lambda match: match.group(1) + date_text))
+    if tenderer:
+        subs.append((_TENDERER_LABEL_RE,
+                     lambda match: match.group(1) + tenderer))
+    if bidder_name:
+        subs.append((_BIDDER_LABEL_RE,
+                     lambda match: match.group(1) + bidder_name))
     return subs
 
 
 def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
-                        doc_date: str = "") -> None:
+                        doc_date: str = "", tenderer: str = "",
+                        bidder_name: str = "") -> None:
     """替换模板中残留的上次投标文本：规则由 compute_text_subs 统一计算，
     此处仅逐段（含表格单元格，跳过 toc 段）应用。project_no/doc_date 为空
-    则跳过对应替换，project_name 为空则不替换。"""
-    subs = compute_text_subs(doc, project_no, project_name, doc_date)
+    则跳过对应替换，project_name 为空则不替换；tenderer/bidder_name 为空
+    则不填充对应标签空白。"""
+    subs = compute_text_subs(doc, project_no, project_name, doc_date,
+                             tenderer=tenderer, bidder_name=bidder_name)
     if not subs:
         return
     for para in _iter_all_paragraphs(doc):

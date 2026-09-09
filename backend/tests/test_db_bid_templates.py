@@ -4,6 +4,40 @@ import sqlite3
 from app.db import Database
 
 
+def test_bid_templates_tenderer_column_migration(tmp_path):
+    """P3 迁移回归：老库 bid_templates 无 tenderer 列 → init_schema 幂等补列，
+    旧行 tenderer 默认 ''；重复 init_schema 不炸。"""
+    db_file = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE bid_templates ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL,"
+        "name TEXT NOT NULL, file_path TEXT DEFAULT '',"
+        "source TEXT DEFAULT 'tender-cut', source_path TEXT DEFAULT '',"
+        "cut_start TEXT DEFAULT '', cut_end TEXT DEFAULT '',"
+        "bindings TEXT DEFAULT '{}',"
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO bid_templates (project_id, name) VALUES (1, '旧底稿')")
+    conn.commit()
+    conn.close()
+    db = Database(str(db_file))
+    db.init_schema()
+    db.init_schema()  # 幂等
+    row = db.get_project_bid_template(1)
+    assert row["tenderer"] == ""
+    # 新列可写
+    db.update_bid_template(row["id"], tenderer="某某中心")
+    assert db.get_project_bid_template(1)["tenderer"] == "某某中心"
+
+
+def test_bid_template_tenderer_roundtrip(db_path):
+    db = Database(db_path)
+    db.init_schema()
+    pid = db.create_project("测试项目")
+    bid = db.create_bid_template(pid, "底稿", "f.docx", tenderer="某服务中心")
+    assert db.get_bid_template(bid)["tenderer"] == "某服务中心"
+
+
 def test_bid_template_roundtrip(db_path):
     """create + get_project_bid_template 往返，bindings dict 正确解析。"""
     db = Database(db_path)

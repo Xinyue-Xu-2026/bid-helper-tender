@@ -211,9 +211,11 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
 
 def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                project_no: str = "", project_name: str = "",
-               doc_date: str = "") -> dict:
+               doc_date: str = "", tenderer: str = "",
+               bidder_name: str = "") -> dict:
     """按确认的 bindings 填充底稿并另存 dest_path，返回 fill_report。
-    dest 与 draft 不得同路径。"""
+    dest 与 draft 不得同路径。tenderer/bidder_name 为空则跳过对应
+    标签空白（招标人：____ / 投标人名称：____）填充。"""
     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
         raise ValueError("dest 与 draft 不得同路径")
     doc = Document(draft_path)
@@ -232,7 +234,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     # 封面/正文残留不被替换且 verify 误报。填充整体覆写数据单元格，
     # 提前替换不改变产物内容。
     _replace_stale_text(doc, project_no=project_no,
-                        project_name=project_name, doc_date=doc_date)
+                        project_name=project_name, doc_date=doc_date,
+                        tenderer=tenderer, bidder_name=bidder_name)
 
     image_slots = []
     bound_indices = set()
@@ -295,6 +298,7 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         str(draft_path), str(dest_path),
         bound_table_indices=bound_indices,
         replace_params={"project_no": project_no, "project_name": project_name,
-                        "doc_date": doc_date},
+                        "doc_date": doc_date, "tenderer": tenderer,
+                        "bidder_name": bidder_name},
         swapped_toc=swap_toc)
     return report
