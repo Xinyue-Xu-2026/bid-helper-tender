@@ -130,6 +130,41 @@ def test_generate_no_format_chapter_422(client, tmp_path):
     assert "格式" in r.json()["detail"]
 
 
+def test_generate_with_explicit_indices(client, tmp_path):
+    """索引直达：start_index/end_index 直接裁切，标题仅作展示（Fix C 回归）。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    headings = client.get(f"/api/projects/{pid}/bid-draft/headings").json()["headings"]
+    start = next(h for h in headings if "投标文件格式" in h["title"])
+    end = next(h for h in headings if "商务条款" in h["title"])
+    # end=-1（文档末尾）
+    r = client.post(f"/api/projects/{pid}/bid-draft/generate",
+                    json={"start_index": start["index"], "end_index": -1})
+    assert r.status_code == 200
+    data = r.json()
+    assert "投标文件格式" in data["cut_start"]
+    assert len(data["tables"]) == 1
+    # 显式 end_index：裁到"二、商务条款响应表"之前
+    r2 = client.post(f"/api/projects/{pid}/bid-draft/generate",
+                     json={"start_index": start["index"],
+                           "end_index": end["index"]})
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["cut_end"] == end["title"]
+    outline_titles = [t for _, t in data2["outline"]]
+    assert not any("商务条款" in t for t in outline_titles)
+    assert len(data2["tables"]) == 1  # 人员表在结束标题之前，保留
+
+
+def test_generate_with_out_of_range_index_422(client, tmp_path):
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    r = client.post(f"/api/projects/{pid}/bid-draft/generate",
+                    json={"start_index": 99999})
+    assert r.status_code == 422
+    assert "索引" in r.json()["detail"]
+
+
 # ---------- 3. upload ----------
 
 def test_upload_rejects_non_docx(client):

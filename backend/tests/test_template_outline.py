@@ -217,6 +217,19 @@ def test_para_heading_level_long_body_returns_zero():
     assert para_heading_level(doc.paragraphs[3]) == 0
 
 
+def test_para_heading_level_arabic_chapter_numeral():
+    """阿拉伯数字章号（真实招标文件"第6章  投标文件格式" Normal 样式回归）。"""
+    doc = Document()
+    doc.add_paragraph("第6章  投标文件格式")
+    doc.add_paragraph("第36章 附则")
+    doc.add_paragraph("2024年8月")                  # 正文年份，不得误判
+    doc.add_paragraph("第三章 投标文件格式")         # 中文章号不受影响
+    assert para_heading_level(doc.paragraphs[0]) == 1
+    assert para_heading_level(doc.paragraphs[1]) == 1
+    assert para_heading_level(doc.paragraphs[2]) == 0
+    assert para_heading_level(doc.paragraphs[3]) == 1
+
+
 def test_para_heading_level_toc_para_always_zero():
     from docx.enum.style import WD_STYLE_TYPE
     doc = Document()

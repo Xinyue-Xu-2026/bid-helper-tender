@@ -19,6 +19,9 @@ router = APIRouter()
 class GenerateDraftIn(BaseModel):
     start_heading: str = ""
     end_heading: str = ""
+    # 索引直达（重名标题可区分；body 子元素下标，headings 端点产出）
+    start_index: int | None = None
+    end_index: int | None = None
 
 
 class TableBindingIn(BaseModel):
@@ -63,7 +66,9 @@ def generate_bid_draft(project_id: int, body: GenerateDraftIn,
     _project_or_404(db, project_id)
     try:
         return _svc(db).generate(project_id, body.start_heading,
-                                 body.end_heading)
+                                 body.end_heading,
+                                 start_index=body.start_index,
+                                 end_index=body.end_index)
     except (ValueError, BidDraftError, InputConvertError) as exc:
         raise HTTPException(422, str(exc))
 

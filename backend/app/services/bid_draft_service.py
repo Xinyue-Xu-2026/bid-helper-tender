@@ -111,37 +111,64 @@ class BidDraftService:
     # ---------- 生成 / 上传 ----------
 
     def generate(self, project_id: int, start_heading: str = "",
-                 end_heading: str = "") -> dict:
-        """裁切（空 start 自动定位 find_format_chapter；无命中 → ValueError）
-        → classify_tables → 删旧底稿 → 建行 → 返回预览结构。"""
+                 end_heading: str = "", start_index: int = None,
+                 end_index: int = None) -> dict:
+        """裁切 → classify_tables → 删旧底稿 → 建行 → 返回预览结构。
+
+        起止定位两路：
+        - 索引直达：start_index 非 None 时直接用索引裁切（越界 → ValueError；
+          end_index 同理，<=0 表示裁到文档末尾），标题仅用于存
+          cut_start/cut_end 展示；
+        - 标题解析（索引为 None）：空 start 自动定位 find_format_chapter
+          （无命中 → ValueError），重名标题按 resolve_heading_index 的
+          内容跟随启发式解析。
+        """
         project = self._project(project_id)
         docx = self.tender_docx(project)
         headings = list_headings(str(docx))
+        doc = Document(str(docx))  # 供重名启发式/索引越界校验的块级上下文
         start_heading = (start_heading or "").strip()
         end_heading = (end_heading or "").strip()
-        if start_heading:
-            start_index = resolve_heading_index(headings, start_heading)
-            cut_start = start_heading
+        if start_index is not None:
+            body_len = len(list(doc.element.body))
+            if not isinstance(start_index, int) \
+                    or not 0 <= start_index < body_len:
+                raise ValueError("起始标题索引越界")
+            if end_index is not None and end_index > 0 and (
+                    not isinstance(end_index, int) or end_index > body_len
+                    or start_index >= end_index):
+                raise ValueError("结束标题索引越界")
+            title_by_index = {h["index"]: h["title"] for h in headings}
+            start_body_index = start_index
+            cut_start = title_by_index.get(start_index) or start_heading
+            eff_end = end_index if end_index is not None else -1
+            cut_end = (title_by_index.get(end_index) or end_heading) \
+                if eff_end > 0 else ""
         else:
-            chapter = find_format_chapter(headings)
-            if not chapter:
-                raise ValueError(
-                    "未识别到投标文件格式章节，请手动选择起止标题")
-            start_index = chapter["start"]["index"]
-            cut_start = chapter["start"]["title"]
-            if not end_heading and chapter["end"]:
-                end_heading = chapter["end"]["title"]
-        if end_heading:
-            end_index = resolve_heading_index(headings, end_heading)
-            cut_end = end_heading
-        else:
-            end_index = -1
-            cut_end = ""
+            if start_heading:
+                start_body_index = resolve_heading_index(
+                    headings, start_heading, doc=doc)
+                cut_start = start_heading
+            else:
+                chapter = find_format_chapter(headings)
+                if not chapter:
+                    raise ValueError(
+                        "未识别到投标文件格式章节，请手动选择起止标题")
+                start_body_index = chapter["start"]["index"]
+                cut_start = chapter["start"]["title"]
+                if not end_heading and chapter["end"]:
+                    end_heading = chapter["end"]["title"]
+            if end_heading:
+                eff_end = resolve_heading_index(headings, end_heading, doc=doc)
+                cut_end = end_heading
+            else:
+                eff_end = -1
+                cut_end = ""
 
         config.ensure_dirs()
         dest = config.BID_DRAFTS_DIR / f"project_{project_id}_商务标底稿.docx"
         self._drop_old_draft(project_id)  # 先删旧行/旧文件，再写新文件
-        stats = cut_draft(str(docx), str(dest), start_index, end_index)
+        stats = cut_draft(str(docx), str(dest), start_body_index, eff_end)
         suggestions = classify_tables(str(dest))
         return self._store(project, source="tender-cut", source_path=str(docx),
                            cut_start=cut_start, cut_end=cut_end,

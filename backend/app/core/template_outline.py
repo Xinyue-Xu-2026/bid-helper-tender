@@ -11,7 +11,9 @@ from pathlib import Path
 DEFAULT_TARGET_CHARS = 3000
 
 _HEADING_STYLE_RE = re.compile(r"^(heading|标题)\s*([1-4])$", re.IGNORECASE)
-_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零]+章")
+# 章号兼认中文与阿拉伯数字（真实招标文件"第6章  投标文件格式"回归）；
+# 裸数字条目（"2．我方…"）走 _NUMBERED_RE，不被本规则吞掉
+_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+章")
 _SECTION_RE = re.compile(r"^[一二三四五六七八九十]+、")
 _SUBSECTION_RE = re.compile(r"^[（(][一二三四五六七八九十]+[)）]")
 _NUMBERED_RE = re.compile(r"^(\d+(?:\.\d+)*)[、．.\s]+\S")

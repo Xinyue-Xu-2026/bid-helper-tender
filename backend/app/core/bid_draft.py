@@ -27,7 +27,7 @@ FORMAT_CHAPTER_KEYWORDS = (
 
 _WS_RE = re.compile(r"\s+")
 
-_FAMILY_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零]+[章篇部]")
+_FAMILY_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+[章篇部]")
 _FAMILY_NUMBERED_RE = re.compile(r"^\d+(?:\.\d+)*[、．.\s]")
 
 
@@ -150,11 +150,33 @@ def cut_draft(tender_docx: str, dest_path: str,
             "toc_paragraphs": toc_paragraphs}
 
 
-def resolve_heading_index(headings: list, title: str) -> int:
-    """按标题文本（strip）在 list_headings 结果中取首个命中的 body 下标；
-    无命中 → BidDraftError。"""
+def resolve_heading_index(headings: list, title: str, doc=None) -> int:
+    """按标题文本（strip）在 list_headings 结果中解析 body 下标；
+    无命中 → BidDraftError。
+
+    重名启发式（真实招标文件的目录条目区与正文区标题重名）：多个同名
+    标题时优先取"其后紧跟实质内容"的命中——下一个 body 块不是标题、
+    且为非空正文段或表格（真实节区特征；目录条目区的标题后面紧跟的
+    仍是标题）。所有命中都无该信号时取最后一个（目录条目区总在正文区
+    之前）。doc 为 Document 实例（提供块级上下文）；缺省时退化为取
+    最后一个命中。
+    """
     target = title.strip()
-    for h in headings:
-        if h["title"].strip() == target:
-            return h["index"]
-    raise BidDraftError(f"未找到标题：{title}")
+    matches = [h for h in headings if h["title"].strip() == target]
+    if not matches:
+        raise BidDraftError(f"未找到标题：{title}")
+    if len(matches) == 1:
+        return matches[0]["index"]
+    if doc is not None:
+        heading_indices = {h["index"] for h in headings}
+        children = list(doc.element.body)
+        for h in matches:
+            nxt = h["index"] + 1
+            if nxt >= len(children) or nxt in heading_indices:
+                continue  # 紧邻下一块仍是标题/无下一块 → 目录条目区特征
+            child = children[nxt]
+            if child.tag == qn("w:tbl"):
+                return h["index"]  # 紧跟表格 → 实质内容
+            if child.tag == qn("w:p") and Paragraph(child, doc).text.strip():
+                return h["index"]  # 紧跟非空正文段 → 实质内容
+    return matches[-1]["index"]

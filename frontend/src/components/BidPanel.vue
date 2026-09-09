@@ -380,7 +380,7 @@ const draft = ref(null)              // 底稿预览对象；null = 无底稿
 const draftLoading = ref(false)      // 底稿卡片加载/生成/上传中
 const draftDialogVisible = ref(false)
 const draftHeadings = ref([])        // 裁切起止候选标题 [{index, level, title}]
-const draftRange = ref({ start: '', end: '' })  // 裁切起止（值=标题文本；end '' = 文档末尾）
+const draftRange = ref({ start: '', end: '' })  // 裁切起止（值=heading.index；'' = 未选；end -1 = 文档末尾）
 const bindingRows = ref([])          // 对话框内可编辑的表格绑定行（基于预览 tables 拷贝）
 const swapToc = ref(false)
 const regenerating = ref(false)
@@ -418,7 +418,35 @@ function applyDraftPreview(preview) {
   draft.value = preview
   bindingRows.value = (preview.tables || []).map(t => ({ ...t }))
   swapToc.value = !!preview.swap_toc
-  draftRange.value = { start: preview.cut_start || '', end: preview.cut_end || '' }
+  // 裁切范围在 headings 加载后由 syncRangeFromDraft 回填（title → index）
+}
+
+// 重名标题集合（目录条目区与正文区同名时需要序号后缀区分）
+const dupHeadingTitles = computed(() => {
+  const count = {}
+  for (const h of draftHeadings.value) count[h.title] = (count[h.title] || 0) + 1
+  return new Set(Object.keys(count).filter(t => count[t] > 1))
+})
+
+function headingLabel(h) {
+  return dupHeadingTitles.value.has(h.title) ? `${h.title} ｜ #${h.index}` : h.title
+}
+
+// 标题文本 → heading.index；重名取最后一次出现（与后端目录区在前的兜底一致）
+function titleToIndex(title) {
+  const t = (title || '').trim()
+  if (!t) return ''
+  const hits = draftHeadings.value.filter(h => (h.title || '').trim() === t)
+  return hits.length ? hits[hits.length - 1].index : ''
+}
+
+// 底稿已存裁切范围（cut_start/cut_end 标题）回填到索引型 select
+function syncRangeFromDraft() {
+  if (!draft.value) return
+  draftRange.value = {
+    start: titleToIndex(draft.value.cut_start),
+    end: titleToIndex(draft.value.cut_end),
+  }
 }
 
 // 拉取裁切起止候选标题（失败不阻塞对话框，起止选择留空）
@@ -426,6 +454,7 @@ async function fetchDraftHeadings() {
   try {
     const r = await getBidDraftHeadings(props.projectId)
     draftHeadings.value = r.headings || []
+    syncRangeFromDraft()
     return r.suggested || null
   } catch { /* 拦截器已弹错 */ }
   return null
@@ -449,7 +478,10 @@ async function onGenerateDraft() {
   } catch (e) {
     if (e?.response?.status === 422) {
       const suggested = await fetchDraftHeadings()
-      draftRange.value = { start: suggested?.start || '', end: suggested?.end || '' }
+      draftRange.value = {
+        start: titleToIndex(suggested?.start),
+        end: titleToIndex(suggested?.end),
+      }
       draftDialogVisible.value = true
     }
   } finally {
@@ -474,7 +506,10 @@ async function onRegenerateDraft() {
   } catch (e) {
     if (e?.response?.status === 422) {
       const suggested = await fetchDraftHeadings()
-      draftRange.value = { start: suggested?.start || '', end: suggested?.end || '' }
+      draftRange.value = {
+        start: titleToIndex(suggested?.start),
+        end: titleToIndex(suggested?.end),
+      }
       draftDialogVisible.value = true
     }
   } finally {
@@ -483,13 +518,18 @@ async function onRegenerateDraft() {
 }
 
 // 对话框内「按此范围重新生成」：手动起止生成（无底稿时即首次生成）
+// 起止 select 的值为 heading.index；未选起始 → 不传索引（走后端自动定位）
 async function onRegenerateWithRange() {
   regenerating.value = true
   try {
-    const preview = await generateBidDraft(props.projectId, {
-      start_heading: draftRange.value.start || '',
-      end_heading: draftRange.value.end || '',
-    })
+    const payload = {}
+    if (draftRange.value.start !== '' && draftRange.value.start != null) {
+      payload.start_index = draftRange.value.start
+      // 选了起始但未选截至 → 裁到文档末尾（-1）
+      payload.end_index = (draftRange.value.end === '' || draftRange.value.end == null)
+        ? -1 : draftRange.value.end
+    }
+    const preview = await generateBidDraft(props.projectId, payload)
     applyDraftPreview(preview)
     ElMessage.success('已按所选范围生成，请确认表格绑定')
   } catch { /* 拦截器已弹错 */ } finally {
@@ -712,12 +752,12 @@ onMounted(() => { load(); loadDraft() })
       <!-- 顶部工具区：裁切起止 + 按范围（重新）生成 -->
       <el-space wrap style="margin-bottom: 12px">
         <el-select v-model="draftRange.start" filterable placeholder="起始标题" style="width: 240px">
-          <el-option v-for="h in draftHeadings" :key="h.index" :label="h.title" :value="h.title" />
+          <el-option v-for="h in draftHeadings" :key="h.index" :label="headingLabel(h)" :value="h.index" />
         </el-select>
         <span>～</span>
         <el-select v-model="draftRange.end" filterable placeholder="截至标题" style="width: 240px">
-          <el-option label="文档末尾" value="" />
-          <el-option v-for="h in draftHeadings" :key="h.index" :label="h.title" :value="h.title" />
+          <el-option label="文档末尾" :value="-1" />
+          <el-option v-for="h in draftHeadings" :key="h.index" :label="headingLabel(h)" :value="h.index" />
         </el-select>
         <el-button type="primary" plain :loading="regenerating" @click="onRegenerateWithRange">
           {{ draft ? '按此范围重新生成' : '按此范围生成' }}

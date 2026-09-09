@@ -149,6 +149,25 @@ def test_find_format_chapter_numbered_items_then_next_chapter(tmp_path):
     assert found["end"]["title"] == "第四章 合同条款"
 
 
+def test_find_format_chapter_arabic_chapter_numeral(tmp_path):
+    """阿拉伯数字章号（Normal 样式"第6章  投标文件格式"）→ 自动定位命中，
+    章内数字编号条目不作边界 → 裁到文档末尾（真实用户文件回归）。"""
+    doc = Document()
+    doc.add_paragraph("第6章  投标文件格式")          # Normal 样式 + 阿拉伯章号
+    doc.add_paragraph("一、投标函及投标函附录")        # 目录条目区
+    doc.add_paragraph("七、其他资料")
+    doc.add_paragraph("2．我方对投标文件全部内容予以响应")  # 章内数字条目（H1）
+    doc.add_paragraph("一、投标函及投标函附录")        # 正文区同名标题
+    doc.add_paragraph("投标函正文内容。")
+    path = tmp_path / "tender.docx"
+    doc.save(str(path))
+    found = find_format_chapter(list_headings(str(path)))
+    assert found is not None
+    assert found["start"]["title"] == "第6章  投标文件格式"
+    assert found["start"]["level"] == 1
+    assert found["end"] is None  # 数字条目被跳过，其后无真章节
+
+
 # ---------- cut_draft ----------
 
 def test_cut_draft_keeps_format_chapter_only(tmp_path):
@@ -228,3 +247,54 @@ def test_resolve_heading_index_missing_raises(tmp_path):
     headings = list_headings(str(src))
     with pytest.raises(BidDraftError, match="未找到标题"):
         resolve_heading_index(headings, "第九章 不存在的章节")
+
+
+def _build_duplicate_title_doc(path, tail="paragraph"):
+    """目录条目区（连续同名标题）+ 正文区（同名标题 + 实质内容）。"""
+    doc = Document()
+    doc.add_paragraph("目录")
+    doc.add_paragraph("一、投标函及投标函附录")   # 目录条目区：下一块仍是标题
+    doc.add_paragraph("七、其他资料")
+    doc.add_paragraph("（章节间隔正文段）")
+    doc.add_paragraph("一、投标函及投标函附录")   # 正文区同名标题
+    if tail == "table":
+        doc.add_table(rows=1, cols=1)             # 后紧跟表格 → 实质内容
+    else:
+        doc.add_paragraph("投标函正文内容。")      # 后紧跟非空正文段 → 实质内容
+    doc.save(str(path))
+    return str(path)
+
+
+def test_resolve_heading_index_prefers_content_followed(tmp_path):
+    """重名标题：取"其后紧跟实质内容"的正文区命中，而非目录条目区
+    （真实招标文件目录区/正文区重名撞车回归）。"""
+    path = _build_duplicate_title_doc(tmp_path / "t.docx")
+    headings = list_headings(path)
+    matches = [h for h in headings if h["title"] == "一、投标函及投标函附录"]
+    assert len(matches) == 2
+    idx = resolve_heading_index(headings, "一、投标函及投标函附录",
+                                doc=Document(path))
+    assert idx == matches[1]["index"]  # 正文区那个
+
+
+def test_resolve_heading_index_content_followed_by_table(tmp_path):
+    """重名标题后紧跟表格也算实质内容信号。"""
+    path = _build_duplicate_title_doc(tmp_path / "t.docx", tail="table")
+    headings = list_headings(path)
+    matches = [h for h in headings if h["title"] == "一、投标函及投标函附录"]
+    idx = resolve_heading_index(headings, "一、投标函及投标函附录",
+                                doc=Document(path))
+    assert idx == matches[1]["index"]
+
+
+def test_resolve_heading_index_duplicate_no_signal_takes_last(tmp_path):
+    """重名且均无实质内容信号（连续同名目录条目形态）→ 取最后一个。"""
+    doc = Document()
+    doc.add_paragraph("一、投标函")
+    doc.add_paragraph("一、投标函")
+    path = tmp_path / "t.docx"
+    doc.save(str(path))
+    headings = list_headings(str(path))
+    assert len(headings) == 2
+    idx = resolve_heading_index(headings, "一、投标函", doc=Document(str(path)))
+    assert idx == headings[-1]["index"]
