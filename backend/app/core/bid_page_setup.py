@@ -124,9 +124,15 @@ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
     if restart_page:
         pg = etree.Element(_wq(W, "pgNumType"))
         pg.set(_wq(W, "start"), "1")
-        cols = sp.find(_wq(W, "cols"))
-        if cols is not None:
-            cols.addprevious(pg)  # CT_SectPr 序列：pgNumType 在 cols 之前
+        # CT_SectPr 序列：pgNumType 须在 cols/formProt/vAlign/noEndnote/
+        # titlePg/textDirection/bidi/rtlGutter/docGrid/printerSettings 之前
+        after_tags = {_wq(W, t) for t in (
+            "cols", "formProt", "vAlign", "noEndnote", "titlePg",
+            "textDirection", "bidi", "rtlGutter", "docGrid",
+            "printerSettings", "sectPrChange")}
+        anchor = next((c for c in sp if c.tag in after_tags), None)
+        if anchor is not None:
+            anchor.addprevious(pg)
         else:
             sp.append(pg)
 

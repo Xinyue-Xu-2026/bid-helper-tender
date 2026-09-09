@@ -12,6 +12,7 @@ from lxml import etree
 
 from app import config
 from app.core.bid_draft_exporter import fill_draft
+from app.core.bid_page_setup import _attach_refs
 from tests.test_bid_draft_export import (
     PNG_1X1, _bindings, _build_draft, _data,
 )
@@ -155,3 +156,24 @@ def test_output_reopens_and_structure_valid(tmp_path, reference):
         # 媒体文件确实存在
         media = [n for n in z.namelist() if n.startswith("word/media/hxtd_")]
         assert media and all(z.read(n) for n in media)
+
+
+# ---------- 5. pgNumType 插入位置符合 CT_SectPr 序列 ----------
+
+def test_pg_num_type_inserted_before_later_elements():
+    """sectPr 含 docGrid/vAlign（序列排在 pgNumType 之后）且无 cols 时，
+    pgNumType 仍须插到它们之前（严格校验的 Word 不接受乱序）。"""
+    sp = etree.Element(_wq("sectPr"))
+    etree.SubElement(sp, _wq("pgSz"))
+    etree.SubElement(sp, _wq("pgMar"))
+    etree.SubElement(sp, _wq("vAlign"))
+    etree.SubElement(sp, _wq("docGrid"))
+    _attach_refs(sp, "rId9001", "rId9002", restart_page=True)
+    tags = [etree.QName(c).localname for c in sp]
+    pg_pos = tags.index("pgNumType")
+    # pgNumType 先于所有后置元素（vAlign/docGrid），且在引用/pgSz/pgMar 之后
+    assert pg_pos < tags.index("vAlign")
+    assert pg_pos < tags.index("docGrid")
+    assert pg_pos > tags.index("pgMar")
+    assert tags.index("headerReference") == 0
+    assert tags.index("footerReference") == 1
