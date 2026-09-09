@@ -43,11 +43,15 @@ def _table_texts(table, subs=None) -> list:
 
 def verify_draft_fill(draft_path: str, out_path: str,
                       bound_table_indices: set, replace_params: dict,
-                      swapped_toc: bool = False) -> dict:
+                      swapped_toc: bool = False,
+                      bound_paragraph_indices: set = None) -> dict:
     """校验产物相对底稿的未绑定区域是否被改动。
 
     bound_table_indices：已确认绑定（允许填充改动）的顶层表下标集合，
     这些表整体跳过比对（其内部段落本就不参与正文段比对）。
+    bound_paragraph_indices：授权页等经用户确认允许正文填充改动的段落
+    下标集合（toc/分节符过滤后的段落序列坐标系，与比对循环一致），
+    这些段落整体跳过比对。默认空集。
     replace_params：{"project_no","project_name","doc_date"}，与导出时一致；
     空/某键空 → compute_text_subs 相应无规则，套用无害。
     toc 样式段落两侧恒跳过（导出的 _replace_stale_text 从不触碰 toc 段）；
@@ -82,6 +86,7 @@ def verify_draft_fill(draft_path: str, out_path: str,
     checked_paragraphs = 0
     checked_tables = 0
     bound = set(bound_table_indices or set())
+    bound_paras = set(bound_paragraph_indices or set())
 
     # 顶层表数量：bound 之外的未绑定表数必须一致（总数一致即等价）
     if len(d_tables) != len(o_tables):
@@ -107,6 +112,8 @@ def verify_draft_fill(draft_path: str, out_path: str,
         issues.append(
             f"段落数量不一致：底稿 {len(d_paras)} 段，产物 {len(o_paras)} 段")
     for i, (d_para, o_para) in enumerate(zip(d_paras, o_paras)):
+        if i in bound_paras:
+            continue
         checked_paragraphs += 1
         expected = _apply_subs(_para_text(d_para), subs)
         if expected != _para_text(o_para):

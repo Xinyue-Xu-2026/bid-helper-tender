@@ -288,7 +288,15 @@ async function onExport(fmt) {
 
 // ---------- 导出商务标对话框：每次打开时按当前项目信息重新初始化 ----------
 const exportDialogVisible = ref(false)
-const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '' })
+const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '', legal_rep_id: null, agent_id: null })
+// 法定代表人/委托代理人候选（legal 资产）
+const legalCandidates = ref([])
+
+async function loadLegalCandidates() {
+  try {
+    legalCandidates.value = await listAssets('legal')
+  } catch { /* 拦截器已弹错；下拉为空不影响导出 */ }
+}
 
 watch(exportDialogVisible, async v => {
   if (!v) return
@@ -299,7 +307,10 @@ watch(exportDialogVisible, async v => {
     // 招标人：底稿提取值优先，缺省回落项目委托人（下方异步补齐）
     tenderer: draft.value?.tenderer || '',
     bidder_name: '宏信天德工程顾问有限公司',
+    legal_rep_id: null,
+    agent_id: null,
   }
+  loadLegalCandidates()
   if (!exportForm.value.tenderer) {
     try {
       const p = await getProject(props.projectId)
@@ -329,6 +340,8 @@ async function onExportTemplate() {
       doc_date: exportForm.value.doc_date || '',
       tenderer: exportForm.value.tenderer.trim(),
       bidder_name: exportForm.value.bidder_name.trim(),
+      legal_rep_id: exportForm.value.legal_rep_id,
+      agent_id: exportForm.value.agent_id,
     }
     const r = await exportBidTemplate(props.projectId, payload)
     const cd = r.headers['content-disposition'] || ''
@@ -754,6 +767,18 @@ onMounted(() => { load(); loadDraft() })
         </el-form-item>
         <el-form-item label="投标人">
           <el-input v-model="exportForm.bidder_name" placeholder="请输入投标人名称（留空则不填充）" />
+        </el-form-item>
+        <el-form-item label="法定代表人">
+          <el-select v-model="exportForm.legal_rep_id" filterable clearable placeholder="选择法定代表人（可留空）"
+                     style="width: 100%">
+            <el-option v-for="a in legalCandidates" :key="a.id" :label="a.name" :value="a.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="委托代理人">
+          <el-select v-model="exportForm.agent_id" filterable clearable placeholder="选择委托代理人（可留空）"
+                     style="width: 100%">
+            <el-option v-for="a in legalCandidates" :key="a.id" :label="a.name" :value="a.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="日期">
           <el-date-picker v-model="exportForm.doc_date" type="date" value-format="YYYY-MM-DD"

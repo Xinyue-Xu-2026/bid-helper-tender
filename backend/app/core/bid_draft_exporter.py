@@ -7,18 +7,20 @@ data 结构见 bid_service.assemble_bid_draft_data
 section,sem}],"lead_perfs_text":str}）。
 """
 import os
+import re
 from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import Cm
 
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
-    _replace_stale_text, _set_cell_text,
+    _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
 )
 from app.core.bid_page_setup import apply_page_setup
-from app.core.bid_verify import verify_draft_fill
+from app.core.bid_verify import _is_section_break_para, verify_draft_fill
 from app.core.word_exporter import insert_toc_field_at
 
 
@@ -193,6 +195,132 @@ def _scope_persons(persons, scope: str) -> list:
     return list(persons)
 
 
+# ---------- 授权页正文填充（法定代表人/委托代理人） ----------
+_ID_CARD_WIDTH = Cm(7)
+
+
+def _date_zh(doc_date: str) -> str:
+    """'YYYY-MM-DD' → 'YYYY年M月D日'；空/非法返回 ''。"""
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", (doc_date or "").strip())
+    if not m:
+        return ""
+    return f"{int(m.group(1))}年{int(m.group(2))}月{int(m.group(3))}日"
+
+
+def _auth_signature_block(doc, bound, report, auth) -> None:
+    """授权页正文填充：处理「法定代表人（单位负责人）身份证明」与
+    「授权委托书」两页的正文占位与签名区。只命中文本特征明确的段落：
+    - （姓名）/（投标人名称）括号占位（姓名按序=法人、代理人）；
+    - 「身份证号：」行（紧跟在 法人/代理人签名行之后）→ 填对应证件号；
+    - 盖公章行后的「年月日」行 → 填投标文件日期；
+    - 「附：…身份证…电子扫描件」段末追加身份证正反面图片。
+    其余段落（承诺函等）一律不动。改动段记入 bound（verify 同坐标系
+    段下标），图片追加不计文本故不需 bound。"""
+    legal = auth.get("legal_rep") or {}
+    agent = auth.get("agent") or {}
+    legal_name = str(legal.get("name") or "").strip()
+    agent_name = str(agent.get("name") or "").strip()
+    legal_id = str(legal.get("身份证号") or "").strip()
+    agent_id = str(agent.get("身份证号") or "").strip()
+    bidder = str(auth.get("bidder_name") or "").strip()
+    date_text = _date_zh(auth.get("doc_date") or "")
+
+    def _img_paths(person, dual):
+        if dual:
+            # 委托双方：法人+代理人各正反面
+            out = []
+            for p in (legal, agent):
+                if p:
+                    out += [str(p.get("身份证正面扫描件") or ""),
+                            str(p.get("身份证反面扫描件") or "")]
+            return out
+        if not person:
+            return []
+        return [str(person.get("身份证正面扫描件") or ""),
+                str(person.get("身份证反面扫描件") or "")]
+
+    def _append_images(para, person, dual) -> int:
+        inserted = 0
+        for pth in _img_paths(person, dual):
+            if pth and Path(pth).exists():
+                try:
+                    para.add_run().add_picture(pth, width=_ID_CARD_WIDTH)
+                    inserted += 1
+                except Exception:
+                    pass
+        return inserted
+
+    paras = [p for p in doc.paragraphs
+             if not _is_toc_paragraph(p) and not _is_section_break_para(p)]
+
+    def _filter_index(p) -> int:
+        return paras.index(p)
+
+    def _rewrite(para, text):
+        _rewrite_paragraph_text(para, text)
+        bound.add(_filter_index(para))
+
+    sig_role = None        # 'legal'/'agent'：最近签名行（其后一行身份证号归属）
+    prev_is_sig_ctx = False  # 上一段是盖公章/签名上下文（其后年月日归属）
+
+    for para in paras:
+        t = (para.text or "").strip()
+        if not t:
+            prev_is_sig_ctx = False
+            continue
+
+        # 1) 括号占位：本人（姓名）→法人名；现委托（姓名）→代理人名；
+        #    （投标人名称）→投标人名称（两页通用）
+        nt = t
+        if "（姓名）" in nt:
+            if legal_name:
+                nt = nt.replace("本人（姓名）", f"本人{legal_name}", 1)
+            if agent_name:
+                nt = nt.replace("现委托（姓名）", f"现委托{agent_name}", 1)
+        if "（投标人名称）" in nt and bidder:
+            nt = nt.replace("（投标人名称）", bidder)
+        if nt != t:
+            _rewrite(para, nt)
+            t = nt
+
+        # 2) 签名角色跟踪
+        if "（签名）" in t:
+            if "法定代表人" in t or "单位负责人" in t:
+                sig_role = "legal"
+            elif "委托代理人" in t:
+                sig_role = "agent"
+            prev_is_sig_ctx = True
+        elif "盖单位公章" in t:
+            prev_is_sig_ctx = True
+            sig_role = None
+        # 3) 身份证号行 → 填当前签名角色证件号
+        elif sig_role and re.match(r"^身份证号[：:]\s*$", t):
+            person = legal if sig_role == "legal" else agent
+            pid = legal_id if sig_role == "legal" else agent_id
+            if pid:
+                _rewrite(para, f"身份证号：{pid}")
+                prev_is_sig_ctx = True
+            sig_role = None
+        # 4) 年月日行（盖公章/签名上下文之后）→ 日期
+        elif prev_is_sig_ctx and date_text and re.fullmatch(r"年\s*月\s*日", t):
+            _rewrite(para, date_text)
+            prev_is_sig_ctx = False
+        else:
+            prev_is_sig_ctx = False
+
+        # 5) 附：…身份证…电子扫描件 → 追图
+        if "附：" in t and "身份证" in t and "扫描件" in t:
+            dual = "双方" in t or "委托双方" in t
+            person = legal if not dual else None
+            n = _append_images(para, person, dual)
+            if n:
+                report["authority_images"] += n
+        # 状态续到下一行判断
+        # prev_is_sig_ctx 由上面各分支设置，正常流转
+        if sig_role == "legal" or sig_role == "agent":
+            prev_is_sig_ctx = True
+
+
 def _scope_contracts(contracts, persons, scope: str) -> list:
     if scope == "lead":
         lead = next((p for p in persons if p.get("is_lead")), None)
@@ -212,10 +340,13 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
 def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                project_no: str = "", project_name: str = "",
                doc_date: str = "", tenderer: str = "",
-               bidder_name: str = "") -> dict:
+               bidder_name: str = "", auth: dict = None) -> dict:
     """按确认的 bindings 填充底稿并另存 dest_path，返回 fill_report。
     dest 与 draft 不得同路径。tenderer/bidder_name 为空则跳过对应
-    标签空白（招标人：____ / 投标人名称：____）填充。"""
+    标签空白（招标人：____ / 投标人名称：____）填充。
+    auth：可选，{"legal_rep": {姓名/身份证号/正反面扫描件路径...} | {},
+    "agent": {...}, "doc_date": str}——授权页（法定代表人身份证明/授权
+    委托书）签名区与身份证附图填充；未提供或字段为空则跳过。"""
     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
         raise ValueError("dest 与 draft 不得同路径")
     doc = Document(draft_path)
@@ -226,7 +357,7 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     persons = data.get("persons") or []
     contracts = data.get("contracts") or []
     report = {"filled": [], "images": [], "skipped": [], "verify": None,
-              "page_setup": None}
+              "page_setup": None, "authority_images": 0, "auth_bound": []}
 
     # 残留文本替换须在填充之前执行：替换规则（compute_text_subs）基于
     # 填充前的底稿计算，与 verify_draft_fill 的底稿侧同源——否则 stale 值
@@ -236,6 +367,14 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     _replace_stale_text(doc, project_no=project_no,
                         project_name=project_name, doc_date=doc_date,
                         tenderer=tenderer, bidder_name=bidder_name)
+
+    # 授权页正文填充：改动的是普通正文段，须把被改段加入 verify 的
+    # bound（paragraph 下标，toc/分节符过滤坐标系）避免误报
+    auth_bound = set()
+    if auth:
+        auth = {**auth, "bidder_name": bidder_name}
+        _auth_signature_block(doc, auth_bound, report, auth)
+        report["auth_bound"] = sorted(auth_bound)
 
     image_slots = []
     bound_indices = set()
@@ -300,5 +439,6 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         replace_params={"project_no": project_no, "project_name": project_name,
                         "doc_date": doc_date, "tenderer": tenderer,
                         "bidder_name": bidder_name},
-        swapped_toc=swap_toc)
+        swapped_toc=swap_toc,
+        bound_paragraph_indices=auth_bound)
     return report

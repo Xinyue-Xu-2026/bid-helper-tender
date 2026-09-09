@@ -52,6 +52,24 @@ class BidTemplateExportIn(BaseModel):
     doc_date: str = ""        # 文档日期 YYYY-MM-DD（空则不替换模板残留日期）
     tenderer: str = ""        # 招标人名称（空则不填充"招标人：____"空白）
     bidder_name: str = ""     # 投标人名称（空则不填充"投标人名称：____"空白）
+    legal_rep_id: int | None = None   # 法定代表人（legal 资产 id）
+    agent_id: int | None = None       # 委托代理人（legal 资产 id）
+
+
+def _legal_person(db: Database, asset_id: int | None) -> dict | None:
+    """把 legal 资产解析成授权页填充所需字典（{name, 身份证号, 正反面扫描件}）。"""
+    if asset_id is None:
+        return None
+    a = db.get_asset(asset_id)
+    if not a or a.get("type") != "legal":
+        return None
+    fields = a.get("fields") or {}
+    return {
+        "name": str(a.get("name") or ""),
+        "身份证号": str(fields.get("身份证号") or ""),
+        "身份证正面扫描件": str(fields.get("身份证正面扫描件") or ""),
+        "身份证反面扫描件": str(fields.get("身份证反面扫描件") or ""),
+    }
 
 
 def _get_project_or_404(db: Database, project_id: int) -> dict:
@@ -131,12 +149,16 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
             db, project_id,
             [p.model_dump() for p in body.persons],
             [c.model_dump() for c in body.contracts])
+        auth = {"legal_rep": _legal_person(db, body.legal_rep_id),
+                "agent": _legal_person(db, body.agent_id),
+                "doc_date": (body.doc_date or "").strip()}
         report = fill_draft(bt["file_path"], str(dest), bindings, data,
                             project_no=(body.project_no or "").strip(),
                             project_name=effective_name,
                             doc_date=(body.doc_date or "").strip(),
                             tenderer=(body.tenderer or "").strip(),
-                            bidder_name=(body.bidder_name or "").strip())
+                            bidder_name=(body.bidder_name or "").strip(),
+                            auth=auth)
         headers["X-Fill-Report"] = quote(
             json.dumps(report, ensure_ascii=False))
     else:
