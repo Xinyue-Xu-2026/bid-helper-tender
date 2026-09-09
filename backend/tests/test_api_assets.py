@@ -46,3 +46,54 @@ def test_asset_file_upload(client):
                     files={"file": ("cert.png", b"\x89PNG fake", "image/png")})
     assert r.status_code == 200
     assert r.json()["file_path"].endswith(".png")
+
+
+def test_legal_asset_crud(client):
+    """法人/代理人（legal）资产：姓名=name，fields 含身份证号；不受 person 归一化污染。"""
+    r = client.post("/api/assets", json={
+        "type": "legal", "name": "张三",
+        "fields": {"身份证号": "320000199001011234", "职务": "法定代表人"}})
+    assert r.status_code == 200
+    aid = r.json()["id"]
+
+    items = client.get("/api/assets", params={"type": "legal"}).json()
+    assert any(a["id"] == aid and a["name"] == "张三" for a in items)
+    # _normalize_out 只对 person 特判：legal 不被注入"业绩"、不固化"证书"
+    one = client.get(f"/api/assets/{aid}").json()
+    assert one["fields"]["身份证号"] == "320000199001011234"
+    assert "业绩" not in one["fields"]
+    assert "证书" not in one["fields"]
+
+    # 未知类型仍 400（既有的 _check_type 覆盖）
+    assert client.post("/api/assets", json={"type": "nope", "name": "x"}).status_code == 400
+
+
+def test_legal_asset_id_card_faces(client):
+    """legal 资产身份证正/反面图片上传 + 预览。"""
+    aid = client.post("/api/assets", json={"type": "legal", "name": "李四"}).json()["id"]
+    for cat in ("身份证正面", "身份证反面"):
+        r = client.post(f"/api/assets/{aid}/person-image",
+                        files={"file": ("id.png", b"\x89PNG fake", "image/png")},
+                        data={"category": cat})
+        assert r.status_code == 200, cat
+        assert r.json()["file_path"].endswith(".png")
+        assert cat in r.json()["file_path"]
+    # 预览两个分类
+    for cat in ("身份证正面", "身份证反面"):
+        r = client.get(f"/api/assets/{aid}/image/{cat}")
+        assert r.status_code == 200, cat
+    # 非法分类仍 400
+    r = client.post(f"/api/assets/{aid}/person-image",
+                    files={"file": ("id.png", b"\x89PNG fake", "image/png")},
+                    data={"category": "驾驶证"})
+    assert r.status_code == 400
+
+
+def test_person_id_card_single_upload_unregressed(client):
+    """person 既有单张"身份证"上传不回归。"""
+    aid = client.post("/api/assets", json={"type": "person", "name": "王五"}).json()["id"]
+    r = client.post(f"/api/assets/{aid}/person-image",
+                    files={"file": ("id.png", b"\x89PNG fake", "image/png")},
+                    data={"category": "身份证"})
+    assert r.status_code == 200
+    assert client.get(f"/api/assets/{aid}/image/身份证").status_code == 200

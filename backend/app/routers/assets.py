@@ -200,7 +200,8 @@ def upload_asset_file(asset_id: int, file: UploadFile, db: Database = Depends(ge
     return {"file_path": str(dest)}
 
 
-_PERSON_IMAGE_CATEGORIES = {"职称证书", "社保缴纳证明", "身份证"}
+_PERSON_IMAGE_CATEGORIES = {"职称证书", "社保缴纳证明", "身份证",
+                            "身份证正面", "身份证反面"}
 
 
 @router.post("/{asset_id}/person-image")

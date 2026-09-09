@@ -21,6 +21,8 @@ const TABS = [
     fieldDefs: ['发证机关', '发证日期'], hasExpiry: true, hasImport: true },
   { key: 'person', label: '常用人员', nameLabel: '姓名',
     fieldDefs: ['部门', '职称', '联系方式'], hasExpiry: true, hasImport: true },
+  { key: 'legal', label: '法人/代理人', nameLabel: '姓名',
+    fieldDefs: ['身份证号', '职务'], hasExpiry: false, hasImport: false },
   { key: 'contract', label: '合同业绩', nameLabel: '项目名称',
     fieldDefs: [], hasExpiry: false, hasImport: true },
   { key: 'info', label: '企业信息', nameLabel: '项目', hidden: true,
@@ -247,6 +249,32 @@ async function onUploadRowCertImage(person, certIndex, options) {
   try {
     await uploadCertImage(person.id, certIndex, options.file)
     person.fields['证书'][certIndex]['扫描件'] = certImageUrl(person.id, certIndex)
+    imgVersion.value++
+    ElMessage.success('已上传')
+  } catch {
+    ElMessage.error('上传失败')
+  }
+}
+
+// ---------- 法人/代理人：身份证正反面扫描件上传（编辑弹窗内 / 列表行内均可） ----------
+// uploadPersonImage 端点把真实路径写入资产 fields，前端保存真实路径即可持久；
+// 预览一律用 personImageUrl（读 assets 库实时路径），浏览器不可直接访问磁盘路径。
+async function onUploadLegalImage(category, options) {
+  if (!editing.value) return
+  try {
+    const r = await uploadPersonImage(editing.value.id, category, options.file)
+    form.value.fields[`${category}扫描件`] = r.file_path || ''
+    imgVersion.value++
+    ElMessage.success('已上传')
+  } catch {
+    ElMessage.error('上传失败')
+  }
+}
+
+async function onUploadRowLegalImage(asset, category, options) {
+  try {
+    const r = await uploadPersonImage(asset.id, category, options.file)
+    asset.fields[`${category}扫描件`] = r.file_path || ''
     imgVersion.value++
     ElMessage.success('已上传')
   } catch {
@@ -610,7 +638,41 @@ onMounted(load)
         <span v-else>{{ row.expiry_date }}</span>
       </template>
     </el-table-column>
-    <el-table-column v-if="tab !== 'person'" label="附件" width="120">
+    <el-table-column v-if="tab === 'legal'" label="身份证正面" width="150">
+      <template #default="{ row }">
+        <div style="display: flex; align-items: center; gap: 6px">
+          <el-image v-if="row.fields['身份证正面扫描件']"
+                    :src="personImageUrl(row.id, '身份证正面') + '?t=' + imgVersion"
+                    :preview-src-list="[personImageUrl(row.id, '身份证正面') + '?t=' + imgVersion]"
+                    preview-teleported fit="cover"
+                    style="width: 48px; height: 34px; border-radius: 4px; flex-shrink: 0" />
+          <el-upload :show-file-list="false" accept="image/*"
+                     :http-request="opt => onUploadRowLegalImage(row, '身份证正面', opt)">
+            <el-button size="small" link type="primary">
+              {{ row.fields['身份证正面扫描件'] ? '重新上传' : '上传' }}
+            </el-button>
+          </el-upload>
+        </div>
+      </template>
+    </el-table-column>
+    <el-table-column v-if="tab === 'legal'" label="身份证反面" width="150">
+      <template #default="{ row }">
+        <div style="display: flex; align-items: center; gap: 6px">
+          <el-image v-if="row.fields['身份证反面扫描件']"
+                    :src="personImageUrl(row.id, '身份证反面') + '?t=' + imgVersion"
+                    :preview-src-list="[personImageUrl(row.id, '身份证反面') + '?t=' + imgVersion]"
+                    preview-teleported fit="cover"
+                    style="width: 48px; height: 34px; border-radius: 4px; flex-shrink: 0" />
+          <el-upload :show-file-list="false" accept="image/*"
+                     :http-request="opt => onUploadRowLegalImage(row, '身份证反面', opt)">
+            <el-button size="small" link type="primary">
+              {{ row.fields['身份证反面扫描件'] ? '重新上传' : '上传' }}
+            </el-button>
+          </el-upload>
+        </div>
+      </template>
+    </el-table-column>
+    <el-table-column v-if="tab !== 'person' && tab !== 'legal'" label="附件" width="120">
       <template #default="{ row }">
         <el-upload :show-file-list="false" :http-request="opt => onUploadFile(row, opt)">
           <el-button size="small" link type="primary">{{ row.file_path ? '替换' : '上传' }}</el-button>
@@ -671,6 +733,31 @@ onMounted(load)
             </el-upload>
             <img v-if="form.fields['身份证扫描件']"
                  :src="form.fields['身份证扫描件'] + '?t=' + imgVersion"
+                 style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
+          </div>
+        </el-form-item>
+      </template>
+      <!-- 法人/代理人：身份证正反面扫描件（仅编辑已有记录可上传） -->
+      <template v-else-if="tab === 'legal' && editing">
+        <el-form-item label="身份证正面">
+          <div>
+            <el-upload :show-file-list="false" accept="image/*"
+                       :http-request="opt => onUploadLegalImage('身份证正面', opt)">
+              <el-button size="small">{{ form.fields['身份证正面扫描件'] ? '替换' : '上传' }}</el-button>
+            </el-upload>
+            <img v-if="form.fields['身份证正面扫描件']"
+                 :src="personImageUrl(editing.id, '身份证正面') + '?t=' + imgVersion"
+                 style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
+          </div>
+        </el-form-item>
+        <el-form-item label="身份证反面">
+          <div>
+            <el-upload :show-file-list="false" accept="image/*"
+                       :http-request="opt => onUploadLegalImage('身份证反面', opt)">
+              <el-button size="small">{{ form.fields['身份证反面扫描件'] ? '替换' : '上传' }}</el-button>
+            </el-upload>
+            <img v-if="form.fields['身份证反面扫描件']"
+                 :src="personImageUrl(editing.id, '身份证反面') + '?t=' + imgVersion"
                  style="max-width: 140px; max-height: 180px; margin-top: 6px; display: block" />
           </div>
         </el-form-item>

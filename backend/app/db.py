@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from app import config
 
-ASSET_TYPES = ("info", "credit", "person", "material", "contract")
+ASSET_TYPES = ("info", "credit", "person", "material", "contract", "legal")
 
 
 class Database:
