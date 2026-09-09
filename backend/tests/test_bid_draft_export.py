@@ -6,6 +6,7 @@ import base64
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from app.core.bid_draft_exporter import fill_draft
@@ -367,3 +368,87 @@ def test_classifier_shared_seq_goes_to_perf(tmp_path):
     assert item["role"] == "perf_list"
     assert item["columns"]["seq"] == 0
     assert item["columns"]["project_name"] == 1
+
+
+# ---------- 11. 两行表头填充保真（header_rows，P1 回归） ----------
+
+def _set_vmerge(cell, val="restart"):
+    tcPr = cell._tc.get_or_add_tcPr()
+    vm = OxmlElement("w:vMerge")
+    if val != "continue":
+        vm.set(qn("w:val"), val)
+    tcPr.append(vm)
+
+
+def _set_valign(cell, val):
+    tcPr = cell._tc.get_or_add_tcPr()
+    va = OxmlElement("w:vAlign")
+    va.set(qn("w:val"), val)
+    tcPr.append(va)
+
+
+def _build_two_row_header_draft(path, data_rows=2):
+    """两行表头人员表：row0 主表头（vMerge=restart）、row1 副表头（vMerge=restart），
+    row2+ 空白数据行（vAlign=bottom 体例标记）。"""
+    doc = Document()
+    table = doc.add_table(rows=2 + data_rows, cols=3)
+    for j, h in enumerate(["序号", "姓名", "执业或职业资格证明"]):
+        table.cell(0, j).text = h
+        _set_vmerge(table.cell(0, j), "restart")
+    for j, h in enumerate(["序号", "姓名", "证号"]):
+        table.cell(1, j).text = h
+        _set_vmerge(table.cell(1, j), "restart")
+    for r in range(2, 2 + data_rows):
+        for c in table.rows[r].cells:
+            _set_valign(c, "bottom")
+    doc.save(str(path))
+    return str(path)
+
+
+def _two_row_header_bindings():
+    return {"tables": [
+        {"table_index": 0, "role": "person_roster",
+         "columns": {"seq": 0, "name": 1, "certs": 2},
+         "header_rows": 2,
+         "person_scope": "all", "perf_scope": "", "label_kind": "",
+         "person": "", "confirmed": True},
+    ], "swap_toc": False}
+
+
+def test_two_row_header_fill_preserves_subheader(tmp_path):
+    """header_rows=2 填充：副表头行保留原位；数据行继承空白数据行体例
+    （vAlign=bottom）；donor 克隆行无 vMerge 残留；文本写入正确列。"""
+    draft = _build_two_row_header_draft(tmp_path / "draft.docx")
+    data = _data()
+    data["persons"] = data["persons"][:1]
+    out = str(tmp_path / "out.docx")
+    fill_draft(draft, out, _two_row_header_bindings(), data)
+    table = Document(out).tables[0]
+    assert len(table.rows) == 3  # 2 表头 + 1 数据行
+    # 主/副表头行保留原位
+    assert [c.text for c in table.rows[0].cells] == ["序号", "姓名", "执业或职业资格证明"]
+    assert [c.text for c in table.rows[1].cells] == ["序号", "姓名", "证号"]
+    # 数据行写入正确列
+    assert [c.text for c in table.rows[2].cells] == ["1", "张三", "一级造价师"]
+    for cell in table.rows[2].cells:
+        tcPr = cell._tc.tcPr
+        assert tcPr.find(qn("w:vMerge")) is None      # 克隆行不启动合并区
+        va = tcPr.find(qn("w:vAlign"))
+        assert va is not None and va.get(qn("w:val")) == "bottom"
+
+
+def test_two_row_header_no_data_rows(tmp_path):
+    """header_rows=2 且表只有两行表头：donor = 清空文本的末表头行克隆
+    （保留单元格属性），不炸，填入行无表头文本残留。"""
+    draft = _build_two_row_header_draft(tmp_path / "draft.docx", data_rows=0)
+    data = _data()
+    data["persons"] = data["persons"][:1]
+    out = str(tmp_path / "out.docx")
+    fill_draft(draft, out, _two_row_header_bindings(), data)
+    table = Document(out).tables[0]
+    assert len(table.rows) == 3  # 2 表头 + 1 填入行
+    assert [c.text for c in table.rows[1].cells] == ["序号", "姓名", "证号"]
+    assert [c.text for c in table.rows[2].cells] == ["1", "张三", "一级造价师"]
+    # 克隆自表头的 donor 已剔除 vMerge
+    for cell in table.rows[2].cells:
+        assert cell._tc.tcPr.find(qn("w:vMerge")) is None

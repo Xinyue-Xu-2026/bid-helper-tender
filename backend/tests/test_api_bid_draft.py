@@ -223,6 +223,38 @@ def test_put_bindings_no_draft_422(client):
     assert r.status_code == 422
 
 
+def test_put_bindings_invalid_header_rows_422(client, tmp_path):
+    """header_rows 合法域 1..4（P1 回归）：0 / 5 → 422。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    gen = _generate(client, pid)
+    sug = gen["tables"][0]
+    base = {"table_index": sug["table_index"], "role": sug["role"],
+            "columns": sug["columns"], "confirmed": True}
+    for bad in (0, 5):
+        r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
+                       json={"tables": [{**base, "header_rows": bad}],
+                             "swap_toc": False})
+        assert r.status_code == 422
+
+
+def test_put_bindings_header_rows_roundtrip(client, tmp_path):
+    """header_rows 经 PUT 存库后在 GET 预览中回显（透传）。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    gen = _generate(client, pid)
+    sug = gen["tables"][0]
+    assert sug["header_rows"] == 1  # 程序化单行表头 → 1
+    r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+        "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                    "columns": sug["columns"], "header_rows": 2,
+                    "confirmed": True}],
+        "swap_toc": False})
+    assert r.status_code == 200
+    g = client.get(f"/api/projects/{pid}/bid-draft").json()
+    assert g["tables"][0]["header_rows"] == 2
+
+
 def test_put_bindings_roundtrip(client, tmp_path):
     pid = _make_project(client)
     _upload_tender(client, pid, tmp_path)

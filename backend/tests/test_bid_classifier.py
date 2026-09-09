@@ -98,6 +98,48 @@ def test_perf_list_client_xiangmu_danwei(tmp_path):
     assert item["columns"]["client"] == 2
 
 
+# ---------- header_rows（P1：两行表头检出） ----------
+
+def test_header_rows_two_when_split_header(tmp_path):
+    """跨行表头拼接兜底触发（row0 命中<2）→ 建议项 header_rows=2。"""
+    doc = Document()
+    _make_table(doc, [
+        ["项目", "委托", "合同金额"],
+        ["名称", "单位", ""],
+        ["某项目", "某单位", "100万"],
+    ])
+    item = classify_tables(_save(doc, tmp_path))[0]
+    assert item["role"] == "perf_list"
+    assert item["header_rows"] == 2
+
+
+def test_header_rows_default_one(tmp_path):
+    """普通单行表头 → header_rows=1。"""
+    doc = Document()
+    _make_table(doc, [
+        ["序号", "姓名", "职称", "专业工作年限", "执业资格"],
+        ["1", "张三", "高级工程师", "10", "造价工程师"],
+    ])
+    item = classify_tables(_save(doc, tmp_path))[0]
+    assert item["role"] == "person_roster"
+    assert item["header_rows"] == 1
+
+
+def test_header_rows_two_when_subheader_repeats_row0(tmp_path):
+    """断裂 vMerge 副表头（row1 在同网格列重复 row0 标签 ≥2 格）→ header_rows=2。
+    真实底稿 17×10 人员汇总表回归：row0 命中 4 个关键词不触发拼接兜底，
+    但 row1（序号/本项目任职/姓名/职称/专业 + 证书名称/级别/证号）是副表头。"""
+    doc = Document()
+    _make_table(doc, [
+        ["序号", "本项目任职", "姓名", "职称"],
+        ["序号", "本项目任职", "姓名", "证号"],
+        ["", "", "", ""],
+    ])
+    item = classify_tables(_save(doc, tmp_path))[0]
+    assert item["role"] == "person_roster"
+    assert item["header_rows"] == 2
+
+
 # ---------- 4. 报价表（表头含"报价" / 前两行单元格含"费率"） ----------
 
 def test_quote_by_header_and_by_cell(tmp_path):

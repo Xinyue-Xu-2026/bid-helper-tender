@@ -32,6 +32,7 @@ class TableBindingIn(BaseModel):
     perf_scope: str = "all"
     label_kind: str = ""
     person: str = ""
+    header_rows: int = 1   # 表头行数（两行表头=2，填充时保留并以其后首行为 donor）
     confirmed: bool = False
 
 
@@ -110,5 +111,7 @@ def save_bid_draft_bindings(project_id: int, body: BindingsIn,
             raise HTTPException(422, f"非法表格角色：{t.role}")
         if t.table_index < 0:
             raise HTTPException(422, "table_index 必须 ≥ 0")
+        if not 1 <= t.header_rows <= 4:
+            raise HTTPException(422, "header_rows 必须在 1..4 之间")
     db.update_bid_template(row["id"], bindings=body.model_dump())
     return {"ok": True}

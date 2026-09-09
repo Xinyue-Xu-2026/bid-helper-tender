@@ -138,6 +138,15 @@ def _row_hit_count(pairs) -> int:
                if any(kw in _norm(text) for kw in kws))
 
 
+def _shared_header_cells(pairs0, pairs1) -> int:
+    """row1 与 row0 在同网格列、同（规范化后）非空文本的单元格数。
+    断裂 vMerge 副表头信号：row1 重复 row0 的标签文本（真实底稿中
+    两行表头的前几列各自 vMerge=restart，文本完全重复）。"""
+    row1 = {idx: _norm(text) for idx, text in pairs1}
+    return sum(1 for idx, text in pairs0
+               if _norm(text) and _norm(text) == row1.get(idx))
+
+
 def _match_columns(pairs) -> tuple:
     """逐列匹配人员/业绩语义：子串匹配（去空白后），长关键词优先，
     每列只取一个语义、每语义只占一列。返回 (person_map, perf_map)：
@@ -218,6 +227,7 @@ def _classify_table(table, table_index: int, heading: str,
         "perf_scope": "",
         "label_kind": "",
         "person": "",
+        "header_rows": 1,
         "confidence": "低",
         "context_heading": heading,
         "confirmed": False,
@@ -243,12 +253,19 @@ def _classify_table(table, table_index: int, heading: str,
         item["confidence"] = "高"
         return item
 
-    # 规则 3：表头行关键词签名（第 0 行命中 < 2 且行数 ≥ 2 时跨行拼接兜底）
+    # 规则 3：表头行关键词签名（第 0 行命中 < 2 且行数 ≥ 2 时跨行拼接兜底）。
+    # header_rows：拼接兜底触发 → 2；row0 自身命中足够但 row1 在同列重复
+    # row0 标签 ≥2 格（断裂 vMerge 副表头，真实底稿 17×10 人员汇总表回归）
+    # → 2；其余 → 1。
     pairs = _dedup_col_texts(rows[0])
     if _row_hit_count(pairs) < 2 and len(rows) >= 2:
         row1 = dict(_dedup_col_texts(rows[1]))
         pairs = [(idx, (text or "") + (row1.get(idx) or ""))
                  for idx, text in pairs]
+        item["header_rows"] = 2
+    elif len(rows) >= 2 and _shared_header_cells(
+            pairs, _dedup_col_texts(rows[1])) >= 2:
+        item["header_rows"] = 2
     person_map, perf_map = _match_columns(pairs)
 
     # 规则 4：命中数判定人员表 / 业绩表。

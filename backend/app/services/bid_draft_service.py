@@ -21,7 +21,8 @@ from app.db import Database
 # 入库 bindings 的表项仅保留 schema 字段（TableBindingIn 对齐）；
 # header/confidence/context_heading 等展示字段由 preview 实时分类供给
 _BINDING_KEYS = ("table_index", "role", "columns", "person_scope",
-                 "perf_scope", "label_kind", "person", "confirmed")
+                 "perf_scope", "label_kind", "person", "header_rows",
+                 "confirmed")
 
 _TOC_WARNING = "底稿含目录页，导出后请在 Word 中更新页码（F9）"
 

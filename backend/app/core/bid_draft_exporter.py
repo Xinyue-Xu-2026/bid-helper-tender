@@ -11,6 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
@@ -20,17 +21,43 @@ from app.core.bid_verify import verify_draft_fill
 from app.core.word_exporter import insert_toc_field_at
 
 
-def _fill_table_semantic(table, columns: dict, sem_rows: list) -> int:
-    """语义列填充数据表：保留表头行，deepcopy 首数据行做样式 donor 逐行写入。
-    列下标 j → 反向查 columns 得语义键，有则写 sem_row.get(key,"")，无则清 ""；
-    横向合并按 _tc 引用去重只写一次。sem_rows 空 → 仅留表头返回 0；
-    表只有表头（无数据行）时用表头行做 donor。返回写入行数。"""
+def _clear_tr_text(tr) -> None:
+    """清空一行（deepcopy 出的 tr）全部单元格文本，保留单元格/段落属性。"""
+    for tc in tr.iter(qn("w:tc")):
+        for para in tc.findall(qn("w:p")):
+            for child in list(para):
+                if child.tag != qn("w:pPr"):
+                    para.remove(child)
+
+
+def _strip_tr_vmerge(tr) -> None:
+    """剔除克隆行内全部 vMerge 元素：donor 克隆行作为数据行，
+    不应启动/延续纵向合并区（表头行的 vMerge 不随克隆带入）。"""
+    for vm in list(tr.iter(qn("w:vMerge"))):
+        vm.getparent().remove(vm)
+
+
+def _fill_table_semantic(table, columns: dict, sem_rows: list,
+                         header_rows: int = 1) -> int:
+    """语义列填充数据表：保留前 header_rows 个表头行，donor 取
+    rows[header_rows]（首个真数据行——空白数据行正好携带正确
+    vAlign/缩进/行高体例）deepcopy 逐行写入；无数据行（总行数 <=
+    header_rows）时 donor = 清空文本的最后一个表头行克隆（保留单元格
+    属性）。donor 克隆行剔除 vMerge。列下标 j → 反向查 columns 得语义键，
+    有则写 sem_row.get(key,"")，无则清 ""；横向合并按 _tc 引用去重只写
+    一次。sem_rows 空 → 仅留表头返回 0。返回写入行数。"""
     col_to_sem = {col: sem for sem, col in (columns or {}).items()}
     rows = table.rows
     if not rows:
         return 0
-    donor_tr = deepcopy(rows[1]._tr if len(rows) >= 2 else rows[0]._tr)
-    for r in list(table.rows[1:]):
+    header_rows = max(1, min(int(header_rows or 1), len(rows)))
+    if len(rows) > header_rows:
+        donor_tr = deepcopy(rows[header_rows]._tr)
+    else:
+        donor_tr = deepcopy(rows[header_rows - 1]._tr)
+        _clear_tr_text(donor_tr)
+    _strip_tr_vmerge(donor_tr)
+    for r in list(table.rows[header_rows:]):
         r._tr.getparent().remove(r._tr)
     written = 0
     for sem_row in sem_rows or []:
@@ -227,14 +254,16 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         if role == "person_roster":
             picked = _scope_persons(persons, binding.get("person_scope") or "all")
             rows = _fill_table_semantic(table, binding.get("columns") or {},
-                                        [p.get("sem") or {} for p in picked])
+                                        [p.get("sem") or {} for p in picked],
+                                        header_rows=binding.get("header_rows") or 1)
             report["filled"].append(
                 {"table_index": idx, "role": role, "rows": rows})
         elif role == "perf_list":
             picked = _scope_contracts(contracts, persons,
                                       binding.get("perf_scope") or "all")
             rows = _fill_table_semantic(table, binding.get("columns") or {},
-                                        [c.get("sem") or {} for c in picked])
+                                        [c.get("sem") or {} for c in picked],
+                                        header_rows=binding.get("header_rows") or 1)
             report["filled"].append(
                 {"table_index": idx, "role": role, "rows": rows})
         elif role == "lead_resume":
