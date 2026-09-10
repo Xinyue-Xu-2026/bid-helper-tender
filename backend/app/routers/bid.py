@@ -155,8 +155,12 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
     bt = db.get_project_bid_template(project_id)
     draft_path = (bt.get("edited_path") or bt.get("file_path")) if bt else ""
     if bt and Path(draft_path or "").exists():
-        # 新管线：底稿（编辑版优先）+ 用户确认 bindings 填充，附填充/校验报告
-        bindings = bt.get("bindings") or {}
+        # 新管线：底稿（编辑版优先）+ 用户确认 bindings 填充，附填充/校验报告。
+        # 手动编辑版优先：若存在编辑版，跳过表格自动填充（避免覆盖手动内容、
+        # 重复克隆、克隆后下标错位），但仍做封面占位符替换与授权页填充；
+        # 想恢复自动填充 → 重新生成底稿即清空编辑版。
+        edited = bool(bt.get("edited_path")) and Path(bt["edited_path"]).exists()
+        bindings = {} if edited else (bt.get("bindings") or {})
         data = bid_service.assemble_bid_draft_data(
             db, project_id,
             [p.model_dump() for p in body.persons],

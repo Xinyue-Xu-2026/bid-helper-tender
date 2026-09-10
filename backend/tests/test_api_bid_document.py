@@ -1,4 +1,7 @@
 """商务标底稿内容编辑（方案 A）API 测试：document 读/写回显 + 无底稿 404/422。"""
+import json
+from urllib.parse import unquote
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -6,7 +9,9 @@ from app.db import Database
 from app.deps import get_db
 from app.main import app
 
-from tests.test_api_bid_draft import _generate, _make_project, _upload_tender
+from tests.test_api_bid_draft import (
+    _confirm_first_table, _generate, _make_person, _make_project, _upload_tender,
+)
 
 
 @pytest.fixture()
@@ -61,3 +66,26 @@ def test_document_requires_draft(client):
     pid = _make_project(client)
     assert client.get(f"/api/projects/{pid}/bid-draft/document").status_code == 404
     assert client.post(f"/api/projects/{pid}/bid-draft/document", json={}).status_code == 422
+
+
+def test_export_skips_table_fill_when_edited(client, tmp_path):
+    """编辑版优先：存在编辑版时导出跳过表格自动填充（避免覆盖手动内容），
+    但保留占位符/授权页填充；report.filled 为空且 verify.ok。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    gen = _generate(client, pid)
+    _confirm_first_table(client, pid, gen)  # 绑定人员表
+
+    blocks = client.get(f"/api/projects/{pid}/bid-draft/document").json()["blocks"]
+    para_idx = next(b["index"] for b in blocks if b["kind"] == "paragraph")
+    client.post(f"/api/projects/{pid}/bid-draft/document",
+                json={"paragraphs": {para_idx: "手动改"}})
+
+    person_id = _make_person(client, "张三")
+    r = client.post(f"/api/projects/{pid}/bid-assets/export-template",
+                    json={"persons": [{"asset_id": person_id, "is_lead": True}],
+                          "contracts": []})
+    assert r.status_code == 200
+    report = json.loads(unquote(r.headers.get("X-Fill-Report")))
+    assert report["verify"]["ok"] is True
+    assert report["filled"] == []  # 编辑版优先 → 表格自动填充被跳过
