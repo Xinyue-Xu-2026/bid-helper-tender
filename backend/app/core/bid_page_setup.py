@@ -101,6 +101,86 @@ def _is_toc_el(p_el) -> bool:
     return False
 
 
+_TOC_ENTRY_RE = re.compile(r".+?[\.\s·…]{2,}\s*\d{1,4}\s*$")
+
+
+def _el_text(el) -> str:
+    return "".join(t.text or "" for t in el.iter(_wq(W, "t")))
+
+
+def is_static_toc_group(children) -> "int | None":
+    """静态文本目录识别（V1.2 7.5）：「目录」标题段 + 其后连续 ≥2 个
+    「章节名…页码」形态段（双重特征缺一不可，防正文"目录"字样误判），
+    返回目录组末元素下标；否则 None。"""
+    for i, el in enumerate(children):
+        if el.tag != _wq(W, "p"):
+            continue
+        title = _el_text(el).strip()
+        if not title.startswith("目录"):
+            continue
+        end, count, j = i, 0, i + 1
+        while (j < len(children) and children[j].tag == _wq(W, "p")
+               and _TOC_ENTRY_RE.match(_el_text(children[j]).strip())):
+            end, count, j = j, count + 1, j + 1
+        if count >= 2:
+            return end
+    return None
+
+
+def _para_jc(p_el) -> str:
+    pPr = p_el.find(_wq(W, "pPr"))
+    if pPr is None:
+        return ""
+    jc = pPr.find(_wq(W, "jc"))
+    return (jc.get(_wq(W, "val")) or "") if jc is not None else ""
+
+
+def check_footer_page_centered(docx_path: str) -> list:
+    """断言产物各 footer part 中 PAGE 域所在段落居中（jc=center）。
+    段落缺 jc（未显式设置）→ 安全补 center 后复检（幂等）；显式非居中
+    （有意设置）→ 不静默改，记告警。返回告警列表（空=通过）。"""
+    warnings = []
+    path = Path(docx_path)
+    with zipfile.ZipFile(str(path)) as z:
+        entries = {n: z.read(n) for n in z.namelist()}
+    footer_names = sorted(n for n in entries
+                          if re.fullmatch(r"word/footer[^/]*\.xml", n))
+    changed = False
+    for name in footer_names:
+        root = etree.fromstring(entries[name])
+        for idx, p in enumerate(root.iter(_wq(W, "p"))):
+            if not any("PAGE" in (instr.text or "")
+                       for instr in p.iter(_wq(W, "instrText"))):
+                continue
+            jc = _para_jc(p)
+            if jc == "center":
+                continue
+            if jc:
+                # 显式非居中：有意设置，不静默改，告警
+                warnings.append(
+                    f"{name} 段落[{idx}] PAGE 域段落未居中（jc={jc}）")
+                continue
+            # 缺 jc：补 center（写回产物）后复检
+            pPr = p.find(_wq(W, "pPr"))
+            if pPr is None:
+                pPr = etree.Element(_wq(W, "pPr"))
+                p.insert(0, pPr)
+            jc_el = etree.SubElement(pPr, _wq(W, "jc"))
+            jc_el.set(_wq(W, "val"), "center")
+            changed = True
+            if _para_jc(p) != "center":
+                warnings.append(f"{name} 段落[{idx}] PAGE 域段落未居中")
+        entries[name] = etree.tostring(root, xml_declaration=True,
+                                       encoding="UTF-8", standalone=True)
+    if changed:
+        tmp = path.with_suffix(".jctmp")
+        with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as z:
+            for n, data in entries.items():
+                z.writestr(n, data)
+        tmp.replace(path)
+    return warnings
+
+
 def _clean_sectpr(sp) -> None:
     """去掉 sectPr 的页眉/页脚引用与首页不同/页码设置（统一为参考样式）。"""
     for tag in ("headerReference", "footerReference", "titlePg", "pgNumType"):
@@ -139,8 +219,12 @@ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
 
 def apply_page_setup(docx_path: str) -> dict:
     """对导出产物做页眉/页脚移植与分节页码（zip 后置处理）。
-    返回 {"header_applied": bool, "page_numbers": bool, "degraded": str}。"""
-    result = {"header_applied": False, "page_numbers": False, "degraded": ""}
+    返回 {"header_applied": bool, "page_numbers": bool, "degraded": str,
+          "sections": int, "section_page_numbers": [bool], "warnings": [str]}。
+    sections = document.xml 中 sectPr 数；section_page_numbers 逐节标记
+    「挂页脚引用且页码重起」；warnings 含页脚 PAGE 域居中断言结果。"""
+    result = {"header_applied": False, "page_numbers": False, "degraded": "",
+              "sections": 1, "section_page_numbers": [], "warnings": []}
     ref = Path(config.BID_HEADER_SOURCE_PATH)
     if not ref.exists():
         result["degraded"] = "页眉参考文件缺失，已跳过页眉/页码设置"
@@ -166,20 +250,26 @@ def apply_page_setup(docx_path: str) -> dict:
         body_sectPr = etree.SubElement(body, _wq(W, "sectPr"))
         children = list(body)
 
-    # 首个连续 toc 段组（封面+目录区）
-    toc_idx = [i for i, el in enumerate(children)
-               if el.tag == _wq(W, "p") and _is_toc_el(el)]
+    # 首个连续目录段组（封面+目录区）：优先静态文本目录（「目录」标题+
+    # 页码形态段组，V1.2 7.5），无则回退 toc 样式/TOC 域组（旧行为）
     split_after = None
-    if toc_idx:
-        group_end = toc_idx[0]
-        for i in toc_idx[1:]:
-            if i == group_end + 1:
-                group_end = i
-            else:
-                break
-        # 组后还有正文内容（body sectPr 之外的元素）才需要拆节
-        if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
-            split_after = group_end
+    static_end = is_static_toc_group(children)
+    if static_end is not None and any(
+            el.tag != _wq(W, "sectPr") for el in children[static_end + 1:]):
+        split_after = static_end
+    if split_after is None:
+        toc_idx = [i for i, el in enumerate(children)
+                   if el.tag == _wq(W, "p") and _is_toc_el(el)]
+        if toc_idx:
+            group_end = toc_idx[0]
+            for i in toc_idx[1:]:
+                if i == group_end + 1:
+                    group_end = i
+                else:
+                    break
+            # 组后还有正文内容（body sectPr 之外的元素）才需要拆节
+            if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
+                split_after = group_end
 
     # 新 rId
     rels_root = etree.fromstring(entries["word/_rels/document.xml.rels"])
@@ -286,6 +376,15 @@ def apply_page_setup(docx_path: str) -> dict:
         for name, data in entries.items():
             z.writestr(name, data)
     tmp.replace(path)
+
+    # 分节报告 + 页脚 PAGE 域居中断言（缺 jc 自动补，显式非居中告警）
+    sects = [el for el in body.iter() if el.tag == _wq(W, "sectPr")]
+    result["sections"] = len(sects)
+    result["section_page_numbers"] = [
+        bool(sp.findall(_wq(W, "footerReference")))
+        and sp.find(_wq(W, "pgNumType")) is not None
+        for sp in sects]
+    result["warnings"] = check_footer_page_centered(str(path))
 
     result["header_applied"] = True
     result["page_numbers"] = True

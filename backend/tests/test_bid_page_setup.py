@@ -177,3 +177,125 @@ def test_pg_num_type_inserted_before_later_elements():
     assert pg_pos > tags.index("pgMar")
     assert tags.index("headerReference") == 0
     assert tags.index("footerReference") == 1
+
+
+# ---------- 6. 静态文本目录分节 + 页码居中断言 + 分节报告（V1.2 7.5） ----------
+
+from app.core.bid_page_setup import (
+    apply_page_setup, check_footer_page_centered, is_static_toc_group)
+
+
+def _page_field_footer_doc(path, alignment=None):
+    """构造页脚含 PAGE 域段落的 docx；alignment 非空时显式设置对齐。"""
+    doc = Document()
+    section = doc.sections[0]
+    section.footer.is_linked_to_previous = False
+    fp = section.footer.paragraphs[0]
+    if alignment is not None:
+        fp.alignment = alignment
+    run = fp.add_run()
+    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve")
+    instr.text = "PAGE \\* MERGEFORMAT"
+    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
+    run._r.append(begin); run._r.append(instr); run._r.append(end)
+    doc.save(str(path))
+    return path
+
+
+def test_is_static_toc_group_detected():
+    body = etree.fromstring(
+        f'<w:body xmlns:w="{W}">'
+        '<w:p><w:r><w:t>投标文件封面</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>目录</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>第一章 概述 ........ 1</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>第二章 方案 ........ 5</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>正文开始</w:t></w:r></w:p></w:body>')
+    children = list(body)
+    idx = is_static_toc_group(children)
+    assert idx is not None
+    assert idx == 3  # 目录组末元素 = 第二个页码段
+
+
+def test_is_static_toc_group_requires_both_signals():
+    """双重特征缺一不可：仅「目录」标题无页码段组 → None；
+    仅页码形态段无「目录」标题 → None（防正文误判）。"""
+    only_title = etree.fromstring(
+        f'<w:body xmlns:w="{W}">'
+        '<w:p><w:r><w:t>目录</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>正文段落</w:t></w:r></w:p></w:body>')
+    assert is_static_toc_group(list(only_title)) is None
+    only_entries = etree.fromstring(
+        f'<w:body xmlns:w="{W}">'
+        '<w:p><w:r><w:t>第一章 概述 ........ 1</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>第二章 方案 ........ 5</w:t></w:r></w:p></w:body>')
+    assert is_static_toc_group(list(only_entries)) is None
+
+
+def test_footer_page_centered_warns_when_left(tmp_path):
+    """页脚 PAGE 域段落显式非居中（jc=left，有意设置）→ 非空告警含 part 名。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    p = _page_field_footer_doc(tmp_path / "x.docx",
+                               alignment=WD_ALIGN_PARAGRAPH.LEFT)
+    warnings = check_footer_page_centered(str(p))
+    assert warnings and any("footer" in w for w in warnings)
+
+
+def test_footer_page_centered_autofix_missing_jc(tmp_path):
+    """页脚 PAGE 域段落无 jc（缺省）→ 安全补 center 后复检通过：无告警，
+    且产物被修正（幂等：二次调用仍无告警）。"""
+    p = _page_field_footer_doc(tmp_path / "x.docx")
+    assert check_footer_page_centered(str(p)) == []
+    assert check_footer_page_centered(str(p)) == []
+    with zipfile.ZipFile(str(p)) as z:
+        footers = [n for n in z.namelist()
+                   if n.startswith("word/footer") and n.endswith(".xml")]
+        assert footers
+        assert 'w:val="center"' in z.read(footers[0]).decode("utf-8")
+
+
+def test_footer_page_centered_ok_when_center(tmp_path):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    p = _page_field_footer_doc(tmp_path / "x.docx",
+                               alignment=WD_ALIGN_PARAGRAPH.CENTER)
+    assert check_footer_page_centered(str(p)) == []
+
+
+def test_apply_page_setup_reports_sections(tmp_path, reference):
+    """静态文本目录（无 toc 样式段）也分节：封面+目录为节1（无引用无重起），
+    正文节挂参考页眉页脚且页码从 1 起；result 报告 sections /
+    section_page_numbers / warnings。"""
+    doc = Document()
+    doc.add_paragraph("投标文件封面")
+    doc.add_paragraph("目录")
+    doc.add_paragraph("第一章 概述 ........ 1")
+    doc.add_paragraph("第二章 方案 ........ 5")
+    doc.add_paragraph("正文开始")
+    p = tmp_path / "out.docx"
+    doc.save(str(p))
+    result = apply_page_setup(str(p))
+    assert result["header_applied"] is True
+    assert result["sections"] >= 2
+    assert result["section_page_numbers"][0] is False   # 封面+目录节
+    assert result["section_page_numbers"][-1] is True   # 正文节
+    assert result["warnings"] == []
+    with zipfile.ZipFile(str(p)) as z:
+        in_p, body_sp = _sectprs(z)
+    assert len(in_p) == 1
+    assert _refs(in_p[0], "headerReference") == []
+    pg = body_sp.find(_wq("pgNumType"))
+    assert pg is not None and pg.get(_wq("start")) == "1"
+
+
+def test_apply_page_setup_degraded_still_reports_keys(tmp_path, monkeypatch):
+    """参考缺失降级路径：新增报告键仍在（sections/section_page_numbers/
+    warnings），行为不变不报错。"""
+    monkeypatch.setattr(config, "BID_HEADER_SOURCE_PATH",
+                        tmp_path / "不存在.docx")
+    p = tmp_path / "out.docx"
+    Document().save(str(p))
+    result = apply_page_setup(str(p))
+    assert result["degraded"]
+    assert result["sections"] >= 1
+    assert isinstance(result["section_page_numbers"], list)
+    assert result["warnings"] == []
