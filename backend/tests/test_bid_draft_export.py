@@ -207,7 +207,8 @@ def test_image_slot_insert(tmp_path):
     assert table._tbl.findall(f".//{qn('w:drawing')}")
     img = report["images"][0]
     assert img == {"table_index": 3, "person": "张三",
-                   "label_kind": "注册证书", "ok": True}
+                   "label_kind": "注册证书", "ok": True,
+                   "reason": "", "too_long": False}
 
 
 def test_image_slot_missing_file_no_throw(tmp_path):

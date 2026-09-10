@@ -12,6 +12,7 @@
 删除全部原数据行（无记录时即只剩表头）。
 """
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 import re
 
@@ -134,14 +135,140 @@ def _clear_table_images(table: Table) -> None:
             dr.getparent().remove(dr)
 
 
-def _insert_image_into_table(table: Table, image_path: str) -> None:
-    """往图片占位表（1列，首行是标签文字）插入图片。无文件/路径无效则跳过。"""
+# ---------- 图片等比自适应插入（V1.2 模块三） ----------
+
+def measure_image_cm(image_path: str):
+    """Pillow 读图按 96dpi 换算 (w_cm, h_cm, ratio=w/h)；打不开/无 Pillow 返回 None。"""
+    try:
+        from PIL import Image
+        with Image.open(str(image_path)) as im:
+            w, h = im.size
+    except Exception:
+        return None
+    if not w or not h:
+        return None
+    return (w / 96 * 2.54, h / 96 * 2.54, w / h)
+
+
+def fit_image_cm(image_path: str, avail_w_cm: float, avail_h_cm: float = 24.0,
+                 fallback_w_cm: float = 7.0) -> dict:
+    """等比适配：宽不超过 avail_w_cm、高不超过 avail_h_cm（超高再压宽，
+    标记 too_long）；读不出尺寸则退化固定宽度（degraded 说明原因）。"""
+    m = measure_image_cm(image_path)
+    if m is None:
+        return {"width_cm": fallback_w_cm, "height_cm": 0,
+                "degraded": "无法读取图片尺寸，退化为固定宽度",
+                "too_long": False}
+    w0, h0, ratio = m
+    w = min(avail_w_cm, w0)
+    h = w / ratio
+    too_long = False
+    if h > avail_h_cm:
+        h = avail_h_cm
+        w = h * ratio
+        too_long = True
+    return {"width_cm": w, "height_cm": h, "degraded": "", "too_long": too_long}
+
+
+def insert_image_adaptive(container, image_path: str, avail_w_cm: float,
+                          avail_h_cm: float = 24.0,
+                          fallback_w_cm: float = 7.0) -> dict:
+    """自适应插图：container 为 Paragraph 或 Cell；>3000px 位图先降采样到
+    2000px 内再插入。返回 {"ok","reason","too_long","degraded"}，
+    失败显式给出 reason（不静默吞异常）。"""
+    from docx.table import _Cell
+    if isinstance(container, _Cell):
+        para = (container.paragraphs[0] if container.paragraphs
+                else container.add_paragraph())
+    else:
+        para = container
     if not image_path or not Path(image_path).exists():
-        return
+        return {"ok": False, "reason": "图片文件不存在",
+                "too_long": False, "degraded": ""}
+    fit = fit_image_cm(image_path, avail_w_cm, avail_h_cm, fallback_w_cm)
+    src = str(image_path)
+    if not fit["degraded"]:
+        try:
+            from PIL import Image
+            im = Image.open(str(image_path))
+            if max(im.size) > 3000:
+                im.thumbnail((2000, 2000))
+                buf = BytesIO()
+                im.save(buf, "PNG")
+                buf.seek(0)
+                src = buf
+        except Exception:
+            src = str(image_path)  # 降采样失败不阻断，按原图插入
+    try:
+        run = para.add_run()
+        if fit["height_cm"] > 0:
+            run.add_picture(src, width=Cm(fit["width_cm"]),
+                            height=Cm(fit["height_cm"]))
+        else:
+            run.add_picture(src, width=Cm(fit["width_cm"]))
+    except Exception as exc:
+        return {"ok": False, "reason": f"插入失败：{exc}",
+                "too_long": False, "degraded": fit["degraded"]}
+    return {"ok": True, "reason": "", "too_long": fit["too_long"],
+            "degraded": fit["degraded"]}
+
+
+def cell_available_width_cm(cell, default: float = 14.0) -> float:
+    """单元格可用宽度（cm）：优先所在 w:tbl 的 tblGrid/gridCol 求和
+    （python-docx 解析为 EMU，/360000 换算），回退 tcW(dxa 缇/567)，
+    都取不到用 default。图片占位表均为 1 列，gridCol 求和即单元格宽。"""
+    tc = cell._tc
+    tbl = tc.getparent()
+    while tbl is not None and tbl.tag != qn("w:tbl"):
+        tbl = tbl.getparent()
+    if tbl is not None:
+        grid = tbl.find(qn("w:tblGrid"))
+        if grid is not None:
+            total_emu = sum(int(gc.w) for gc in grid.findall(qn("w:gridCol"))
+                            if gc.w is not None)
+            if total_emu > 0:
+                return total_emu / 360000
+    tcPr = tc.tcPr
+    if tcPr is not None:
+        tcW = tcPr.find(qn("w:tcW"))
+        if tcW is not None:
+            w = tcW.get(qn("w:w"))
+            if w and w.lstrip("-").isdigit() and int(w) > 0:
+                return int(w) / 567.0
+    return default
+
+
+def page_text_width_cm(doc, default: float = 16.0) -> float:
+    """页面正文可用宽度（cm）= 页宽 - 左右边距；取不到用 default。"""
+    try:
+        sec = doc.sections[0]
+        emu = sec.page_width - sec.left_margin - sec.right_margin
+        if emu and int(emu) > 0:
+            return int(emu) / 360000
+    except Exception:
+        return default
+    return default
+
+
+def _insert_image_into_table(table: Table, image_path: str,
+                             report: dict = None, table_index=None,
+                             person: str = "", label_kind: str = "") -> dict:
+    """往图片占位表（1列，首行是标签文字）插入图片（等比自适应：按单元格
+    可用宽度与页面可用高度缩放，>3000px 位图先降采样）。
+    返回 {"ok","reason","too_long","degraded"}；report 非空时按
+    {"table_index","person","label_kind","ok","reason","too_long"}
+    记入 report["images"]。无 report 的旧调用保持兼容。"""
     row = table.rows[1] if len(table.rows) > 1 else table.rows[0]
     cell = row.cells[0]
     para = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
-    para.add_run().add_picture(image_path, width=Cm(8))
+    result = insert_image_adaptive(
+        para, image_path, cell_available_width_cm(cell), fallback_w_cm=8.0)
+    if report is not None:
+        report.setdefault("images", []).append({
+            "table_index": table_index, "person": person,
+            "label_kind": label_kind, "ok": result["ok"],
+            "reason": result["reason"], "too_long": result["too_long"]})
+    return result
 
 
 def _insert_person_images(doc, persons) -> None:

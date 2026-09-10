@@ -10,3 +10,4 @@ httpx>=0.27
 rapidocr_onnxruntime>=1.2
 pywin32>=306; platform_system=="Windows"
 pdf2docx>=0.5.8
+Pillow>=10

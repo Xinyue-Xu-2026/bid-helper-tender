@@ -18,6 +18,7 @@ from docx.shared import Cm
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
+    insert_image_adaptive, page_text_width_cm,
 )
 from app.core.bid_page_setup import apply_page_setup
 from app.core.bid_verify import _is_section_break_para, verify_draft_fill
@@ -160,13 +161,11 @@ def _fill_image_slots(doc, slot_bindings, persons, report) -> None:
         else:
             image_path = ""
         _clear_table_images(table)
-        ok = bool(image_path) and Path(image_path).exists()
-        if ok:
-            _insert_image_into_table(table, image_path)
-        report["images"].append({
-            "table_index": binding.get("table_index"),
-            "person": str(person.get("name") or ""),
-            "label_kind": kind, "ok": ok})
+        # 等比自适应插入；失败（文件缺失/格式不支持/插入异常）显式记入报告
+        _insert_image_into_table(
+            table, image_path, report=report,
+            table_index=binding.get("table_index"),
+            person=str(person.get("name") or ""), label_kind=kind)
 
 
 def _swap_toc(doc) -> bool:
@@ -242,12 +241,20 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
     def _append_images(para, person, dual) -> int:
         inserted = 0
         for pth in _img_paths(person, dual):
-            if pth and Path(pth).exists():
-                try:
-                    para.add_run().add_picture(pth, width=_ID_CARD_WIDTH)
-                    inserted += 1
-                except Exception:
-                    pass
+            if not pth:
+                continue
+            # 身份证扫描件：自适应（页宽为可用宽，_ID_CARD_WIDTH 为退化宽度）；
+            # 失败显式记入 report["images"]，不再静默吞异常
+            result = insert_image_adaptive(
+                para, pth, page_text_width_cm(doc),
+                fallback_w_cm=_ID_CARD_WIDTH.cm)
+            report["images"].append({
+                "table_index": None,
+                "person": str((person or {}).get("name") or ""),
+                "label_kind": "身份证", "ok": result["ok"],
+                "reason": result["reason"], "too_long": result["too_long"]})
+            if result["ok"]:
+                inserted += 1
         return inserted
 
     paras = [p for p in doc.paragraphs
