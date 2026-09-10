@@ -1,0 +1,216 @@
+﻿diff --git a/backend/app/core/bid_table_classifier.py b/backend/app/core/bid_table_classifier.py
+index 7d8498e..5ec39d1 100644
+--- a/backend/app/core/bid_table_classifier.py
++++ b/backend/app/core/bid_table_classifier.py
+@@ -59,21 +59,21 @@ from docx.text.paragraph import Paragraph
+ from app.core.template_outline import para_heading_level
+ 
+ ROLES = ("person_roster", "lead_resume", "perf_list", "quote", "image_slot", "ignore")
+ 
+ PERSON_COL_KEYWORDS = {
+     "seq": ("搴忓彿",), "label": ("浜哄憳瀹夋帓", "宀椾綅", "鑱屽姟"),
+     "name": ("濮撳悕",), "gender": ("鎬у埆",), "age": ("骞撮緞",),
+     "education": ("瀛﹀巻",), "title": ("鑱岀О",),
+     "work_years": ("涓撲笟宸ヤ綔骞撮檺", "宸ヤ綔骞撮檺", "浠庝笟骞撮檺"),
+     "certs": ("鎵т笟璧勬牸", "娉ㄥ唽璧勬牸", "璧勬牸璇佷功", "璧勬牸"),
+-    "role": ("鎷熸淳宀椾綅", "鎷熶换鑱屽姟", "鏈」鐩矖浣?),
++    "role": ("鎷熸淳宀椾綅", "鎷熶换鑱屽姟", "鏈」鐩矖浣?, "鏈」鐩换鑱?, "鏈」鐩亴鍔?),
+ }
+ PERF_COL_KEYWORDS = {
+     "seq": ("搴忓彿",), "project_name": ("椤圭洰鍚嶇О",),
+     "client": ("濮旀墭鍗曚綅", "涓氫富鍗曚綅", "寤鸿鍗曚綅", "濮旀墭浜?, "椤圭洰鍗曚綅"),
+     "client_contact": ("鑱旂郴鏂瑰紡",), "sign_date": ("鍚堝悓绛捐", "绛捐鏃堕棿", "绛捐鏃ユ湡"),
+     "amount": ("鍚堝悓閲戦", "宸ョ▼閫犱环", "閲戦"), "project_type": ("椤圭洰绫诲瀷",),
+     "service_type": ("鏈嶅姟绫诲瀷",), "content": ("涓昏鍐呭", "鏈嶅姟鍐呭"),
+     "proof_page": ("璇佹槑鏉愭枡", "椤电爜"),
+ }
+ QUOTE_KEYWORDS = ("鎶ヤ环", "璐圭巼", "鎶樻墸")
+@@ -81,27 +81,33 @@ RESUME_LABELS = ("濮撳悕", "鎬у埆", "骞撮緞", "瀛﹀巻", "鑱岀О", "鎵т笟璧勬牸
+                  "韬唤璇佸彿", "宸ヤ綔缁忓巻", "宸插畬椤圭洰", "绫讳技涓氱哗")
+ RESUME_LABEL_TO_SEM = {"濮撳悕": "name", "鎬у埆": "gender", "骞撮緞": "age",
+                        "瀛﹀巻": "education", "鑱岀О": "title", "鎵т笟璧勬牸": "certs",
+                        "韬唤璇佸彿": "id_no", "宸插畬椤圭洰": "lead_perfs",
+                        "绫讳技涓氱哗": "lead_perfs"}
+ IMAGE_LABEL_KINDS = (("绀句繚", "绀句繚"), ("韬唤璇?, "韬唤璇?),
+                      ("鑱岀О璇佷功", "鑱岀О璇佷功"), ("娉ㄥ唽璇佷功", "娉ㄥ唽璇佷功"),
+                      ("璧勬牸璇佷功", "娉ㄥ唽璇佷功"), ("鎵т笟璧勬牸", "娉ㄥ唽璇佷功"))
+ 
+ _WS_RE = re.compile(r"\s+")
++_DATA_HINT_RE = re.compile(r"\d")
+ 
+ 
+ def _norm(s: str) -> str:
+     """鍘诲叏閮ㄧ┖鐧姐€?""
+     return _WS_RE.sub("", s or "")
+ 
+ 
++def _row_has_data_semantics(pairs) -> bool:
++    """琛屽惈鏁版嵁璇箟淇″彿锛氫换涓€鍗曞厓鏍煎惈鏁板瓧锛堝簭鍙?閲戦/骞撮檺/鏃ユ湡绛夛級銆?""
++    return any(_DATA_HINT_RE.search(text or "") for _, text in pairs)
++
++
+ def _iter_block_items(doc):
+     """鎸?body 椤哄簭浜у嚭 Paragraph / Table锛堝悓 bid_template_exporter 鐨勫潡閬嶅巻鎵嬫硶锛夈€?""
+     for child in doc.element.body.iterchildren():
+         if child.tag == qn("w:p"):
+             yield Paragraph(child, doc)
+         elif child.tag == qn("w:tbl"):
+             yield Table(child, doc)
+ 
+ 
+ def _dedup_col_texts(row) -> list:
+@@ -249,30 +255,34 @@ def _classify_table(table, table_index: int, heading: str,
+ 
+     # 瑙勫垯 2锛氬墠 2 琛屼换涓€鍗曞厓鏍煎惈鎶ヤ环鍏抽敭璇?鈫?quote
+     if _is_quote(table):
+         item["role"] = "quote"
+         item["confidence"] = "楂?
+         return item
+ 
+     # 瑙勫垯 3锛氳〃澶磋鍏抽敭璇嶇鍚嶏紙绗?0 琛屽懡涓?< 2 涓旇鏁?鈮?2 鏃惰法琛屾嫾鎺ュ厹搴曪級銆?     # header_rows锛氭嫾鎺ュ厹搴曡Е鍙?鈫?2锛況ow0 鑷韩鍛戒腑瓒冲浣?row1 鍦ㄥ悓鍒楅噸澶?     # row0 鏍囩 鈮? 鏍硷紙鏂 vMerge 鍓〃澶达紝鐪熷疄搴曠 17脳10 浜哄憳姹囨€昏〃鍥炲綊锛?-    # 鈫?2锛涘叾浣?鈫?1銆?+    # 鈫?2锛況ow0 鏁磋鏃犳暟鎹涔夛紙鏃犳暟瀛?閲戦绛夛級涓?row1 涔熷懡涓〃澶村叧閿瘝
++    # 绛惧悕 鈮?锛堝弻灞傝〃澶村悇琛岀殕鍚叧閿瘝锛?.1 琛ュ己锛夆啋 2锛涘叾浣?鈫?1銆?     pairs = _dedup_col_texts(rows[0])
+     if _row_hit_count(pairs) < 2 and len(rows) >= 2:
+         row1 = dict(_dedup_col_texts(rows[1]))
+         pairs = [(idx, (text or "") + (row1.get(idx) or ""))
+                  for idx, text in pairs]
+         item["header_rows"] = 2
+     elif len(rows) >= 2 and _shared_header_cells(
+             pairs, _dedup_col_texts(rows[1])) >= 2:
+         item["header_rows"] = 2
++    elif (len(rows) >= 2 and not _row_has_data_semantics(pairs)
++          and _row_hit_count(_dedup_col_texts(rows[1])) >= 2):
++        item["header_rows"] = 2
+     person_map, perf_map = _match_columns(pairs)
+ 
+     # 瑙勫垯 4锛氬懡涓暟鍒ゅ畾浜哄憳琛?/ 涓氱哗琛ㄣ€?     # 鍏变韩閿綊灞炶瀹氾紙T5锛夛細"搴忓彿"涓ゆ棌鍏辨湁涓斿尮閰嶆椂 person 鏃忎紭鍏堥攣瀹氾紝
+     # 绾笟缁╄〃浼氬洜姝や涪 seq銆傝〃瑙掕壊鍒ゅ畾瀹屾垚鍚庯紝鎶婅触鏂逛粎鍛戒腑 seq 鐨勫叡浜敭
+     # 鍒楄ˉ缁欒儨鏂?columns銆?     if len(person_map) >= 2 and len(person_map) >= len(perf_map):
+         if "seq" not in person_map and set(perf_map) == {"seq"}:
+             person_map = {**person_map, "seq": perf_map["seq"]}
+         item["role"] = "person_roster"
+diff --git a/backend/tests/test_api_bid_draft.py b/backend/tests/test_api_bid_draft.py
+index 62e5d68..92f52d7 100644
+--- a/backend/tests/test_api_bid_draft.py
++++ b/backend/tests/test_api_bid_draft.py
+@@ -270,20 +270,36 @@ def test_put_bindings_header_rows_roundtrip(client, tmp_path):
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "header_rows": 2,
+                     "confirmed": True}],
+         "swap_toc": False})
+     assert r.status_code == 200
+     g = client.get(f"/api/projects/{pid}/bid-draft").json()
+     assert g["tables"][0]["header_rows"] == 2
+ 
+ 
++def test_put_bindings_header_rows_three_accepted(client, tmp_path):
++    """header_rows=3 灞炲悎娉曞煙 1..4锛圴1.2 Task 4 杈圭晫琛ュ厖锛夆啋 200 涓斿洖鏄俱€?""
++    pid = _make_project(client)
++    _upload_tender(client, pid, tmp_path)
++    gen = _generate(client, pid)
++    sug = gen["tables"][0]
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
++        "tables": [{"table_index": sug["table_index"], "role": sug["role"],
++                    "columns": sug["columns"], "header_rows": 3,
++                    "confirmed": True}],
++        "swap_toc": False})
++    assert r.status_code == 200
++    g = client.get(f"/api/projects/{pid}/bid-draft").json()
++    assert g["tables"][0]["header_rows"] == 3
++
++
+ def test_put_bindings_roundtrip(client, tmp_path):
+     pid = _make_project(client)
+     _upload_tender(client, pid, tmp_path)
+     gen = _generate(client, pid)
+     sug = gen["tables"][0]
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "person_scope": "all",
+                     "perf_scope": "all", "label_kind": "", "person": "",
+                     "confirmed": True}],
+diff --git a/backend/tests/test_bid_classifier.py b/backend/tests/test_bid_classifier.py
+index e9877aa..932ea5e 100644
+--- a/backend/tests/test_bid_classifier.py
++++ b/backend/tests/test_bid_classifier.py
+@@ -259,10 +259,81 @@ def test_merged_header_cells(tmp_path):
+     result = classify_tables(_save(doc, tmp_path))
+     item = result[0]
+     assert item["role"] == "person_roster"
+     # 鍚堝苟鍚?搴忓彿/濮撳悕 鍚屽崰缃戞牸鍒?0锛屽叾浣欏垪鎸夌綉鏍间笅鏍囦笉閿欎綅
+     assert item["columns"]["title"] == 2
+     assert item["columns"]["work_years"] == 3
+     assert item["columns"]["certs"] == 4
+     col0_sem = "name" if item["columns"].get("name") == 0 else "seq"
+     assert item["columns"][col0_sem] == 0
+     assert max(item["columns"].values()) < 5
++
++
++# ---------- 鎷熸淳宀椾綅鍒楋紙V1.2 Task 4锛?----------
++
++def test_role_column_keywords_include_bendan():
++    from app.core.bid_table_classifier import PERSON_COL_KEYWORDS
++    assert "鏈」鐩换鑱? in PERSON_COL_KEYWORDS["role"]
++    assert "鏈」鐩亴鍔? in PERSON_COL_KEYWORDS["role"]
++
++
++def test_person_roster_maps_role_column(tmp_path):
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩换鑱?],
++        ["寮犱笁", "纭曞＋", "椤圭洰缁忕悊"],
++    ])
++    item = next(s for s in classify_tables(_save(doc, tmp_path))
++                if s["role"] == "person_roster")
++    assert "role" in item["columns"]
++    assert item["columns"]["role"] == 2
++
++
++def test_role_beats_label_on_bendan_zhiwu(tmp_path):
++    """銆屾湰椤圭洰鑱屽姟銆嶅惈 label 鍏抽敭璇嶃€岃亴鍔°€嶏細闀垮叧閿瘝浼樺厛锛宺ole 鍛戒腑鎶㈠垪锛?+    label 涓嶅緱鎴儭锛圴1.2 7.6 闃插洖褰掞級銆?""
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩亴鍔?],
++        ["寮犱笁", "纭曞＋", "椤圭洰缁忕悊"],
++    ])
++    item = classify_tables(_save(doc, tmp_path))[0]
++    assert item["columns"].get("role") == 2
++    assert item["columns"].get("label") != 2
++
++
++def test_header_rows_two_when_row0_no_data_and_row1_header(tmp_path):
++    """鍙岃琛ㄥご绗笁瑙勫垯锛?.1 琛ュ己锛夛細row0 鍛戒腑琛ㄥご鍏抽敭璇嶄絾鏁磋鏃犳暟鎹涔?+    锛堟棤鏁板瓧/閲戦绛夛級锛屼笖 row1 涔熷懡涓〃澶村叧閿瘝绛惧悕锛堚墺2锛夆啋 header_rows=2銆?""
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "鑱岀О", "鎵т笟璧勬牸"],        # row0锛氫笂灞傝〃澶达紙鏃犳暟瀛楋級
++        ["鑱屽姟", "涓撲笟宸ヤ綔骞撮檺", "璧勬牸璇佷功"],  # row1锛氫笅灞傝〃澶达紙鍚屾牱鍛戒腑鍏抽敭璇嶏級
++        ["寮犱笁", "宸ョ▼甯?, "閫犱环宸ョ▼甯?],     # row2 璧蜂负鏁版嵁
++    ])
++    item = classify_tables(_save(doc, tmp_path))[0]
++    assert item["role"] == "person_roster"
++    assert item["header_rows"] == 2
++
++
++def test_export_role_column_filled(tmp_path):
++    """绔埌绔細浜哄憳琛?role 鍒?鈫?fill_draft 鍐欏叆 person_semantics 鐨?role 鍊笺€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩换鑱?],
++        ["鏃у悕", "鏃у鍘?, "鏃у矖浣?],
++    ])
++    draft = _save(doc, tmp_path)
++    out = str(tmp_path / "out.docx")
++    bindings = {"tables": [{
++        "table_index": 0, "role": "person_roster",
++        "columns": {"name": 0, "education": 1, "role": 2},
++        "person_scope": "all", "confirmed": True}], "swap_toc": False}
++    data = {"persons": [{"name": "寮犱笁", "is_lead": True,
++                         "sem": {"name": "寮犱笁", "education": "纭曞＋",
++                                 "role": "椤圭洰缁忕悊"}}],
++            "contracts": []}
++    report = fill_draft(draft, out, bindings, data)
++    rows = [[c.text for c in r.cells] for r in Document(out).tables[0].rows]
++    assert rows[1][2] == "椤圭洰缁忕悊"
++    assert report["verify"]["ok"] is True
+\ No newline at end of file

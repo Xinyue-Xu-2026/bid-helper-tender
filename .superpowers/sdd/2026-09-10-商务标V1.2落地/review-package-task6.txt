@@ -1,0 +1,336 @@
+﻿diff --git a/backend/app/core/bid_page_setup.py b/backend/app/core/bid_page_setup.py
+index 519fba1..c4ef8c6 100644
+--- a/backend/app/core/bid_page_setup.py
++++ b/backend/app/core/bid_page_setup.py
+@@ -94,20 +94,100 @@ def _is_toc_el(p_el) -> bool:
+     if pPr is not None:
+         st = pPr.find(_wq(W, "pStyle"))
+         if st is not None and (st.get(_wq(W, "val")) or "").lower().startswith("toc"):
+             return True
+     for instr in p_el.iter(_wq(W, "instrText")):
+         if instr.text and "TOC" in instr.text:
+             return True
+     return False
+ 
+ 
++_TOC_ENTRY_RE = re.compile(r".+?[\.\s路鈥{2,}\s*\d{1,4}\s*$")
++
++
++def _el_text(el) -> str:
++    return "".join(t.text or "" for t in el.iter(_wq(W, "t")))
++
++
++def is_static_toc_group(children) -> "int | None":
++    """闈欐€佹枃鏈洰褰曡瘑鍒紙V1.2 7.5锛夛細銆岀洰褰曘€嶆爣棰樻 + 鍏跺悗杩炵画 鈮? 涓?+    銆岀珷鑺傚悕鈥﹂〉鐮併€嶅舰鎬佹锛堝弻閲嶇壒寰佺己涓€涓嶅彲锛岄槻姝ｆ枃"鐩綍"瀛楁牱璇垽锛夛紝
++    杩斿洖鐩綍缁勬湯鍏冪礌涓嬫爣锛涘惁鍒?None銆?""
++    for i, el in enumerate(children):
++        if el.tag != _wq(W, "p"):
++            continue
++        title = _el_text(el).strip()
++        if not title.startswith("鐩綍"):
++            continue
++        end, count, j = i, 0, i + 1
++        while (j < len(children) and children[j].tag == _wq(W, "p")
++               and _TOC_ENTRY_RE.match(_el_text(children[j]).strip())):
++            end, count, j = j, count + 1, j + 1
++        if count >= 2:
++            return end
++    return None
++
++
++def _para_jc(p_el) -> str:
++    pPr = p_el.find(_wq(W, "pPr"))
++    if pPr is None:
++        return ""
++    jc = pPr.find(_wq(W, "jc"))
++    return (jc.get(_wq(W, "val")) or "") if jc is not None else ""
++
++
++def check_footer_page_centered(docx_path: str) -> list:
++    """鏂█浜х墿鍚?footer part 涓?PAGE 鍩熸墍鍦ㄦ钀藉眳涓紙jc=center锛夈€?+    娈佃惤缂?jc锛堟湭鏄惧紡璁剧疆锛夆啋 瀹夊叏琛?center 鍚庡妫€锛堝箓绛夛級锛涙樉寮忛潪灞呬腑
++    锛堟湁鎰忚缃級鈫?涓嶉潤榛樻敼锛岃鍛婅銆傝繑鍥炲憡璀﹀垪琛紙绌?閫氳繃锛夈€?""
++    warnings = []
++    path = Path(docx_path)
++    with zipfile.ZipFile(str(path)) as z:
++        entries = {n: z.read(n) for n in z.namelist()}
++    footer_names = sorted(n for n in entries
++                          if re.fullmatch(r"word/footer[^/]*\.xml", n))
++    changed = False
++    for name in footer_names:
++        root = etree.fromstring(entries[name])
++        for idx, p in enumerate(root.iter(_wq(W, "p"))):
++            if not any("PAGE" in (instr.text or "")
++                       for instr in p.iter(_wq(W, "instrText"))):
++                continue
++            jc = _para_jc(p)
++            if jc == "center":
++                continue
++            if jc:
++                # 鏄惧紡闈炲眳涓細鏈夋剰璁剧疆锛屼笉闈欓粯鏀癸紝鍛婅
++                warnings.append(
++                    f"{name} 娈佃惤[{idx}] PAGE 鍩熸钀芥湭灞呬腑锛坖c={jc}锛?)
++                continue
++            # 缂?jc锛氳ˉ center锛堝啓鍥炰骇鐗╋級鍚庡妫€
++            pPr = p.find(_wq(W, "pPr"))
++            if pPr is None:
++                pPr = etree.Element(_wq(W, "pPr"))
++                p.insert(0, pPr)
++            jc_el = etree.SubElement(pPr, _wq(W, "jc"))
++            jc_el.set(_wq(W, "val"), "center")
++            changed = True
++            if _para_jc(p) != "center":
++                warnings.append(f"{name} 娈佃惤[{idx}] PAGE 鍩熸钀芥湭灞呬腑")
++        entries[name] = etree.tostring(root, xml_declaration=True,
++                                       encoding="UTF-8", standalone=True)
++    if changed:
++        tmp = path.with_suffix(".jctmp")
++        with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as z:
++            for n, data in entries.items():
++                z.writestr(n, data)
++        tmp.replace(path)
++    return warnings
++
++
+ def _clean_sectpr(sp) -> None:
+     """鍘绘帀 sectPr 鐨勯〉鐪?椤佃剼寮曠敤涓庨椤典笉鍚?椤电爜璁剧疆锛堢粺涓€涓哄弬鑰冩牱寮忥級銆?""
+     for tag in ("headerReference", "footerReference", "titlePg", "pgNumType"):
+         for el in sp.findall(_wq(W, tag)):
+             sp.remove(el)
+ 
+ 
+ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
+     """缁?sectPr 鎸傚弬鑰冮〉鐪?椤佃剼寮曠敤锛堝紩鐢ㄩ』涓?sectPr 鏈€鍓嶅瓙鍏冪礌锛夈€?""
+     _clean_sectpr(sp)
+@@ -132,22 +212,26 @@ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
+             "printerSettings", "sectPrChange")}
+         anchor = next((c for c in sp if c.tag in after_tags), None)
+         if anchor is not None:
+             anchor.addprevious(pg)
+         else:
+             sp.append(pg)
+ 
+ 
+ def apply_page_setup(docx_path: str) -> dict:
+     """瀵瑰鍑轰骇鐗╁仛椤电湁/椤佃剼绉绘涓庡垎鑺傞〉鐮侊紙zip 鍚庣疆澶勭悊锛夈€?-    杩斿洖 {"header_applied": bool, "page_numbers": bool, "degraded": str}銆?""
+-    result = {"header_applied": False, "page_numbers": False, "degraded": ""}
++    杩斿洖 {"header_applied": bool, "page_numbers": bool, "degraded": str,
++          "sections": int, "section_page_numbers": [bool], "warnings": [str]}銆?+    sections = document.xml 涓?sectPr 鏁帮紱section_page_numbers 閫愯妭鏍囪
++    銆屾寕椤佃剼寮曠敤涓旈〉鐮侀噸璧枫€嶏紱warnings 鍚〉鑴?PAGE 鍩熷眳涓柇瑷€缁撴灉銆?""
++    result = {"header_applied": False, "page_numbers": False, "degraded": "",
++              "sections": 1, "section_page_numbers": [], "warnings": []}
+     ref = Path(config.BID_HEADER_SOURCE_PATH)
+     if not ref.exists():
+         result["degraded"] = "椤电湁鍙傝€冩枃浠剁己澶憋紝宸茶烦杩囬〉鐪?椤电爜璁剧疆"
+         return result
+     try:
+         parts = _load_reference(ref)
+     except Exception:
+         parts = None
+     if not parts or not parts["header"]:
+         result["degraded"] = "椤电湁鍙傝€冩枃浠舵棤鏁堬紝宸茶烦杩囬〉鐪?椤电爜璁剧疆"
+@@ -159,34 +243,40 @@ def apply_page_setup(docx_path: str) -> dict:
+ 
+     # ---- document.xml锛氬垎鑺?+ 鎸傚紩鐢?----
+     doc_xml = etree.fromstring(entries["word/document.xml"])
+     body = doc_xml.find(_wq(W, "body"))
+     children = list(body)
+     body_sectPr = body.find(_wq(W, "sectPr"))
+     if body_sectPr is None:
+         body_sectPr = etree.SubElement(body, _wq(W, "sectPr"))
+         children = list(body)
+ 
+-    # 棣栦釜杩炵画 toc 娈电粍锛堝皝闈?鐩綍鍖猴級
+-    toc_idx = [i for i, el in enumerate(children)
+-               if el.tag == _wq(W, "p") and _is_toc_el(el)]
++    # 棣栦釜杩炵画鐩綍娈电粍锛堝皝闈?鐩綍鍖猴級锛氫紭鍏堥潤鎬佹枃鏈洰褰曪紙銆岀洰褰曘€嶆爣棰?
++    # 椤电爜褰㈡€佹缁勶紝V1.2 7.5锛夛紝鏃犲垯鍥為€€ toc 鏍峰紡/TOC 鍩熺粍锛堟棫琛屼负锛?     split_after = None
+-    if toc_idx:
+-        group_end = toc_idx[0]
+-        for i in toc_idx[1:]:
+-            if i == group_end + 1:
+-                group_end = i
+-            else:
+-                break
+-        # 缁勫悗杩樻湁姝ｆ枃鍐呭锛坆ody sectPr 涔嬪鐨勫厓绱狅級鎵嶉渶瑕佹媶鑺?-        if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
+-            split_after = group_end
++    static_end = is_static_toc_group(children)
++    if static_end is not None and any(
++            el.tag != _wq(W, "sectPr") for el in children[static_end + 1:]):
++        split_after = static_end
++    if split_after is None:
++        toc_idx = [i for i, el in enumerate(children)
++                   if el.tag == _wq(W, "p") and _is_toc_el(el)]
++        if toc_idx:
++            group_end = toc_idx[0]
++            for i in toc_idx[1:]:
++                if i == group_end + 1:
++                    group_end = i
++                else:
++                    break
++            # 缁勫悗杩樻湁姝ｆ枃鍐呭锛坆ody sectPr 涔嬪鐨勫厓绱狅級鎵嶉渶瑕佹媶鑺?+            if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
++                split_after = group_end
+ 
+     # 鏂?rId
+     rels_root = etree.fromstring(entries["word/_rels/document.xml.rels"])
+     existing_ids = {rel.get("Id") for rel in rels_root}
+ 
+     def _new_rid():
+         n = 9000
+         while f"rId{n}" in existing_ids:
+             n += 1
+         rid = f"rId{n}"
+@@ -280,13 +370,22 @@ def apply_page_setup(docx_path: str) -> dict:
+         rels_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+     entries["[Content_Types].xml"] = etree.tostring(
+         ct_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+ 
+     tmp = path.with_suffix(".p2tmp")
+     with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as z:
+         for name, data in entries.items():
+             z.writestr(name, data)
+     tmp.replace(path)
+ 
++    # 鍒嗚妭鎶ュ憡 + 椤佃剼 PAGE 鍩熷眳涓柇瑷€锛堢己 jc 鑷姩琛ワ紝鏄惧紡闈炲眳涓憡璀︼級
++    sects = [el for el in body.iter() if el.tag == _wq(W, "sectPr")]
++    result["sections"] = len(sects)
++    result["section_page_numbers"] = [
++        bool(sp.findall(_wq(W, "footerReference")))
++        and sp.find(_wq(W, "pgNumType")) is not None
++        for sp in sects]
++    result["warnings"] = check_footer_page_centered(str(path))
++
+     result["header_applied"] = True
+     result["page_numbers"] = True
+     return result
+diff --git a/backend/tests/test_bid_page_setup.py b/backend/tests/test_bid_page_setup.py
+index 5be7b33..1b1f4d2 100644
+--- a/backend/tests/test_bid_page_setup.py
++++ b/backend/tests/test_bid_page_setup.py
+@@ -170,10 +170,132 @@ def test_pg_num_type_inserted_before_later_elements():
+     etree.SubElement(sp, _wq("docGrid"))
+     _attach_refs(sp, "rId9001", "rId9002", restart_page=True)
+     tags = [etree.QName(c).localname for c in sp]
+     pg_pos = tags.index("pgNumType")
+     # pgNumType 鍏堜簬鎵€鏈夊悗缃厓绱狅紙vAlign/docGrid锛夛紝涓斿湪寮曠敤/pgSz/pgMar 涔嬪悗
+     assert pg_pos < tags.index("vAlign")
+     assert pg_pos < tags.index("docGrid")
+     assert pg_pos > tags.index("pgMar")
+     assert tags.index("headerReference") == 0
+     assert tags.index("footerReference") == 1
++
++
++# ---------- 6. 闈欐€佹枃鏈洰褰曞垎鑺?+ 椤电爜灞呬腑鏂█ + 鍒嗚妭鎶ュ憡锛圴1.2 7.5锛?----------
++
++from app.core.bid_page_setup import (
++    apply_page_setup, check_footer_page_centered, is_static_toc_group)
++
++
++def _page_field_footer_doc(path, alignment=None):
++    """鏋勯€犻〉鑴氬惈 PAGE 鍩熸钀界殑 docx锛沘lignment 闈炵┖鏃舵樉寮忚缃榻愩€?""
++    doc = Document()
++    section = doc.sections[0]
++    section.footer.is_linked_to_previous = False
++    fp = section.footer.paragraphs[0]
++    if alignment is not None:
++        fp.alignment = alignment
++    run = fp.add_run()
++    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
++    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve")
++    instr.text = "PAGE \\* MERGEFORMAT"
++    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
++    run._r.append(begin); run._r.append(instr); run._r.append(end)
++    doc.save(str(path))
++    return path
++
++
++def test_is_static_toc_group_detected():
++    body = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>鎶曟爣鏂囦欢灏侀潰</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>鐩綍</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗竴绔?姒傝堪 ........ 1</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗簩绔?鏂规 ........ 5</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>姝ｆ枃寮€濮?/w:t></w:r></w:p></w:body>')
++    children = list(body)
++    idx = is_static_toc_group(children)
++    assert idx is not None
++    assert idx == 3  # 鐩綍缁勬湯鍏冪礌 = 绗簩涓〉鐮佹
++
++
++def test_is_static_toc_group_requires_both_signals():
++    """鍙岄噸鐗瑰緛缂轰竴涓嶅彲锛氫粎銆岀洰褰曘€嶆爣棰樻棤椤电爜娈电粍 鈫?None锛?+    浠呴〉鐮佸舰鎬佹鏃犮€岀洰褰曘€嶆爣棰?鈫?None锛堥槻姝ｆ枃璇垽锛夈€?""
++    only_title = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>鐩綍</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>姝ｆ枃娈佃惤</w:t></w:r></w:p></w:body>')
++    assert is_static_toc_group(list(only_title)) is None
++    only_entries = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>绗竴绔?姒傝堪 ........ 1</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗簩绔?鏂规 ........ 5</w:t></w:r></w:p></w:body>')
++    assert is_static_toc_group(list(only_entries)) is None
++
++
++def test_footer_page_centered_warns_when_left(tmp_path):
++    """椤佃剼 PAGE 鍩熸钀芥樉寮忛潪灞呬腑锛坖c=left锛屾湁鎰忚缃級鈫?闈炵┖鍛婅鍚?part 鍚嶃€?""
++    from docx.enum.text import WD_ALIGN_PARAGRAPH
++    p = _page_field_footer_doc(tmp_path / "x.docx",
++                               alignment=WD_ALIGN_PARAGRAPH.LEFT)
++    warnings = check_footer_page_centered(str(p))
++    assert warnings and any("footer" in w for w in warnings)
++
++
++def test_footer_page_centered_autofix_missing_jc(tmp_path):
++    """椤佃剼 PAGE 鍩熸钀芥棤 jc锛堢己鐪侊級鈫?瀹夊叏琛?center 鍚庡妫€閫氳繃锛氭棤鍛婅锛?+    涓斾骇鐗╄淇锛堝箓绛夛細浜屾璋冪敤浠嶆棤鍛婅锛夈€?""
++    p = _page_field_footer_doc(tmp_path / "x.docx")
++    assert check_footer_page_centered(str(p)) == []
++    assert check_footer_page_centered(str(p)) == []
++    with zipfile.ZipFile(str(p)) as z:
++        footers = [n for n in z.namelist()
++                   if n.startswith("word/footer") and n.endswith(".xml")]
++        assert footers
++        assert 'w:val="center"' in z.read(footers[0]).decode("utf-8")
++
++
++def test_footer_page_centered_ok_when_center(tmp_path):
++    from docx.enum.text import WD_ALIGN_PARAGRAPH
++    p = _page_field_footer_doc(tmp_path / "x.docx",
++                               alignment=WD_ALIGN_PARAGRAPH.CENTER)
++    assert check_footer_page_centered(str(p)) == []
++
++
++def test_apply_page_setup_reports_sections(tmp_path, reference):
++    """闈欐€佹枃鏈洰褰曪紙鏃?toc 鏍峰紡娈碉級涔熷垎鑺傦細灏侀潰+鐩綍涓鸿妭1锛堟棤寮曠敤鏃犻噸璧凤級锛?+    姝ｆ枃鑺傛寕鍙傝€冮〉鐪夐〉鑴氫笖椤电爜浠?1 璧凤紱result 鎶ュ憡 sections /
++    section_page_numbers / warnings銆?""
++    doc = Document()
++    doc.add_paragraph("鎶曟爣鏂囦欢灏侀潰")
++    doc.add_paragraph("鐩綍")
++    doc.add_paragraph("绗竴绔?姒傝堪 ........ 1")
++    doc.add_paragraph("绗簩绔?鏂规 ........ 5")
++    doc.add_paragraph("姝ｆ枃寮€濮?)
++    p = tmp_path / "out.docx"
++    doc.save(str(p))
++    result = apply_page_setup(str(p))
++    assert result["header_applied"] is True
++    assert result["sections"] >= 2
++    assert result["section_page_numbers"][0] is False   # 灏侀潰+鐩綍鑺?+    assert result["section_page_numbers"][-1] is True   # 姝ｆ枃鑺?+    assert result["warnings"] == []
++    with zipfile.ZipFile(str(p)) as z:
++        in_p, body_sp = _sectprs(z)
++    assert len(in_p) == 1
++    assert _refs(in_p[0], "headerReference") == []
++    pg = body_sp.find(_wq("pgNumType"))
++    assert pg is not None and pg.get(_wq("start")) == "1"
++
++
++def test_apply_page_setup_degraded_still_reports_keys(tmp_path, monkeypatch):
++    """鍙傝€冪己澶遍檷绾ц矾寰勶細鏂板鎶ュ憡閿粛鍦紙sections/section_page_numbers/
++    warnings锛夛紝琛屼负涓嶅彉涓嶆姤閿欍€?""
++    monkeypatch.setattr(config, "BID_HEADER_SOURCE_PATH",
++                        tmp_path / "涓嶅瓨鍦?docx")
++    p = tmp_path / "out.docx"
++    Document().save(str(p))
++    result = apply_page_setup(str(p))
++    assert result["degraded"]
++    assert result["sections"] >= 1
++    assert isinstance(result["section_page_numbers"], list)
++    assert result["warnings"] == []

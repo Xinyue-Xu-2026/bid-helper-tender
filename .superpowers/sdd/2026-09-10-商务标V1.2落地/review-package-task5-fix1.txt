@@ -1,0 +1,161 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 2d75167..8d82400 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -73,29 +73,35 @@ def _fill_table_semantic(table, columns: dict, sem_rows: list,
+             tc = cell._tc
+             if any(tc is t for t in seen_tcs):
+                 continue
+             seen_tcs.append(tc)
+             sem = col_to_sem.get(j)
+             _set_cell_text(cell, sem_row.get(sem, "") if sem else "")
+         written += 1
+     return written
+ 
+ 
+-def _clone_table_after(table):
+-    """XML 绾?deepcopy 鏁磋〃骞舵彃鍒拌琛ㄤ箣鍚庯紙鍚庨殢绌烘钀藉垎闅旓級锛屽畬鏁翠繚鐣?-    琛屽垪鏁?鍚堝苟鍗曞厓鏍?琛岄珮/鏍峰紡锛堜竴浜轰竴琛ㄥ厠闅嗙敤锛岀粷涓嶉噸寤虹粨鏋勶級銆?""
+-    tbl = table._tbl
++def _clone_table_after(anchor_table):
++    """鍦?anchor_table 涔嬪悗鎻掑叆涓€涓┖娈?+ 鍏嬮殕琛紝杩斿洖鍏嬮殕 Table銆?+    anchor_table 涓哄綋鍓嶉摼灏撅紙棣栨=鏍疯〃锛屽悗缁?涓婁竴浠藉厠闅嗭級锛屼繚璇佺粨鏋?+    搴忓垪 T0, sep, C1, sep, C2, ...鈥斺€斾换鎰忎袱寮犵浉閭?w:tbl 涔嬮棿閮芥湁绌烘
++    鍒嗛殧锛堢浉閭?w:tbl 浼氳 Word 鍚堝苟娓叉煋涓轰竴寮犺〃锛夈€傚厠闅嗕负 XML 绾?+    deepcopy锛屽畬鏁翠繚鐣欒鍒楁暟/鍚堝苟鍗曞厓鏍?琛岄珮/鏍峰紡銆?""
++    tbl = anchor_table._tbl
+     new = deepcopy(tbl)
+     sep = tbl.makeelement(qn("w:p"), {})
+     tbl.addnext(sep)
+-    tbl.addnext(new)
+-    return Table(new, table._parent)
++    sep.addnext(new)
++    nxt = new.getnext()
++    if nxt is not None and nxt.tag == qn("w:tbl"):
++        new.addnext(new.makeelement(qn("w:p"), {}))
++    return Table(new, anchor_table._parent)
+ 
+ 
+ def _fill_resume_table(table, label_to_sem: dict, sem: dict,
+                        perfs_text: str) -> int:
+     """绠€鍘嗛敭鍊艰〃濉厖锛氶€愯閫愭牸锛岃鑼冨寲鏍兼枃鏈紙鍘婚灏剧┖鐧?+ 鍘诲熬閮?     "锛?鎴?:"锛夊懡涓?label_to_sem 鈫?鍐欏叾鍙充晶棣栦釜涓嶅悓 _tc 鐨勬牸瀛愶紙鏃犲彸鏍艰烦杩囷級锛?     璇箟閿负 lead_perfs 鏃跺啓 perfs_text锛堥殢浜轰紶鍏ワ級銆傝繑鍥炲啓鍏ユ牸鏁般€?""
+     written = 0
+     for row in table.rows:
+         cells = row.cells
+@@ -447,26 +453,29 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+                 written = _fill_resume_table(
+                     table, binding.get("columns") or {},
+                     lead.get("sem") or {},
+                     str(lead.get("perfs_text")
+                         or data.get("lead_perfs_text") or ""))
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": written})
+         elif role == "resume_each":
+             if binding.get("mode") == "per_person":
+                 # 涓€浜轰竴琛紙V1.2 7.4锛夛細绗?1 浠藉～鍘熸牱琛紝鍏朵綑鍏堝厠闅嗗啀濉紱
+-                # 鍏嬮殕鍏ㄩ儴鍩轰簬濉厖鍓嶇殑鏍疯〃锛岄摼寮?addnext 淇濇寔浜哄憳椤哄簭
++                # 鍏嬮殕鍏ㄩ儴鍩轰簬濉厖鍓嶇殑鏍疯〃锛岄€愮骇浠ラ摼灏句负 anchor锛堜换鎰忕浉閭?+                # 涓よ〃涔嬮棿蹇呮湁绌烘鍒嗛殧锛夛紝浜哄憳椤哄簭涓?picked 涓€鑷?                 picked = _scope_persons(persons,
+                                         binding.get("person_scope") or "all")
+                 targets = [table]
++                anchor = table
+                 for _ in range(max(0, len(picked) - 1)):
+-                    targets.append(_clone_table_after(targets[-1]))
++                    anchor = _clone_table_after(anchor)
++                    targets.append(anchor)
+                 total = 0
+                 for t, p in zip(targets, picked):
+                     perfs = str(p.get("perfs_text") or (
+                         data.get("lead_perfs_text")
+                         if p.get("is_lead") else "") or "")
+                     total += _fill_resume_table(
+                         t, binding.get("columns") or {},
+                         p.get("sem") or {}, perfs)
+                 if len(picked) > 1:
+                     table_insertions[idx] = len(picked) - 1
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index ba675b6..1081494 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -131,21 +131,23 @@ def verify_draft_fill(draft_path: str, out_path: str,
+         checked_tables += 1
+         # 搴曠渚у鐢ㄤ笌瀵煎嚭鐩稿悓鐨勬浛鎹㈣鍒欙紙_replace_stale_text 浼氭敼鍐?         # 鏈粦瀹氳〃鍗曞厓鏍煎唴鐨勬畫鐣欑紪鍙?鍚嶇О/鏃ユ湡锛夛紝浜х墿渚у師鏍锋瘮瀵?         if _table_texts(d_tab, subs) != _table_texts(o_tab):
+             issues.append(f"琛ㄦ牸[{i}] 鏈粦瀹氫絾鍐呭琚敼鍔?)
+ 
+     # 娈佃惤锛歵oc 鏍峰紡娈典袱渚ф亽璺宠繃锛坃replace_stale_text 浠庝笉瑙︾ toc 娈碉紱
+     # swapped_toc 鏃朵骇鐗?toc 娈垫暣缁勬崲涓?TOC 鍩燂紝鍚屾牱琚烦杩囪鐩栵級锛?     # 鍒嗚妭绗︽钀斤紙P2 鎷嗚妭鎻掑叆锛夊悓鏍疯烦杩囷紱绌烘锛堟棤鏂囨湰锛変笉鎼哄甫鍐呭銆?     # 涓や晶鎭掕烦杩団€斺€斿厠闅嗚〃鍒嗛殧绌烘锛坮esume_each 涓€浜轰竴琛ㄦ彃鍏ワ級绛夌粨鏋勬€?-    # 鍙樺寲涓嶈涓哄唴瀹规敼鍔紝bound_paragraph_indices 鍧愭爣绯诲悓涓恒€岄潪绌烘銆?+    # 鍙樺寲涓嶈涓哄唴瀹规敼鍔紱娉ㄦ剰浠呭惈鍥剧墖锛堟棤鏂囨湰锛夌殑娈佃惤鍚屽睘绌烘锛?+    # 涓嶅弬涓庢钀芥瘮瀵癸紙鍥剧墖鏀瑰姩鐢辫〃鏍?鏂囨湰妗嗙淮搴﹁鐩栦笉鍒帮紝灞炲凡鐭ヨ眮鍏嶏級锛?+    # bound_paragraph_indices 鍧愭爣绯诲悓涓恒€岄潪绌烘銆?     d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
+                and not _is_section_break_para(p) and _para_text(p)]
+     o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
+                and not _is_section_break_para(p) and _para_text(p)]
+     if len(d_paras) != len(o_paras):
+         issues.append(
+             f"娈佃惤鏁伴噺涓嶄竴鑷达細搴曠 {len(d_paras)} 娈碉紝浜х墿 {len(o_paras)} 娈?)
+     for i, (d_para, o_para) in enumerate(zip(d_paras, o_paras)):
+         if i in bound_paras:
+             continue
+diff --git a/backend/tests/test_bid_resume_clone.py b/backend/tests/test_bid_resume_clone.py
+index 5300e27..056ee61 100644
+--- a/backend/tests/test_bid_resume_clone.py
++++ b/backend/tests/test_bid_resume_clone.py
+@@ -108,20 +108,66 @@ def test_classifier_resume_each_vs_lead_resume(tmp_path):
+     assert items2[0]["role"] == "resume_each"
+     # 鏃犳爣璁伴敭鍊艰〃 鈫?lead_resume锛堟棫琛屼负涓嶅洖褰掞級
+     doc3 = Document()
+     t3 = doc3.add_table(4, 2)
+     for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "瀛﹀巻"]):
+         t3.rows[r].cells[0].text = label
+     path3 = tmp_path / "d3.docx"; doc3.save(path3)
+     assert classify_tables(str(path3))[0]["role"] == "lead_resume"
+ 
+ 
++def test_no_adjacent_tables_after_clone(tmp_path):
++    """淇杞洖褰掞細鍏嬮殕 3 浜哄悗浜х墿 body 涓换鎰忕浉閭讳袱鍏勫紵涓嶅緱閮芥槸 w:tbl
++    锛堢浉閭?w:tbl 浼氳 Word 鍚堝苟娓叉煋涓轰竴寮犺〃锛夈€?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    persons = _persons() + [
++        {"name": "鐜嬩簲", "is_lead": False, "role": "缁勫憳",
++         "sem": {"name": "鐜嬩簲"}, "perfs_text": "", "fields": {}}]
++    data = {"persons": persons, "contracts": [], "lead_perfs_text": ""}
++    fill_draft(str(src), str(dst), _bindings(), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 3
++    tags = [ch.tag for ch in out.element.body.iterchildren()]
++    for a, b in zip(tags, tags[1:]):
++        assert not (a == qn("w:tbl") and b == qn("w:tbl")), \
++            "鐩搁偦 w:tbl 涔嬮棿蹇呴』鏈?w:p 鍒嗛殧"
++
++
++def test_clone_shift_mapping_sentinel_table(tmp_path):
++    """浣嶇Щ鏄犲皠鍥炲綊锛氬簳绋?[鏍疯〃, 鍝ㄥ叺琛╙锛屽厠闅?2 浜哄悗浜х墿鍝ㄥ叺琛ㄥ唴瀹逛繚鐣欙紱
++    绡℃敼鍝ㄥ叺琛ㄥ崟鍏冩牸 鈫?verify.ok=False 涓?issue 鎸囧悜搴曠涓嬫爣琛ㄦ牸[1]
++    锛堝厠闅嗙偣涔嬪悗鐨勫簳绋胯〃缁?draft_to_out 姝ｇ‘绌块€忥級銆?""
++    from app.core.bid_verify import verify_draft_fill
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    _sample_resume_table(doc)
++    sentinel = doc.add_table(1, 1)
++    sentinel.cell(0, 0).text = "鍝ㄥ叺鍐呭"
++    doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 3                    # 鏍疯〃 + 鍏嬮殕 + 鍝ㄥ叺
++    assert out.tables[2].cell(0, 0).text == "鍝ㄥ叺鍐呭"
++    assert report["verify"]["ok"] is True
++    # 绡℃敼鍝ㄥ叺琛?鈫?verify 蹇呴』閫綇骞舵寚鍚戝簳绋夸笅鏍?1
++    doc2 = Document(str(dst))
++    doc2.tables[2].cell(0, 0).text = "琚鏀圭殑鍝ㄥ叺"
++    doc2.save(str(dst))
++    result = verify_draft_fill(str(src), str(dst), {0}, {},
++                               table_insertions={0: 1})
++    assert result["ok"] is False
++    assert any("琛ㄦ牸[1]" in issue for issue in result["issues"])
++
++
+ def test_fill_strips_vmerge_from_donor(tmp_path):
+     """7.3 鍥炲綊锛歞onor 鏁版嵁琛屽惈 vMerge 鍏冪礌鏃讹紝鍏嬮殕鍐欏嚭鐨勬暟鎹涓嶅緱鎼哄甫
+     vMerge锛堝惁鍒欎細寤剁画/寮€鍚旱鍚戝悎骞跺尯锛岀牬鍧忕粨鏋勶級銆?""
+     src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
+     doc = Document()
+     t = doc.add_table(3, 2)
+     t.cell(0, 0).text = "濮撳悕"; t.cell(0, 1).text = "鑱岀О"
+     t.cell(1, 0).text = "鏃у悕"; t.cell(1, 1).text = "鏃ц亴绉?
+     t.cell(2, 0).text = "鏃у悕2"; t.cell(2, 1).text = "鏃ц亴绉?"
+     tc_pr = t.rows[1].cells[0]._tc.get_or_add_tcPr()

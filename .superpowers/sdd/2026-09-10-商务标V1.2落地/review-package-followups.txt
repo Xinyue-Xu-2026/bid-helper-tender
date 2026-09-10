@@ -1,0 +1,264 @@
+﻿diff --git a/backend/app/core/bid_table_classifier.py b/backend/app/core/bid_table_classifier.py
+index 3f16a95..96bdb75 100644
+--- a/backend/app/core/bid_table_classifier.py
++++ b/backend/app/core/bid_table_classifier.py
+@@ -317,20 +317,23 @@ def _classify_table(table, table_index: int, heading: str,
+     ncols = len(table.columns)
+     if (2 <= ncols <= 5) or ncols >= 10:
+         hits, columns = _match_resume(table)
+         if len(hits) >= 3:
+             col0_text = "".join(
+                 _norm(p[0][1]) for p in
+                 (_dedup_col_texts(r) for r in table.rows) if p)
+             if any(m in col0_text for m in RESUME_EACH_MARKERS):
+                 item["role"] = "resume_each"
+                 item["columns"] = columns
++                # 涓€浜轰竴琛ㄩ粯璁ゆ暣琛ㄥ厠闅嗭紙V1.2 7.4锛氶€?N 浜?鈫?N 寮犵粨鏋勫師鏍疯〃锛?+                # 鐢ㄦ埛浠嶅彲鍦ㄧ‘璁ょ粦瀹氭椂鏀瑰洖 ""锛?+                item["mode"] = "per_person"
+                 item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+                 return item
+             if ncols <= 3 or ncols >= 10:
+                 item["role"] = "lead_resume"
+                 item["columns"] = columns
+                 item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+                 return item
+ 
+     # 瑙勫垯 6锛氭嬁涓嶅噯涓€寰?ignore
+     return item
+diff --git a/backend/tests/test_bid_resume_clone.py b/backend/tests/test_bid_resume_clone.py
+index 056ee61..6c273c1 100644
+--- a/backend/tests/test_bid_resume_clone.py
++++ b/backend/tests/test_bid_resume_clone.py
+@@ -99,27 +99,30 @@ def test_classifier_resume_each_vs_lead_resume(tmp_path):
+     """鍒嗙被鍣細閿€兼牱琛ㄥ惈銆屼富瑕佸伐浣滅粡鍘嗐€嶇瓑涓€浜轰竴琛ㄦ爣璁?鈫?resume_each锛?     涓嶅惈鏍囪鐨勬棫鏍疯〃浠?鈫?lead_resume锛堝悜鍚庡吋瀹癸級銆?""
+     from app.core.bid_table_classifier import classify_tables
+     doc2 = Document()
+     t = doc2.add_table(4, 2)
+     for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "涓昏宸ヤ綔缁忓巻"]):
+         t.rows[r].cells[0].text = label
+     path2 = tmp_path / "d2.docx"; doc2.save(path2)
+     items2 = classify_tables(str(path2))
+     assert items2[0]["role"] == "resume_each"
+-    # 鏃犳爣璁伴敭鍊艰〃 鈫?lead_resume锛堟棫琛屼负涓嶅洖褰掞級
++    assert items2[0]["mode"] == "per_person"  # 涓€浜轰竴琛ㄩ粯璁ゆ暣琛ㄥ厠闅嗭紙鍙敼鍥烇級
++    # 鏃犳爣璁伴敭鍊艰〃 鈫?lead_resume锛堟棫琛屼负涓嶅洖褰掞紝mode 淇濇寔榛樿绌猴級
+     doc3 = Document()
+     t3 = doc3.add_table(4, 2)
+     for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "瀛﹀巻"]):
+         t3.rows[r].cells[0].text = label
+     path3 = tmp_path / "d3.docx"; doc3.save(path3)
+-    assert classify_tables(str(path3))[0]["role"] == "lead_resume"
++    item3 = classify_tables(str(path3))[0]
++    assert item3["role"] == "lead_resume"
++    assert item3["mode"] == ""
+ 
+ 
+ def test_no_adjacent_tables_after_clone(tmp_path):
+     """淇杞洖褰掞細鍏嬮殕 3 浜哄悗浜х墿 body 涓换鎰忕浉閭讳袱鍏勫紵涓嶅緱閮芥槸 w:tbl
+     锛堢浉閭?w:tbl 浼氳 Word 鍚堝苟娓叉煋涓轰竴寮犺〃锛夈€?""
+     src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
+     doc = Document(); _sample_resume_table(doc); doc.save(src)
+     persons = _persons() + [
+         {"name": "鐜嬩簲", "is_lead": False, "role": "缁勫憳",
+          "sem": {"name": "鐜嬩簲"}, "perfs_text": "", "fields": {}}]
+diff --git a/frontend/src/components/BidPanel.vue b/frontend/src/components/BidPanel.vue
+index 0345c22..46a36d0 100644
+--- a/frontend/src/components/BidPanel.vue
++++ b/frontend/src/components/BidPanel.vue
+@@ -634,21 +634,21 @@ async function onSaveBindings() {
+   try {
+     await saveBidDraftBindings(props.projectId, {
+       tables: bindingRows.value.map(r => ({
+         table_index: r.table_index,
+         role: r.role,
+         columns: r.columns,
+         person_scope: r.person_scope,
+         perf_scope: r.perf_scope,
+         label_kind: r.label_kind,
+         person: r.person,
+-        header_rows: Number(r.header_rows) >= 1 ? Number(r.header_rows) : 1,
++        header_rows: Number(r.header_rows) >= 1 ? Math.min(4, Number(r.header_rows)) : 1,
+         mode: r.role === 'resume_each' && r.mode === 'per_person' ? 'per_person' : '',
+         confirmed: true,
+       })),
+       swap_toc: swapToc.value,
+     })
+     ElMessage.success('缁戝畾宸蹭繚瀛橈紝瀵煎嚭鏃跺皢鎸夌‘璁ょ粨鏋滃～鍏?)
+     draftDialogVisible.value = false
+     loadDraft()
+   } catch { /* 鎷︽埅鍣ㄥ凡寮归敊 */ } finally {
+     bindingsSaving.value = false
+@@ -1036,26 +1036,25 @@ onMounted(() => { load(); loadDraft() })
+             <div style="font-size: 12px; color: #e6a23c; margin-top: 2px">
+               浠ヤ笂鍗犱綅绗︽湭鍖归厤鍒板～鍐欏唴瀹癸紝宸蹭繚鐣欏師鏍凤紝璇峰湪瀵煎嚭鏂囦欢涓汉宸ユ牳瀵广€?             </div>
+           </template>
+         </template>
+ 
+         <template v-if="(fillReport.images || []).length">
+           <h4 style="margin: 12px 0 4px">鍥剧墖</h4>
+           <div v-for="(im, i) in fillReport.images" :key="i" style="font-size: 13px; margin: 2px 0">
+             <template v-if="im.ok">#{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }}</template>
+-            <template v-else>
+-              <span style="color: #f56c6c; font-weight: 500">
+-                #{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }} 鎻掑叆澶辫触锛歿{ im.reason || '鏈煡鍘熷洜' }}
+-              </span>
+-              <span v-if="im.too_long" style="color: #f56c6c">锛堟壂鎻忎欢杩囬暱锛屽缓璁媶鍒嗭級</span>
+-            </template>
++            <span v-else style="color: #f56c6c; font-weight: 500">
++              #{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }} 鎻掑叆澶辫触锛歿{ im.reason || '鏈煡鍘熷洜' }}
++            </span>
++            <!-- 楂樺害鎴《鎻愮ず锛氭垚鍔燂紙too_long锛変笌澶辫触琛岄兘鍙兘鍑虹幇锛屾晠鏀惧湪 ok 鍒ゆ柇涔嬪 -->
++            <span v-if="im.too_long" :style="`color: ${im.ok ? '#e6a23c' : '#f56c6c'}`">锛堟壂鎻忎欢杩囬暱锛屽缓璁媶鍒嗭級</span>
+           </div>
+         </template>
+ 
+         <template v-if="fillReport.page_setup">
+           <h4 style="margin: 12px 0 4px">椤电爜 / 鍒嗚妭</h4>
+           <div style="font-size: 13px; margin: 2px 0">
+             鍒嗚妭鏁帮細{{ fillReport.page_setup.sections ?? '-' }}
+             <template v-if="Array.isArray(fillReport.page_setup.section_page_numbers)">
+               <span v-for="(v, i) in fillReport.page_setup.section_page_numbers" :key="i"
+                     style="margin-left: 10px; color: #606266">
+diff --git a/frontend/src/views/SettingsView.vue b/frontend/src/views/SettingsView.vue
+index f1f6e1c..9195c85 100644
+--- a/frontend/src/views/SettingsView.vue
++++ b/frontend/src/views/SettingsView.vue
+@@ -1,26 +1,27 @@
+ <script setup>
+ import { onMounted, ref, computed } from 'vue'
+ import { ElMessage } from 'element-plus'
+ import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
+ import {
+-  getFieldConfig, getImportSettings, getSettings, saveFieldConfig, saveImportSettings,
+-  saveSettings, testSettings,
++  getFieldConfig, getImportSettings, getPlaceholderSynonyms, getSettings, saveFieldConfig,
++  saveImportSettings, savePlaceholderSynonyms, saveSettings, testSettings,
+ } from '../api'
+ 
+ const form = ref({ api_key: '', model: 'kimi-k3' })
+ const testing = ref(false)
+ 
+ onMounted(async () => {
+   form.value = await getSettings()
+   loadImportSettings()
+   loadFieldConfig()
++  loadSynonyms()
+ })
+ 
+ async function save() {
+   try {
+     await saveSettings(form.value)
+     ElMessage.success('宸蹭繚瀛?)
+   } catch (e) {
+     ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
+   }
+ }
+@@ -88,20 +89,59 @@ async function saveImport() {
+       llm_extract_enabled: importForm.value.llm_extract_enabled,
+     })
+     ElMessage.success('瀵煎叆閰嶇疆宸蹭繚瀛?)
+   } catch (e) {
+     ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
+   } finally {
+     importSaving.value = false
+   }
+ }
+ 
++// ---------- 鍗犱綅绗﹀悓涔夎瘝锛堝晢鍔℃爣搴曠鍗犱綅绗︼細鍒悕 鈫?瑙勮寖鏍囩锛屽叏閲忚鐩栦繚瀛橈級 ----------
++const SYNONYM_LABEL_OPTIONS = ['椤圭洰鍚嶇О', '鎷涙爣浜?, '鎶曟爣浜哄悕绉?, '椤圭洰缂栧彿', '鎷涙爣缂栧彿', '鏍囨鍚嶇О', '鏍囨缂栧彿', '鏃ユ湡']
++
++const synonymRows = ref([])
++const synonymSaving = ref(false)
++
++async function loadSynonyms() {
++  try {
++    const r = await getPlaceholderSynonyms()
++    synonymRows.value = Object.entries(r || {}).map(([alias, label]) => ({ alias, label }))
++  } catch {
++    // 鍚庣鏈氨缁椂鐣欑┖锛屽彲浠庨浂寮€濮嬮厤缃?+  }
++}
++
++async function saveSynonyms() {
++  // 绌哄埆鍚嶈鐩存帴蹇界暐锛涙湁鍒悕浣嗘湭閫夎鑼冩爣绛剧殑琛岃涓哄綍鍏ヤ笉瀹屾暣锛屾彁绀哄悗涓
++  if (synonymRows.value.some(r => r.alias.trim() && !r.label)) {
++    ElMessage.warning('瀛樺湪鏈€夋嫨瑙勮寖鏍囩鐨勫埆鍚嶏紝璇疯ˉ鍏ㄦ垨鍒犻櫎鍚庡啀淇濆瓨')
++    return
++  }
++  synonymSaving.value = true
++  try {
++    const mapping = {}
++    for (const r of synonymRows.value) {
++      const alias = r.alias.trim()
++      if (alias && r.label) mapping[alias] = r.label
++    }
++    const r = await savePlaceholderSynonyms(mapping)
++    // 浠ユ湇鍔＄杩斿洖锛堣鑼冨寲鍚庯級涓哄噯鍒锋柊
++    synonymRows.value = Object.entries(r || mapping).map(([alias, label]) => ({ alias, label }))
++    ElMessage.success('鍗犱綅绗﹀悓涔夎瘝宸蹭繚瀛?)
++  } catch (e) {
++    ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
++  } finally {
++    synonymSaving.value = false
++  }
++}
++
+ // ---------- 璧勪骇瀛楁閰嶇疆 ----------
+ const FIELD_TYPES = [
+   { value: 'text', label: '鏂囨湰' },
+   { value: 'date', label: '鏃ユ湡' },
+   { value: 'dropdown', label: '涓嬫媺' },
+ ]
+ 
+ const fieldTab = ref('person')
+ const personFields = ref([])
+ const contractFields = ref([])
+@@ -242,20 +282,52 @@ async function saveFields() {
+           <el-switch v-model="importForm.llm_extract_enabled" />
+           <div class="mapping-tip">寮€鍚悗鐢ㄥぇ妯″瀷浠庤瘉浠躲€佸悎鍚屼腑鎶藉彇瀛楁锛堥渶閰嶇疆 LLM API锛屽唴缃戝彲鑳戒笉鍙敤锛?/div>
+         </div>
+       </el-form-item>
+       <el-form-item>
+         <el-button type="primary" :loading="importSaving" @click="saveImport">淇濆瓨瀵煎叆閰嶇疆</el-button>
+       </el-form-item>
+     </el-form>
+   </el-card>
+ 
++  <el-card style="max-width: 720px; margin-bottom: 16px">
++    <template #header>鍗犱綅绗﹀悓涔夎瘝</template>
++    <div class="mapping-tip" style="margin-bottom: 10px">
++      鍒悕鐢ㄤ簬搴曠涓笌瑙勮寖鏍囩涓嶅悓鐨勫啓娉曪紙濡傘€岄噰璐汉銆嶈涓恒€屾嫑鏍囦汉銆嶏級锛涘鍑轰笌鏍￠獙鍏辩敤鍚屼竴鍚屼箟璇嶅簱銆?+    </div>
++    <el-table :data="synonymRows" size="small">
++      <el-table-column label="鍒悕">
++        <template #default="{ row }">
++          <el-input v-model="row.alias" size="small" placeholder="濡傦細閲囪喘浜? />
++        </template>
++      </el-table-column>
++      <el-table-column label="瑙勮寖鏍囩" width="180">
++        <template #default="{ row }">
++          <el-select v-model="row.label" size="small" placeholder="閫夋嫨瑙勮寖鏍囩" style="width: 100%">
++            <el-option v-for="t in SYNONYM_LABEL_OPTIONS" :key="t" :label="t" :value="t" />
++          </el-select>
++        </template>
++      </el-table-column>
++      <el-table-column label="" width="70">
++        <template #default="{ $index }">
++          <el-button size="small" type="danger" link
++                     @click="synonymRows.splice($index, 1)">鍒犻櫎</el-button>
++        </template>
++      </el-table-column>
++    </el-table>
++    <el-button size="small" style="margin-top: 8px"
++               @click="synonymRows.push({ alias: '', label: '' })">娣诲姞涓€琛?/el-button>
++    <div style="margin-top: 16px">
++      <el-button type="primary" :loading="synonymSaving" @click="saveSynonyms">淇濆瓨鍚屼箟璇?/el-button>
++    </div>
++  </el-card>
++
+   <el-card style="max-width: 920px">
+     <template #header>璧勪骇瀛楁閰嶇疆</template>
+     <div class="mapping-tip" style="margin-bottom: 10px">
+       閰嶇疆璧勪骇搴撲腑銆屽父鐢ㄤ汉鍛樸€嶈〃鏍煎垪涓庤〃鍗曞瓧娈碉紝浠ュ強浜哄憳涓氱哗鐨勫睍绀哄瓧娈碉紱瀛楁椤哄簭鍗宠〃鏍煎垪椤哄簭銆?     </div>
+     <el-tabs v-model="fieldTab">
+       <el-tab-pane label="浜哄憳瀛楁" name="person" />
+       <el-tab-pane label="鍚堝悓瀛楁" name="contract" />
+     </el-tabs>
+     <el-table :data="fieldRows" size="small">

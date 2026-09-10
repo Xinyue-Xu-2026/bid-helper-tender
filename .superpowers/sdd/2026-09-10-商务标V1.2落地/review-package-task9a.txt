@@ -1,0 +1,187 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 0a8c9c2..dffaecb 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -455,26 +455,28 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
+         return [c for c in contracts if c.get("section") == 1]
+     if scope == "section2":
+         return [c for c in contracts if c.get("section") == 2]
+     return list(contracts)
+ 
+ 
+ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+                project_no: str = "", project_name: str = "",
+                doc_date: str = "", tenderer: str = "",
+                bidder_name: str = "", auth: dict = None,
+-               section_name: str = "", section_no: str = "") -> dict:
++               section_name: str = "", section_no: str = "",
++               synonyms: dict = None) -> dict:
+     """鎸夌‘璁ょ殑 bindings 濉厖搴曠骞跺彟瀛?dest_path锛岃繑鍥?fill_report銆?     dest 涓?draft 涓嶅緱鍚岃矾寰勩€倀enderer/bidder_name 涓虹┖鍒欒烦杩囧搴?     鏍囩绌虹櫧锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夊～鍏咃紱section_name/
+     section_no 涓虹┖鍒欒烦杩囨爣娈垫爣绛?鎷彿鍗犱綅锛堟爣娈靛悕绉帮細____ /
+-    锛堟爣娈靛悕绉帮級绛夛級濉厖銆?+    锛堟爣娈靛悕绉帮級绛夛級濉厖銆俿ynonyms锛氬崰浣嶇鍚屼箟璇嶅簱锛堝埆鍚嶁啋瑙勮寖鏍囩锛?+    None=榛樿搴擄級锛涘～鍏呬笌鏍￠獙鍏辩敤鍚屼竴浠斤紝閬垮厤闃茬鏀硅鎶ャ€?     auth锛氬彲閫夛紝{"legal_rep": {濮撳悕/韬唤璇佸彿/姝ｅ弽闈㈡壂鎻忎欢璺緞...} | {},
+     "agent": {...}, "doc_date": str}鈥斺€旀巿鏉冮〉锛堟硶瀹氫唬琛ㄤ汉韬唤璇佹槑/鎺堟潈
+     濮旀墭涔︼級绛惧悕鍖轰笌韬唤璇侀檮鍥惧～鍏咃紱鏈彁渚涙垨瀛楁涓虹┖鍒欒烦杩囥€?""
+     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
+         raise ValueError("dest 涓?draft 涓嶅緱鍚岃矾寰?)
+     doc = Document(draft_path)
+     # doc.tables锛氶《灞傝〃鏍笺€佹枃妗ｉ『搴忥紙python-docx 鎸?body 涓?w:tbl 椤哄簭鏀堕泦锛?     # 宸查獙璇佷笌鍧楅亶鍘嗕竴鑷达級锛屼笌 T5 table_index 鍚屽潗鏍囩郴銆?     tables = doc.tables
+     data = data or {}
+@@ -484,21 +486,22 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+               "page_setup": None, "authority_images": 0, "auth_bound": []}
+ 
+     # 娈嬬暀鏂囨湰鏇挎崲椤诲湪濉厖涔嬪墠鎵ц锛氭浛鎹㈣鍒欙紙compute_text_subs锛夊熀浜?     # 濉厖鍓嶇殑搴曠璁＄畻锛屼笌 verify_draft_fill 鐨勫簳绋夸晶鍚屾簮鈥斺€斿惁鍒?stale 鍊?     # 浠呭瓨鍦ㄤ簬缁戝畾琛ㄦ暟鎹崟鍏冩牸鏃讹紝濉厖瑕嗗啓鍚庤鍒欏彂鐜颁笉鍒版棫鍊硷紝
+     # 灏侀潰/姝ｆ枃娈嬬暀涓嶈鏇挎崲涓?verify 璇姤銆傚～鍏呮暣浣撹鍐欐暟鎹崟鍏冩牸锛?     # 鎻愬墠鏇挎崲涓嶆敼鍙樹骇鐗╁唴瀹广€?     _replace_stale_text(doc, project_no=project_no,
+                         project_name=project_name, doc_date=doc_date,
+                         tenderer=tenderer, bidder_name=bidder_name,
+-                        section_name=section_name, section_no=section_no)
++                        section_name=section_name, section_no=section_no,
++                        synonyms=synonyms)
+ 
+     # 鎺堟潈椤垫鏂囧～鍏咃細鏀瑰姩鐨勬槸鏅€氭鏂囨锛岄』鎶婅鏀规鍔犲叆 verify 鐨?     # bound锛坧aragraph 涓嬫爣锛宼oc/鍒嗚妭绗﹁繃婊ゅ潗鏍囩郴锛夐伩鍏嶈鎶?     auth_bound = set()
+     if auth:
+         auth = {**auth, "bidder_name": bidder_name}
+         _auth_signature_block(doc, auth_bound, report, auth)
+         report["auth_bound"] = sorted(auth_bound)
+ 
+     image_slots = []
+@@ -610,15 +613,16 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     doc.save(str(dest_path))
+     # 椤电湁绉绘 + 鍒嗚妭椤电爜锛堝弬鑰冪己澶辫嚜鍔ㄩ檷绾э紝瑙?bid_page_setup锛?     report["page_setup"] = apply_page_setup(str(dest_path))
+     report["verify"] = verify_draft_fill(
+         str(draft_path), str(dest_path),
+         bound_table_indices=bound_indices,
+         replace_params={"project_no": project_no, "project_name": project_name,
+                         "doc_date": doc_date, "tenderer": tenderer,
+                         "bidder_name": bidder_name,
+                         "section_name": section_name,
+-                        "section_no": section_no},
++                        "section_no": section_no,
++                        "synonyms": synonyms},
+         swapped_toc=swap_toc,
+         bound_paragraph_indices=auth_bound,
+         table_insertions=table_insertions)
+     return report
+diff --git a/backend/app/routers/bid.py b/backend/app/routers/bid.py
+index c7e95db..ed0facb 100644
+--- a/backend/app/routers/bid.py
++++ b/backend/app/routers/bid.py
+@@ -3,20 +3,21 @@ import json
+ import tempfile
+ import uuid
+ from pathlib import Path
+ from urllib.parse import quote
+ 
+ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+ from fastapi.responses import FileResponse
+ from pydantic import BaseModel
+ 
+ from app import config
++from app import settings_store
+ from app.core.bid_draft_exporter import fill_draft
+ from app.core.bid_exporter import build_bid_docx, build_bid_xlsx
+ from app.core.bid_template_exporter import build_bid_docx_from_template
+ from app.db import Database
+ from app.deps import get_db
+ from app.services import bid_service
+ 
+ router = APIRouter()
+ 
+ 
+@@ -163,21 +164,22 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
+                 "agent": _legal_person(db, body.agent_id),
+                 "doc_date": (body.doc_date or "").strip()}
+         report = fill_draft(bt["file_path"], str(dest), bindings, data,
+                             project_no=(body.project_no or "").strip(),
+                             project_name=effective_name,
+                             doc_date=(body.doc_date or "").strip(),
+                             tenderer=(body.tenderer or "").strip(),
+                             bidder_name=(body.bidder_name or "").strip(),
+                             auth=auth,
+                             section_name=(body.section_name or "").strip(),
+-                            section_no=(body.section_no or "").strip())
++                            section_no=(body.section_no or "").strip(),
++                            synonyms=settings_store.get_placeholder_synonyms())
+         headers["X-Fill-Report"] = quote(
+             json.dumps(report, ensure_ascii=False))
+     else:
+         # 鏃ц矾寰勶細鍥哄畾妯℃澘濉厖锛堟棤搴曠鏃朵繚鎸佸師鏈夎涓猴級
+         template = config.BID_TEMPLATE_PATH
+         if not template.exists():
+             raise HTTPException(503, "鍟嗗姟鏍囨ā鏉挎湭閰嶇疆锛坉ata/鍟嗗姟鏍囨ā鏉?docx 缂哄け锛?)
+         data = bid_service.assemble_bid_template_data(
+             db,
+             [p.model_dump() for p in body.persons],
+diff --git a/backend/tests/test_api_bid.py b/backend/tests/test_api_bid.py
+index 07af92b..b99b9d7 100644
+--- a/backend/tests/test_api_bid.py
++++ b/backend/tests/test_api_bid.py
+@@ -436,10 +436,33 @@ def test_export_section_empty_skips_fill(client, db_path, tmp_path):
+     r = client.post(_bid_url(pid, "/export-template"), json={
+         "persons": [{"asset_id": person_id, "is_lead": True}],
+         "contracts": []})
+     assert r.status_code == 200
+     out = Document(BytesIO(r.content))
+     texts = [p.text for p in out.paragraphs]
+     assert "鏍囨鍚嶇О锛歘___" in texts
+     assert "锛堟爣娈靛悕绉帮級" in texts
+     row = Database(db_path).get_project(pid)
+     assert row["section_name"] == "" and row["section_no"] == ""
++
++
++def test_export_uses_placeholder_synonyms(client, db_path, tmp_path):
++    """PUT 鍚屼箟璇嶅簱锛堢敳鏂光啋鎷涙爣浜猴級鍚庡鍑猴細搴曠"鐢叉柟锛歘___"琚～锛?+    涓?verify 鍚屾簮涓嶈鎶ワ紙V1.2 4.5 瀵煎嚭绔帴鍏ュ悓涔夎瘝搴擄級銆?""
++    pid = _make_project(client)
++    doc = Document()
++    doc.add_paragraph("鐢叉柟锛歘___")
++    p = tmp_path / "draft.docx"
++    doc.save(str(p))
++    Database(db_path).create_bid_template(pid, "搴曠", str(p))
++    r = client.put("/api/settings/placeholder-synonyms",
++                   json={"鐢叉柟": "鎷涙爣浜?})
++    assert r.status_code == 200
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": [], "tenderer": "鏌愪腑蹇?})
++    assert r.status_code == 200
++    texts = [p.text for p in Document(BytesIO(r.content)).paragraphs]
++    assert "鐢叉柟锛氭煇涓績" in texts
++    report = json.loads(unquote(r.headers["x-fill-report"]))
++    assert report["verify"]["ok"] is True
+diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+index f03e375..f6bb206 100644
+--- a/backend/tests/test_bid_placeholders.py
++++ b/backend/tests/test_bid_placeholders.py
+@@ -107,10 +107,33 @@ def test_textbox_alternate_content_fallback_not_duplicated():
+     texts = [t.text for t in _iter_textbox_paragraphs(doc)]
+     assert texts.count("鎷涙爣浜猴細____") == 1
+ 
+ 
+ def test_scan_placeholders_reports_match_and_suspicious():
+     doc = _doc_with(["鎷涙爣浜猴細____", "______________________________"])
+     res = scan_placeholders(doc, {"tenderer": "鏌愪腑蹇?})
+     assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
+                for m in res["matched"])
+     assert res["suspicious"], "瀛ょ珛涓嬪垝绾垮簲鍒楀叆鍙枒娓呭崟"
++
++
++def test_fill_draft_synonyms_fill_alias(tmp_path):
++    """瀵煎嚭绔帴鍏ュ悓涔夎瘝搴擄紙V1.2 4.5锛夛細synonyms={"鐢叉柟":"鎷涙爣浜?} 鏃跺簳绋?+    "鐢叉柟锛歘___"琚～鍏呬笖 verify 鍚屾簮涓嶈鎶ワ紱涓嶄紶 synonyms 鏃朵笉濉€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("鐢叉柟锛歘___")
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out),
++                        {"tables": [], "swap_toc": False}, {},
++                        tenderer="鏌愪腑蹇?, synonyms={"鐢叉柟": "鎷涙爣浜?})
++    texts = [p.text for p in Document(str(out)).paragraphs]
++    assert "鐢叉柟锛氭煇涓績" in texts
++    assert report["verify"]["ok"] is True
++
++    out2 = tmp_path / "o2.docx"
++    fill_draft(str(draft), str(out2), {"tables": [], "swap_toc": False}, {},
++               tenderer="鏌愪腑蹇?)
++    texts2 = [p.text for p in Document(str(out2)).paragraphs]
++    assert "鐢叉柟锛歘___" in texts2

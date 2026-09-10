@@ -1,0 +1,3638 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 0d35ad2..71e49cf 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -7,24 +7,26 @@ data 缁撴瀯瑙?bid_service.assemble_bid_draft_data
+ section,sem}],"lead_perfs_text":str}锛夈€? """
+ import os
+ import re
+ from copy import deepcopy
+ from pathlib import Path
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
++from docx.table import Table, _Cell
+ 
+ from app.core.bid_template_exporter import (
+     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
+     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
++    insert_image_adaptive, page_text_width_cm, scan_placeholders,
+ )
+ from app.core.bid_page_setup import apply_page_setup
+ from app.core.bid_verify import _is_section_break_para, verify_draft_fill
+ from app.core.word_exporter import insert_toc_field_at
+ 
+ 
+ def _clear_tr_text(tr) -> None:
+     """娓呯┖涓€琛岋紙deepcopy 鍑虹殑 tr锛夊叏閮ㄥ崟鍏冩牸鏂囨湰锛屼繚鐣欏崟鍏冩牸/娈佃惤灞炴€с€?""
+     for tc in tr.iter(qn("w:tc")):
+         for para in tc.findall(qn("w:p")):
+@@ -71,46 +73,155 @@ def _fill_table_semantic(table, columns: dict, sem_rows: list,
+             tc = cell._tc
+             if any(tc is t for t in seen_tcs):
+                 continue
+             seen_tcs.append(tc)
+             sem = col_to_sem.get(j)
+             _set_cell_text(cell, sem_row.get(sem, "") if sem else "")
+         written += 1
+     return written
+ 
+ 
++def _clone_table_after(anchor_table):
++    """鍦?anchor_table 涔嬪悗鎻掑叆涓€涓┖娈?+ 鍏嬮殕琛紝杩斿洖鍏嬮殕 Table銆?+    anchor_table 涓哄綋鍓嶉摼灏撅紙棣栨=鏍疯〃锛屽悗缁?涓婁竴浠藉厠闅嗭級锛屼繚璇佺粨鏋?+    搴忓垪 T0, sep, C1, sep, C2, ...鈥斺€斾换鎰忎袱寮犵浉閭?w:tbl 涔嬮棿閮芥湁绌烘
++    鍒嗛殧锛堢浉閭?w:tbl 浼氳 Word 鍚堝苟娓叉煋涓轰竴寮犺〃锛夈€傚厠闅嗕负 XML 绾?+    deepcopy锛屽畬鏁翠繚鐣欒鍒楁暟/鍚堝苟鍗曞厓鏍?琛岄珮/鏍峰紡銆?""
++    tbl = anchor_table._tbl
++    new = deepcopy(tbl)
++    sep = tbl.makeelement(qn("w:p"), {})
++    tbl.addnext(sep)
++    sep.addnext(new)
++    nxt = new.getnext()
++    if nxt is not None and nxt.tag == qn("w:tbl"):
++        new.addnext(new.makeelement(qn("w:p"), {}))
++    return Table(new, anchor_table._parent)
++
++
++def expand_table_matrix(table) -> list:
++    """鎶?vMerge/gridSpan 灞曞紑涓洪€昏緫缃戞牸锛歮atrix[r][c] = 璇ラ€昏緫鏍肩殑
++    origin w:tc 鍏冪礌寮曠敤锛堟í鍚戣法鍒楀悇鏍兼寚鍚戝悓涓€ tc锛涚旱鍚戠画琛屾牸鎸囧悜
++    restart tc锛夈€傜敤浜庡ぇ缃戞牸绠€鍘嗚〃鐨勯€昏緫鍧愭爣濉厖锛堜笉閲嶅缓琛級銆?""
++    matrix = []
++    col_origin = {}  # 缃戞牸鍒?鈫?鏈€杩?vMerge=restart 鐨?origin tc
++    for tr in table._tbl.tr_lst:
++        row = []
++        col = 0
++        for tc in tr.tc_lst:
++            span = 1
++            vmerge = None
++            tcPr = tc.tcPr
++            if tcPr is not None:
++                gs = tcPr.find(qn("w:gridSpan"))
++                if gs is not None:
++                    try:
++                        span = max(1, int(gs.get(qn("w:val")) or 1))
++                    except ValueError:
++                        span = 1
++                vm = tcPr.find(qn("w:vMerge"))
++                if vm is not None:
++                    vmerge = vm.get(qn("w:val")) or "continue"
++            for k in range(span):
++                if vmerge == "continue":
++                    row.append(col_origin.get(col + k, tc))
++                else:
++                    row.append(tc)
++                    if vmerge == "restart":
++                        col_origin[col + k] = tc
++                    else:
++                        col_origin.pop(col + k, None)
++            col += span
++        matrix.append(row)
++    return matrix
++
++
++def _fill_resume_grid_mesh(table, label_to_sem: dict, sem: dict,
++                           perfs_text: str) -> int:
++    """澶х綉鏍肩畝鍘嗚〃鐭╅樀濉厖锛圴1.2 7.2锛夛細鎸?expand_table_matrix 灞曞紑閫昏緫
++    缃戞牸锛宭abel 鏍硷紙瑙勮寖鍖栧懡涓?label_to_sem锛屾瘡涓?origin 鍙鐞嗕竴娆★級鈫?+    鍚岃鍙充晶棣栦釜涓嶅悓 origin 鏍硷紝鏃犲彸閭诲垯涓嬫柟琛屽悓鍒楅涓笉鍚?origin 鏍硷紱
++    璇箟閿?lead_perfs 鍐?perfs_text銆傝繑鍥炲啓鍏ユ牸鏁般€?""
++    matrix = expand_table_matrix(table)
++    written = 0
++    seen = []
++    for r, row in enumerate(matrix):
++        for c, tc in enumerate(row):
++            if any(tc is t for t in seen):
++                continue
++            seen.append(tc)
++            label = (_Cell(tc, table).text or "").strip().rstrip("锛?").strip()
++            sem_key = (label_to_sem or {}).get(label)
++            if not sem_key:
++                continue
++            target = None
++            for cc in range(c + 1, len(row)):
++                if row[cc] is not tc:
++                    target = row[cc]
++                    break
++            if target is None:
++                for rr in range(r + 1, len(matrix)):
++                    if c < len(matrix[rr]) and matrix[rr][c] is not tc:
++                        target = matrix[rr][c]
++                        break
++            if target is None:
++                continue
++            value = (perfs_text if sem_key == "lead_perfs"
++                     else (sem or {}).get(sem_key, ""))
++            _set_cell_text(_Cell(target, table), value or "")
++            written += 1
++    return written
++
++
++def _is_grid_resume(table) -> bool:
++    """澶х綉鏍肩畝鍘嗚〃鍒ゅ畾锛氬垪鏁?鈮?0 鎴栧悎骞舵牸瀵嗛泦锛坴Merge/gridSpan 鍚堣 鈮? 澶勶級銆?""
++    if len(table.columns) >= 10:
++        return True
++    merges = len(table._tbl.findall(f".//{qn('w:vMerge')}")) \
++        + len(table._tbl.findall(f".//{qn('w:gridSpan')}"))
++    return merges >= 3
++
++
++def _fill_resume_auto(table, label_to_sem: dict, sem: dict,
++                      perfs_text: str) -> tuple:
++    """绠€鍘嗚〃濉厖鍒嗘祦锛氬ぇ缃戞牸 鈫?鐭╅樀濉厖锛堜繚鐣欏師鍚堝苟缁撴瀯锛夛紱涓皬琛?鈫?+    鍘?_fill_resume_table銆傝繑鍥?(鍐欏叆鏍兼暟, 鏄惁缃戞牸妯″紡)銆?""
++    if _is_grid_resume(table):
++        return _fill_resume_grid_mesh(table, label_to_sem, sem, perfs_text), True
++    return _fill_resume_table(table, label_to_sem, sem, perfs_text), False
++
++
+ def _fill_resume_table(table, label_to_sem: dict, sem: dict,
+-                       lead_perfs_text: str) -> int:
++                       perfs_text: str) -> int:
+     """绠€鍘嗛敭鍊艰〃濉厖锛氶€愯閫愭牸锛岃鑼冨寲鏍兼枃鏈紙鍘婚灏剧┖鐧?+ 鍘诲熬閮?     "锛?鎴?:"锛夊懡涓?label_to_sem 鈫?鍐欏叾鍙充晶棣栦釜涓嶅悓 _tc 鐨勬牸瀛愶紙鏃犲彸鏍艰烦杩囷級锛?-    璇箟閿负 lead_perfs 鏃跺啓 lead_perfs_text銆傝繑鍥炲啓鍏ユ牸鏁般€?""
++    璇箟閿负 lead_perfs 鏃跺啓 perfs_text锛堥殢浜轰紶鍏ワ級銆傝繑鍥炲啓鍏ユ牸鏁般€?""
+     written = 0
+     for row in table.rows:
+         cells = row.cells
+         seen_tcs = []
+         for j, cell in enumerate(cells):
+             tc = cell._tc
+             if any(tc is t for t in seen_tcs):
+                 continue
+             seen_tcs.append(tc)
+             label = (cell.text or "").strip().rstrip("锛?").strip()
+             sem_key = (label_to_sem or {}).get(label)
+             if not sem_key:
+                 continue
+             target = None
+             for nxt in cells[j + 1:]:
+                 if nxt._tc is not tc:
+                     target = nxt
+                     break
+             if target is None:
+                 continue
+-            value = (lead_perfs_text if sem_key == "lead_perfs"
++            value = (perfs_text if sem_key == "lead_perfs"
+                      else (sem or {}).get(sem_key, ""))
+             _set_cell_text(target, value or "")
+             written += 1
+     return written
+ 
+ 
+ def _fill_image_slots(doc, slot_bindings, persons, report) -> None:
+     """閫愬浘鐗囧崰浣嶈〃鎻掑浘銆俿lot_bindings: [(binding, table)]銆?     person "lead" 鈫?璐熻矗浜猴紱"member:N" 鈫?绗?N 涓潪璐熻矗浜猴紙0 璧凤紝
+     瓒婄晫 鈫?report["skipped"] 璁?reason="浜哄憳涓嶈冻"锛夛紱缂虹渷鎸夎礋璐ｄ汉銆?@@ -153,27 +264,25 @@ def _fill_image_slots(doc, slot_bindings, persons, report) -> None:
+             certs = [c for c in (fields.get("璇佷功") or [])
+                      if isinstance(c, dict)]
+             key = id(person)
+             k = cert_counters.get(key, 0)
+             cert_counters[key] = k + 1
+             image_path = (str(certs[k].get("鎵弿浠?) or "")
+                           if k < len(certs) else "")
+         else:
+             image_path = ""
+         _clear_table_images(table)
+-        ok = bool(image_path) and Path(image_path).exists()
+-        if ok:
+-            _insert_image_into_table(table, image_path)
+-        report["images"].append({
+-            "table_index": binding.get("table_index"),
+-            "person": str(person.get("name") or ""),
+-            "label_kind": kind, "ok": ok})
++        # 绛夋瘮鑷€傚簲鎻掑叆锛涘け璐ワ紙鏂囦欢缂哄け/鏍煎紡涓嶆敮鎸?鎻掑叆寮傚父锛夋樉寮忚鍏ユ姤鍛?+        _insert_image_into_table(
++            table, image_path, report=report,
++            table_index=binding.get("table_index"),
++            person=str(person.get("name") or ""), label_kind=kind)
+ 
+ 
+ def _swap_toc(doc) -> bool:
+     """棣栦釜杩炵画 toc 鏍峰紡娈佃惤缁?鈫?淇濈暀棣栨浣嶇疆銆佸垹闄ょ粍鍐呭叾浣欐锛?     鍦ㄩ娈?insert_toc_field_at锛涙棤 toc 娈?鈫?False銆?""
+     group = []
+     for para in doc.paragraphs:
+         if _is_toc_paragraph(para):
+             group.append(para)
+         elif group:
+@@ -208,21 +317,22 @@ def _date_zh(doc_date: str) -> str:
+ 
+ 
+ def _auth_signature_block(doc, bound, report, auth) -> None:
+     """鎺堟潈椤垫鏂囧～鍏咃細澶勭悊銆屾硶瀹氫唬琛ㄤ汉锛堝崟浣嶈礋璐ｄ汉锛夎韩浠借瘉鏄庛€嶄笌
+     銆屾巿鏉冨鎵樹功銆嶄袱椤电殑姝ｆ枃鍗犱綅涓庣鍚嶅尯銆傚彧鍛戒腑鏂囨湰鐗瑰緛鏄庣‘鐨勬钀斤細
+     - 锛堝鍚嶏級/锛堟姇鏍囦汉鍚嶇О锛夋嫭鍙峰崰浣嶏紙濮撳悕鎸夊簭=娉曚汉銆佷唬鐞嗕汉锛夛紱
+     - 銆岃韩浠借瘉鍙凤細銆嶈锛堢揣璺熷湪 娉曚汉/浠ｇ悊浜虹鍚嶈涔嬪悗锛夆啋 濉搴旇瘉浠跺彿锛?     - 鐩栧叕绔犺鍚庣殑銆屽勾鏈堟棩銆嶈 鈫?濉姇鏍囨枃浠舵棩鏈燂紱
+     - 銆岄檮锛氣€﹁韩浠借瘉鈥︾數瀛愭壂鎻忎欢銆嶆鏈拷鍔犺韩浠借瘉姝ｅ弽闈㈠浘鐗囥€?     鍏朵綑娈佃惤锛堟壙璇哄嚱绛夛級涓€寰嬩笉鍔ㄣ€傛敼鍔ㄦ璁板叆 bound锛坴erify 鍚屽潗鏍囩郴
+-    娈典笅鏍囷級锛屽浘鐗囪拷鍔犱笉璁℃枃鏈晠涓嶉渶 bound銆?""
++    娈典笅鏍囷細toc/鍒嗚妭绗?绌烘杩囨护鍚庣殑銆岄潪绌烘銆嶅簭鍒楋級锛屽浘鐗囪拷鍔犱笉璁℃枃鏈?+    鏁呬笉闇€ bound銆?""
+     legal = auth.get("legal_rep") or {}
+     agent = auth.get("agent") or {}
+     legal_name = str(legal.get("name") or "").strip()
+     agent_name = str(agent.get("name") or "").strip()
+     legal_id = str(legal.get("韬唤璇佸彿") or "").strip()
+     agent_id = str(agent.get("韬唤璇佸彿") or "").strip()
+     bidder = str(auth.get("bidder_name") or "").strip()
+     date_text = _date_zh(auth.get("doc_date") or "")
+ 
+     def _img_paths(person, dual):
+@@ -235,30 +345,41 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
+                             str(p.get("韬唤璇佸弽闈㈡壂鎻忎欢") or "")]
+             return out
+         if not person:
+             return []
+         return [str(person.get("韬唤璇佹闈㈡壂鎻忎欢") or ""),
+                 str(person.get("韬唤璇佸弽闈㈡壂鎻忎欢") or "")]
+ 
+     def _append_images(para, person, dual) -> int:
+         inserted = 0
+         for pth in _img_paths(person, dual):
+-            if pth and Path(pth).exists():
+-                try:
+-                    para.add_run().add_picture(pth, width=_ID_CARD_WIDTH)
+-                    inserted += 1
+-                except Exception:
+-                    pass
++            if not pth:
++                continue
++            # 韬唤璇佹壂鎻忎欢锛氳嚜閫傚簲锛堥〉瀹戒负鍙敤瀹斤紝_ID_CARD_WIDTH 涓洪€€鍖栧搴︼級锛?+            # 澶辫触鏄惧紡璁板叆 report["images"]锛屼笉鍐嶉潤榛樺悶寮傚父
++            result = insert_image_adaptive(
++                para, pth, page_text_width_cm(doc),
++                fallback_w_cm=_ID_CARD_WIDTH.cm)
++            report["images"].append({
++                "table_index": None,
++                "person": str((person or {}).get("name") or ""),
++                "label_kind": "韬唤璇?, "ok": result["ok"],
++                "reason": result["reason"], "too_long": result["too_long"]})
++            if result["ok"]:
++                inserted += 1
+         return inserted
+ 
++    # 涓?verify 娈佃惤姣斿鍚屽潗鏍囩郴锛歵oc/鍒嗚妭绗?绌烘杩囨护鍚庣殑銆岄潪绌烘銆嶅簭鍒?+    # 锛堢┖娈典笉鎼哄甫鍐呭锛涘厠闅嗚〃鍒嗛殧绌烘绛夌粨鏋勬彃鍏ヤ笉褰卞搷鏈潗鏍囩郴锛?     paras = [p for p in doc.paragraphs
+-             if not _is_toc_paragraph(p) and not _is_section_break_para(p)]
++             if not _is_toc_paragraph(p) and not _is_section_break_para(p)
++             and _para_text(p)]
+ 
+     def _filter_index(p) -> int:
+         return paras.index(p)
+ 
+     def _rewrite(para, text):
+         _rewrite_paragraph_text(para, text)
+         bound.add(_filter_index(para))
+ 
+     sig_role = None        # 'legal'/'agent'锛氭渶杩戠鍚嶈锛堝叾鍚庝竴琛岃韩浠借瘉鍙峰綊灞烇級
+     prev_is_sig_ctx = False  # 涓婁竴娈垫槸鐩栧叕绔?绛惧悕涓婁笅鏂囷紙鍏跺悗骞存湀鏃ュ綊灞烇級
+@@ -333,112 +454,187 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
+     if scope == "section1":
+         return [c for c in contracts if c.get("section") == 1]
+     if scope == "section2":
+         return [c for c in contracts if c.get("section") == 2]
+     return list(contracts)
+ 
+ 
+ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+                project_no: str = "", project_name: str = "",
+                doc_date: str = "", tenderer: str = "",
+-               bidder_name: str = "", auth: dict = None) -> dict:
++               bidder_name: str = "", auth: dict = None,
++               section_name: str = "", section_no: str = "",
++               synonyms: dict = None) -> dict:
+     """鎸夌‘璁ょ殑 bindings 濉厖搴曠骞跺彟瀛?dest_path锛岃繑鍥?fill_report銆?     dest 涓?draft 涓嶅緱鍚岃矾寰勩€倀enderer/bidder_name 涓虹┖鍒欒烦杩囧搴?-    鏍囩绌虹櫧锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夊～鍏呫€?+    鏍囩绌虹櫧锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夊～鍏咃紱section_name/
++    section_no 涓虹┖鍒欒烦杩囨爣娈垫爣绛?鎷彿鍗犱綅锛堟爣娈靛悕绉帮細____ /
++    锛堟爣娈靛悕绉帮級绛夛級濉厖銆俿ynonyms锛氬崰浣嶇鍚屼箟璇嶅簱锛堝埆鍚嶁啋瑙勮寖鏍囩锛?+    None=榛樿搴擄級锛涘～鍏呬笌鏍￠獙鍏辩敤鍚屼竴浠斤紝閬垮厤闃茬鏀硅鎶ャ€?     auth锛氬彲閫夛紝{"legal_rep": {濮撳悕/韬唤璇佸彿/姝ｅ弽闈㈡壂鎻忎欢璺緞...} | {},
+     "agent": {...}, "doc_date": str}鈥斺€旀巿鏉冮〉锛堟硶瀹氫唬琛ㄤ汉韬唤璇佹槑/鎺堟潈
+     濮旀墭涔︼級绛惧悕鍖轰笌韬唤璇侀檮鍥惧～鍏咃紱鏈彁渚涙垨瀛楁涓虹┖鍒欒烦杩囥€?""
+     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
+         raise ValueError("dest 涓?draft 涓嶅緱鍚岃矾寰?)
+     doc = Document(draft_path)
+     # doc.tables锛氶《灞傝〃鏍笺€佹枃妗ｉ『搴忥紙python-docx 鎸?body 涓?w:tbl 椤哄簭鏀堕泦锛?     # 宸查獙璇佷笌鍧楅亶鍘嗕竴鑷达級锛屼笌 T5 table_index 鍚屽潗鏍囩郴銆?     tables = doc.tables
+     data = data or {}
+     persons = data.get("persons") or []
+     contracts = data.get("contracts") or []
+     report = {"filled": [], "images": [], "skipped": [], "verify": None,
+-              "page_setup": None, "authority_images": 0, "auth_bound": []}
++              "page_setup": None, "authority_images": 0, "auth_bound": [],
++              "placeholders": {"filled": [], "suspicious": []}}
++
++    # 鍗犱綅绗︽竻鍗曪紙V1.2 4.3 楠屾敹 7锛夛細鍦ㄤ换浣曟浛鎹箣鍓嶅搴曠鎵弿锛?+    # 瑙勫垯鍞竴鏉ユ簮 scan_placeholders锛堜笌棰勮绔偣/濉厖/鏍￠獙鍚屾簮锛?+    scan = scan_placeholders(
++        doc, {"project_no": project_no, "project_name": project_name,
++              "doc_date": doc_date, "tenderer": tenderer,
++              "bidder_name": bidder_name, "section_name": section_name,
++              "section_no": section_no},
++        synonyms=synonyms)
++    report["placeholders"] = {"filled": scan["matched"],
++                              "suspicious": scan["suspicious"]}
+ 
+     # 娈嬬暀鏂囨湰鏇挎崲椤诲湪濉厖涔嬪墠鎵ц锛氭浛鎹㈣鍒欙紙compute_text_subs锛夊熀浜?     # 濉厖鍓嶇殑搴曠璁＄畻锛屼笌 verify_draft_fill 鐨勫簳绋夸晶鍚屾簮鈥斺€斿惁鍒?stale 鍊?     # 浠呭瓨鍦ㄤ簬缁戝畾琛ㄦ暟鎹崟鍏冩牸鏃讹紝濉厖瑕嗗啓鍚庤鍒欏彂鐜颁笉鍒版棫鍊硷紝
+     # 灏侀潰/姝ｆ枃娈嬬暀涓嶈鏇挎崲涓?verify 璇姤銆傚～鍏呮暣浣撹鍐欐暟鎹崟鍏冩牸锛?     # 鎻愬墠鏇挎崲涓嶆敼鍙樹骇鐗╁唴瀹广€?     _replace_stale_text(doc, project_no=project_no,
+                         project_name=project_name, doc_date=doc_date,
+-                        tenderer=tenderer, bidder_name=bidder_name)
++                        tenderer=tenderer, bidder_name=bidder_name,
++                        section_name=section_name, section_no=section_no,
++                        synonyms=synonyms)
+ 
+     # 鎺堟潈椤垫鏂囧～鍏咃細鏀瑰姩鐨勬槸鏅€氭鏂囨锛岄』鎶婅鏀规鍔犲叆 verify 鐨?     # bound锛坧aragraph 涓嬫爣锛宼oc/鍒嗚妭绗﹁繃婊ゅ潗鏍囩郴锛夐伩鍏嶈鎶?     auth_bound = set()
+     if auth:
+         auth = {**auth, "bidder_name": bidder_name}
+         _auth_signature_block(doc, auth_bound, report, auth)
+         report["auth_bound"] = sorted(auth_bound)
+ 
+     image_slots = []
+     bound_indices = set()
++    table_insertions = {}   # {搴曠琛ㄤ笅鏍? 鎻掑叆鍏嬮殕鏁皚锛坮esume_each 涓€浜轰竴琛紝
++                            # 濉厖绔笌鏍￠獙绔叡鐢ㄥ悓涓€鐧昏锛?     for binding in (bindings or {}).get("tables") or []:
+         if not binding.get("confirmed"):
+             continue
+         role = binding.get("role") or "ignore"
+         if role == "ignore":
+             continue
+         idx = binding.get("table_index")
+         if not isinstance(idx, int) or not 0 <= idx < len(tables):
+             report["skipped"].append({
+                 "table_index": idx, "role": role,
+                 "reason": "琛ㄤ笉瀛樺湪锛屽彲鑳藉簳绋垮凡閲嶆柊鐢熸垚"})
+             continue
+         # 浠?fill 瀹為檯浼氭敼鍔ㄧ殑琛ㄨ眮鍏嶉槻绡℃敼鏍￠獙锛泀uote锛堟墜宸ュ～鍐欙級涓庢湭鐭?         # 瑙掕壊涓嶆敼鍔?鈫?涓嶈眮鍏嶏紝鏈粦瀹氳〃鍚岀瓑鍙楁牎楠屼繚鎶?-        if role in ("person_roster", "perf_list", "lead_resume", "image_slot"):
++        if role in ("person_roster", "perf_list", "lead_resume",
++                    "resume_each", "image_slot"):
+             bound_indices.add(idx)
+         table = tables[idx]
+         if role == "person_roster":
+             picked = _scope_persons(persons, binding.get("person_scope") or "all")
+             rows = _fill_table_semantic(table, binding.get("columns") or {},
+                                         [p.get("sem") or {} for p in picked],
+                                         header_rows=binding.get("header_rows") or 1)
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": rows})
+         elif role == "perf_list":
+             picked = _scope_contracts(contracts, persons,
+                                       binding.get("perf_scope") or "all")
+             rows = _fill_table_semantic(table, binding.get("columns") or {},
+                                         [c.get("sem") or {} for c in picked],
+                                         header_rows=binding.get("header_rows") or 1)
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": rows})
+         elif role == "lead_resume":
+             lead = next((p for p in persons if p.get("is_lead")), None)
+             written = 0
++            grid = False
+             if lead is not None:
+-                written = _fill_resume_table(
++                written, grid = _fill_resume_auto(
+                     table, binding.get("columns") or {},
+                     lead.get("sem") or {},
+-                    str(data.get("lead_perfs_text") or ""))
+-            report["filled"].append(
+-                {"table_index": idx, "role": role, "rows": written})
++                    str(lead.get("perfs_text")
++                        or data.get("lead_perfs_text") or ""))
++            entry = {"table_index": idx, "role": role, "rows": written}
++            if grid:
++                entry["mode"] = "grid"
++            report["filled"].append(entry)
++        elif role == "resume_each":
++            if binding.get("mode") == "per_person":
++                # 涓€浜轰竴琛紙V1.2 7.4锛夛細绗?1 浠藉～鍘熸牱琛紝鍏朵綑鍏堝厠闅嗗啀濉紱
++                # 鍏嬮殕鍏ㄩ儴鍩轰簬濉厖鍓嶇殑鏍疯〃锛岄€愮骇浠ラ摼灏句负 anchor锛堜换鎰忕浉閭?+                # 涓よ〃涔嬮棿蹇呮湁绌烘鍒嗛殧锛夛紝浜哄憳椤哄簭涓?picked 涓€鑷达紱
++                # 澶х綉鏍兼瘡浠芥寜鐭╅樀濉厖锛圴1.2 7.2锛?+                picked = _scope_persons(persons,
++                                        binding.get("person_scope") or "all")
++                targets = [table]
++                anchor = table
++                for _ in range(max(0, len(picked) - 1)):
++                    anchor = _clone_table_after(anchor)
++                    targets.append(anchor)
++                total = 0
++                grid = False
++                for t, p in zip(targets, picked):
++                    perfs = str(p.get("perfs_text") or (
++                        data.get("lead_perfs_text")
++                        if p.get("is_lead") else "") or "")
++                    w, grid = _fill_resume_auto(
++                        t, binding.get("columns") or {},
++                        p.get("sem") or {}, perfs)
++                    total += w
++                if len(picked) > 1:
++                    table_insertions[idx] = len(picked) - 1
++                entry = {"table_index": idx, "role": role, "rows": total,
++                         "cloned": len(picked)}
++                if grid:
++                    entry["mode"] = "grid"
++                report["filled"].append(entry)
++            else:
++                # 鏈紑 per_person锛氱瓑鍚?lead_resume锛堝崟浠?lead 濉厖锛屾棫琛屼负锛?+                lead = next((p for p in persons if p.get("is_lead")), None)
++                written = 0
++                grid = False
++                if lead is not None:
++                    written, grid = _fill_resume_auto(
++                        table, binding.get("columns") or {},
++                        lead.get("sem") or {},
++                        str(lead.get("perfs_text")
++                            or data.get("lead_perfs_text") or ""))
++                entry = {"table_index": idx, "role": role, "rows": written}
++                if grid:
++                    entry["mode"] = "grid"
++                report["filled"].append(entry)
+         elif role == "quote":
+             report["skipped"].append(
+                 {"table_index": idx, "role": role, "reason": "鎶ヤ环琛ㄩ渶鎵嬪伐濉啓"})
+         elif role == "image_slot":
+             image_slots.append((binding, table))
+ 
+     _fill_image_slots(doc, image_slots, persons, report)
+     swap_toc = bool((bindings or {}).get("swap_toc"))
+     if swap_toc:
+         _swap_toc(doc)
+     doc.save(str(dest_path))
+     # 椤电湁绉绘 + 鍒嗚妭椤电爜锛堝弬鑰冪己澶辫嚜鍔ㄩ檷绾э紝瑙?bid_page_setup锛?     report["page_setup"] = apply_page_setup(str(dest_path))
+     report["verify"] = verify_draft_fill(
+         str(draft_path), str(dest_path),
+         bound_table_indices=bound_indices,
+         replace_params={"project_no": project_no, "project_name": project_name,
+                         "doc_date": doc_date, "tenderer": tenderer,
+-                        "bidder_name": bidder_name},
++                        "bidder_name": bidder_name,
++                        "section_name": section_name,
++                        "section_no": section_no,
++                        "synonyms": synonyms},
+         swapped_toc=swap_toc,
+-        bound_paragraph_indices=auth_bound)
++        bound_paragraph_indices=auth_bound,
++        table_insertions=table_insertions)
+     return report
+diff --git a/backend/app/core/bid_page_setup.py b/backend/app/core/bid_page_setup.py
+index 519fba1..c4ef8c6 100644
+--- a/backend/app/core/bid_page_setup.py
++++ b/backend/app/core/bid_page_setup.py
+@@ -94,20 +94,100 @@ def _is_toc_el(p_el) -> bool:
+     if pPr is not None:
+         st = pPr.find(_wq(W, "pStyle"))
+         if st is not None and (st.get(_wq(W, "val")) or "").lower().startswith("toc"):
+             return True
+     for instr in p_el.iter(_wq(W, "instrText")):
+         if instr.text and "TOC" in instr.text:
+             return True
+     return False
+ 
+ 
++_TOC_ENTRY_RE = re.compile(r".+?[\.\s路鈥{2,}\s*\d{1,4}\s*$")
++
++
++def _el_text(el) -> str:
++    return "".join(t.text or "" for t in el.iter(_wq(W, "t")))
++
++
++def is_static_toc_group(children) -> "int | None":
++    """闈欐€佹枃鏈洰褰曡瘑鍒紙V1.2 7.5锛夛細銆岀洰褰曘€嶆爣棰樻 + 鍏跺悗杩炵画 鈮? 涓?+    銆岀珷鑺傚悕鈥﹂〉鐮併€嶅舰鎬佹锛堝弻閲嶇壒寰佺己涓€涓嶅彲锛岄槻姝ｆ枃"鐩綍"瀛楁牱璇垽锛夛紝
++    杩斿洖鐩綍缁勬湯鍏冪礌涓嬫爣锛涘惁鍒?None銆?""
++    for i, el in enumerate(children):
++        if el.tag != _wq(W, "p"):
++            continue
++        title = _el_text(el).strip()
++        if not title.startswith("鐩綍"):
++            continue
++        end, count, j = i, 0, i + 1
++        while (j < len(children) and children[j].tag == _wq(W, "p")
++               and _TOC_ENTRY_RE.match(_el_text(children[j]).strip())):
++            end, count, j = j, count + 1, j + 1
++        if count >= 2:
++            return end
++    return None
++
++
++def _para_jc(p_el) -> str:
++    pPr = p_el.find(_wq(W, "pPr"))
++    if pPr is None:
++        return ""
++    jc = pPr.find(_wq(W, "jc"))
++    return (jc.get(_wq(W, "val")) or "") if jc is not None else ""
++
++
++def check_footer_page_centered(docx_path: str) -> list:
++    """鏂█浜х墿鍚?footer part 涓?PAGE 鍩熸墍鍦ㄦ钀藉眳涓紙jc=center锛夈€?+    娈佃惤缂?jc锛堟湭鏄惧紡璁剧疆锛夆啋 瀹夊叏琛?center 鍚庡妫€锛堝箓绛夛級锛涙樉寮忛潪灞呬腑
++    锛堟湁鎰忚缃級鈫?涓嶉潤榛樻敼锛岃鍛婅銆傝繑鍥炲憡璀﹀垪琛紙绌?閫氳繃锛夈€?""
++    warnings = []
++    path = Path(docx_path)
++    with zipfile.ZipFile(str(path)) as z:
++        entries = {n: z.read(n) for n in z.namelist()}
++    footer_names = sorted(n for n in entries
++                          if re.fullmatch(r"word/footer[^/]*\.xml", n))
++    changed = False
++    for name in footer_names:
++        root = etree.fromstring(entries[name])
++        for idx, p in enumerate(root.iter(_wq(W, "p"))):
++            if not any("PAGE" in (instr.text or "")
++                       for instr in p.iter(_wq(W, "instrText"))):
++                continue
++            jc = _para_jc(p)
++            if jc == "center":
++                continue
++            if jc:
++                # 鏄惧紡闈炲眳涓細鏈夋剰璁剧疆锛屼笉闈欓粯鏀癸紝鍛婅
++                warnings.append(
++                    f"{name} 娈佃惤[{idx}] PAGE 鍩熸钀芥湭灞呬腑锛坖c={jc}锛?)
++                continue
++            # 缂?jc锛氳ˉ center锛堝啓鍥炰骇鐗╋級鍚庡妫€
++            pPr = p.find(_wq(W, "pPr"))
++            if pPr is None:
++                pPr = etree.Element(_wq(W, "pPr"))
++                p.insert(0, pPr)
++            jc_el = etree.SubElement(pPr, _wq(W, "jc"))
++            jc_el.set(_wq(W, "val"), "center")
++            changed = True
++            if _para_jc(p) != "center":
++                warnings.append(f"{name} 娈佃惤[{idx}] PAGE 鍩熸钀芥湭灞呬腑")
++        entries[name] = etree.tostring(root, xml_declaration=True,
++                                       encoding="UTF-8", standalone=True)
++    if changed:
++        tmp = path.with_suffix(".jctmp")
++        with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as z:
++            for n, data in entries.items():
++                z.writestr(n, data)
++        tmp.replace(path)
++    return warnings
++
++
+ def _clean_sectpr(sp) -> None:
+     """鍘绘帀 sectPr 鐨勯〉鐪?椤佃剼寮曠敤涓庨椤典笉鍚?椤电爜璁剧疆锛堢粺涓€涓哄弬鑰冩牱寮忥級銆?""
+     for tag in ("headerReference", "footerReference", "titlePg", "pgNumType"):
+         for el in sp.findall(_wq(W, tag)):
+             sp.remove(el)
+ 
+ 
+ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
+     """缁?sectPr 鎸傚弬鑰冮〉鐪?椤佃剼寮曠敤锛堝紩鐢ㄩ』涓?sectPr 鏈€鍓嶅瓙鍏冪礌锛夈€?""
+     _clean_sectpr(sp)
+@@ -132,22 +212,26 @@ def _attach_refs(sp, header_rid, footer_rid, restart_page=False) -> None:
+             "printerSettings", "sectPrChange")}
+         anchor = next((c for c in sp if c.tag in after_tags), None)
+         if anchor is not None:
+             anchor.addprevious(pg)
+         else:
+             sp.append(pg)
+ 
+ 
+ def apply_page_setup(docx_path: str) -> dict:
+     """瀵瑰鍑轰骇鐗╁仛椤电湁/椤佃剼绉绘涓庡垎鑺傞〉鐮侊紙zip 鍚庣疆澶勭悊锛夈€?-    杩斿洖 {"header_applied": bool, "page_numbers": bool, "degraded": str}銆?""
+-    result = {"header_applied": False, "page_numbers": False, "degraded": ""}
++    杩斿洖 {"header_applied": bool, "page_numbers": bool, "degraded": str,
++          "sections": int, "section_page_numbers": [bool], "warnings": [str]}銆?+    sections = document.xml 涓?sectPr 鏁帮紱section_page_numbers 閫愯妭鏍囪
++    銆屾寕椤佃剼寮曠敤涓旈〉鐮侀噸璧枫€嶏紱warnings 鍚〉鑴?PAGE 鍩熷眳涓柇瑷€缁撴灉銆?""
++    result = {"header_applied": False, "page_numbers": False, "degraded": "",
++              "sections": 1, "section_page_numbers": [], "warnings": []}
+     ref = Path(config.BID_HEADER_SOURCE_PATH)
+     if not ref.exists():
+         result["degraded"] = "椤电湁鍙傝€冩枃浠剁己澶憋紝宸茶烦杩囬〉鐪?椤电爜璁剧疆"
+         return result
+     try:
+         parts = _load_reference(ref)
+     except Exception:
+         parts = None
+     if not parts or not parts["header"]:
+         result["degraded"] = "椤电湁鍙傝€冩枃浠舵棤鏁堬紝宸茶烦杩囬〉鐪?椤电爜璁剧疆"
+@@ -159,34 +243,40 @@ def apply_page_setup(docx_path: str) -> dict:
+ 
+     # ---- document.xml锛氬垎鑺?+ 鎸傚紩鐢?----
+     doc_xml = etree.fromstring(entries["word/document.xml"])
+     body = doc_xml.find(_wq(W, "body"))
+     children = list(body)
+     body_sectPr = body.find(_wq(W, "sectPr"))
+     if body_sectPr is None:
+         body_sectPr = etree.SubElement(body, _wq(W, "sectPr"))
+         children = list(body)
+ 
+-    # 棣栦釜杩炵画 toc 娈电粍锛堝皝闈?鐩綍鍖猴級
+-    toc_idx = [i for i, el in enumerate(children)
+-               if el.tag == _wq(W, "p") and _is_toc_el(el)]
++    # 棣栦釜杩炵画鐩綍娈电粍锛堝皝闈?鐩綍鍖猴級锛氫紭鍏堥潤鎬佹枃鏈洰褰曪紙銆岀洰褰曘€嶆爣棰?
++    # 椤电爜褰㈡€佹缁勶紝V1.2 7.5锛夛紝鏃犲垯鍥為€€ toc 鏍峰紡/TOC 鍩熺粍锛堟棫琛屼负锛?     split_after = None
+-    if toc_idx:
+-        group_end = toc_idx[0]
+-        for i in toc_idx[1:]:
+-            if i == group_end + 1:
+-                group_end = i
+-            else:
+-                break
+-        # 缁勫悗杩樻湁姝ｆ枃鍐呭锛坆ody sectPr 涔嬪鐨勫厓绱狅級鎵嶉渶瑕佹媶鑺?-        if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
+-            split_after = group_end
++    static_end = is_static_toc_group(children)
++    if static_end is not None and any(
++            el.tag != _wq(W, "sectPr") for el in children[static_end + 1:]):
++        split_after = static_end
++    if split_after is None:
++        toc_idx = [i for i, el in enumerate(children)
++                   if el.tag == _wq(W, "p") and _is_toc_el(el)]
++        if toc_idx:
++            group_end = toc_idx[0]
++            for i in toc_idx[1:]:
++                if i == group_end + 1:
++                    group_end = i
++                else:
++                    break
++            # 缁勫悗杩樻湁姝ｆ枃鍐呭锛坆ody sectPr 涔嬪鐨勫厓绱狅級鎵嶉渶瑕佹媶鑺?+            if any(el.tag != _wq(W, "sectPr") for el in children[group_end + 1:]):
++                split_after = group_end
+ 
+     # 鏂?rId
+     rels_root = etree.fromstring(entries["word/_rels/document.xml.rels"])
+     existing_ids = {rel.get("Id") for rel in rels_root}
+ 
+     def _new_rid():
+         n = 9000
+         while f"rId{n}" in existing_ids:
+             n += 1
+         rid = f"rId{n}"
+@@ -280,13 +370,22 @@ def apply_page_setup(docx_path: str) -> dict:
+         rels_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+     entries["[Content_Types].xml"] = etree.tostring(
+         ct_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+ 
+     tmp = path.with_suffix(".p2tmp")
+     with zipfile.ZipFile(str(tmp), "w", zipfile.ZIP_DEFLATED) as z:
+         for name, data in entries.items():
+             z.writestr(name, data)
+     tmp.replace(path)
+ 
++    # 鍒嗚妭鎶ュ憡 + 椤佃剼 PAGE 鍩熷眳涓柇瑷€锛堢己 jc 鑷姩琛ワ紝鏄惧紡闈炲眳涓憡璀︼級
++    sects = [el for el in body.iter() if el.tag == _wq(W, "sectPr")]
++    result["sections"] = len(sects)
++    result["section_page_numbers"] = [
++        bool(sp.findall(_wq(W, "footerReference")))
++        and sp.find(_wq(W, "pgNumType")) is not None
++        for sp in sects]
++    result["warnings"] = check_footer_page_centered(str(path))
++
+     result["header_applied"] = True
+     result["page_numbers"] = True
+     return result
+diff --git a/backend/app/core/bid_table_classifier.py b/backend/app/core/bid_table_classifier.py
+index 7d8498e..96bdb75 100644
+--- a/backend/app/core/bid_table_classifier.py
++++ b/backend/app/core/bid_table_classifier.py
+@@ -12,96 +12,107 @@ bindings JSON schema锛堟湰妯″潡涓烘潈濞佸畾涔夛紝T7 瀵煎嚭涓?T9 瀛樺偍/鍥炴樉
+       "person_scope": "all",
+       "perf_scope": "all",
+       "label_kind": "",
+       "person": "",
+       "confirmed": false
+     }
+   ],
+   "swap_toc": false
+ }
+ ```
+-- role 鈭?person_roster | lead_resume | perf_list | quote | image_slot | ignore
++- role 鈭?person_roster | lead_resume | resume_each | perf_list | quote | image_slot | ignore
+ - columns锛氭暟鎹〃 = {璇箟閿? 鍒椾笅鏍噠锛沴ead_resume = {鏍囩鏂囨湰: 璇箟閿畗锛堥敭鍊艰〃锛? - person_scope 鈭?all | lead | members锛堜粎 person_roster锛夛紱
+   perf_scope 鈭?all | lead | section1 | section2锛堜粎 perf_list锛? - image_slot 涓撶敤锛歭abel_kind 鈭?鑱岀О璇佷功 | 绀句繚 | 韬唤璇?| 娉ㄥ唽璇佷功锛?   person = "lead" 鎴?"member:N"锛堥潪璐熻矗浜哄簭鍙凤紝0 璧凤級
+ - confirmed锛氱敤鎴风‘璁ょ疆 true锛涘鍑哄彧濉厖 confirmed=true 涓?role鈮爄gnore 鐨勮〃
+   锛堟湰妯″潡浜у嚭鐨勫缓璁?confirmed 鎭?false锛? 
+ 鍒嗙被瑙勫垯锛堟寜搴忓垽瀹氾紝鍏堜腑鍏堝緱锛夛細
+ 1. 琛ㄦ牸浠?1 鍒?鈫?image_slot锛沴abel_kind 鎸夐琛屾枃鏈懡涓?IMAGE_LABEL_KINDS
+    棣栦釜鍏抽敭璇嶏紙鍏冪粍鍐?(瀛愪覆, 璇箟)锛夛紝鍏ㄤ笉涓暀绌猴紱confidence 楂橈紙鍛戒腑锛? 浣庛€? 2. 鍓?2 琛屼换涓€鍗曞厓鏍煎惈 QUOTE_KEYWORDS 浠讳竴鍏抽敭璇?鈫?quote銆? 3. 琛ㄥご琛?= 绗?0 琛岋紱鑻ョ 0 琛屾暣琛屽叧閿瘝鍛戒腑鏁?< 2 涓旇〃鏍艰鏁?鈮?2 鈫?    鐢?绗?0 琛?+ 绗?1 琛屽悓鍒楁枃鏈嫾鎺?閲嶈瘯锛堣法琛岃〃澶村厹搴曪級銆?    閫愬垪鍖归厤 PERSON_COL_KEYWORDS / PERF_COL_KEYWORDS锛氬瓙涓插尮閰嶏紙鍘荤┖鐧藉悗锛夛紝
+    闀垮叧閿瘝浼樺厛锛屾瘡鍒楀彧鍙栦竴涓涔夈€佹瘡璇箟鍙崰涓€鍒楋紙鍏堝尮閰嶆垚鍔熺殑璇箟閿佸畾璇ュ垪锛夈€?    娉ㄦ剰 label 璇箟閿唬琛?浜哄憳瀹夋帓/宀椾綅/鑱屽姟"鍒楋紙鑱屽姟鏍忥級锛宺ole 璇箟閿唬琛?    "鎷熸淳宀椾綅"鍒椻€斺€斾袱鑰呭叧閿瘝涓嶅彲娣锋穯锛坙abel 鍏抽敭璇嶄笉鍚?鎷熸淳/鏈矖浣?锛夈€? 4. person 鍛戒腑鏁?鈮?2 涓?鈮?perf 鍛戒腑鏁?鈫?person_roster锛涘惁鍒?perf 鍛戒腑鏁?鈮?2
+    鈫?perf_list銆俢onfidence锛氬懡涓?鈮?3 鈫?楂橈紝2 鈫?浣庛€?-5. 琛ㄦ牸 2~3 鍒椾笖绗?0 鍒楅€愯锛堟暟鎹鏂囨湰锛夊懡涓?RESUME_LABELS 鈮?3 涓笉鍚屾爣绛?-   鈫?lead_resume锛沜olumns = {鏍囩鍘熸枃: 璇箟閿畗锛堟湭鍏?RESUME_LABEL_TO_SEM
++5. 閿€肩畝鍘嗘牱琛紙绗?0 鍒楅€愯鍛戒腑 RESUME_LABELS 鈮? 涓笉鍚屾爣绛撅級锛氬惈
++   銆屾嫙鍦ㄦ湰椤圭洰浠昏亴/涓昏宸ヤ綔缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О銆嶄换涓€ 鈫?resume_each
++   锛?~5 鍒楁垨 鈮?0 鍒楀ぇ缃戞牸锛孷1.2 7.2/7.4锛夛紱鍚﹀垯 2~3 鍒楁垨澶х綉鏍?鈫?+   lead_resume锛沜olumns = {鏍囩鍘熸枃: 璇箟閿畗锛堟湭鍏?RESUME_LABEL_TO_SEM
+    鐨勬爣绛句笉杩?columns锛夈€俢onfidence 楂橈紙鈮?锛? 浣庛€? 6. 鍏朵綑 鈫?ignore锛坈onfidence 浣庯級銆? 
+ 鍚堝苟鍗曞厓鏍硷細row.cells 瀵规í鍚戝悎骞堕噸澶嶅悓涓€ _tc锛涢€愬垪璁板綍鎸?_tc 寮曠敤鍘婚噸
+ 锛堝悓涓€ _tc 鍙彇棣栨鍒椾綅锛夛紝淇濊瘉 columns 涓嬫爣涓虹綉鏍煎垪鍧愭爣绯伙紙涓庡悗缁? 濉厖鍐欏叆鍧愭爣涓€鑷达級銆? """
+ import re
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.table import Table
+ from docx.text.paragraph import Paragraph
+ 
+ from app.core.template_outline import para_heading_level
+ 
+-ROLES = ("person_roster", "lead_resume", "perf_list", "quote", "image_slot", "ignore")
++ROLES = ("person_roster", "lead_resume", "resume_each", "perf_list", "quote",
++         "image_slot", "ignore")
+ 
+ PERSON_COL_KEYWORDS = {
+     "seq": ("搴忓彿",), "label": ("浜哄憳瀹夋帓", "宀椾綅", "鑱屽姟"),
+     "name": ("濮撳悕",), "gender": ("鎬у埆",), "age": ("骞撮緞",),
+     "education": ("瀛﹀巻",), "title": ("鑱岀О",),
+     "work_years": ("涓撲笟宸ヤ綔骞撮檺", "宸ヤ綔骞撮檺", "浠庝笟骞撮檺"),
+     "certs": ("鎵т笟璧勬牸", "娉ㄥ唽璧勬牸", "璧勬牸璇佷功", "璧勬牸"),
+-    "role": ("鎷熸淳宀椾綅", "鎷熶换鑱屽姟", "鏈」鐩矖浣?),
++    "role": ("鎷熸淳宀椾綅", "鎷熶换鑱屽姟", "鏈」鐩矖浣?, "鏈」鐩换鑱?, "鏈」鐩亴鍔?),
+ }
+ PERF_COL_KEYWORDS = {
+     "seq": ("搴忓彿",), "project_name": ("椤圭洰鍚嶇О",),
+     "client": ("濮旀墭鍗曚綅", "涓氫富鍗曚綅", "寤鸿鍗曚綅", "濮旀墭浜?, "椤圭洰鍗曚綅"),
+     "client_contact": ("鑱旂郴鏂瑰紡",), "sign_date": ("鍚堝悓绛捐", "绛捐鏃堕棿", "绛捐鏃ユ湡"),
+     "amount": ("鍚堝悓閲戦", "宸ョ▼閫犱环", "閲戦"), "project_type": ("椤圭洰绫诲瀷",),
+     "service_type": ("鏈嶅姟绫诲瀷",), "content": ("涓昏鍐呭", "鏈嶅姟鍐呭"),
+     "proof_page": ("璇佹槑鏉愭枡", "椤电爜"),
+ }
+ QUOTE_KEYWORDS = ("鎶ヤ环", "璐圭巼", "鎶樻墸")
+ RESUME_LABELS = ("濮撳悕", "鎬у埆", "骞撮緞", "瀛﹀巻", "鑱岀О", "鎵т笟璧勬牸",
+                  "韬唤璇佸彿", "宸ヤ綔缁忓巻", "宸插畬椤圭洰", "绫讳技涓氱哗")
+ RESUME_LABEL_TO_SEM = {"濮撳悕": "name", "鎬у埆": "gender", "骞撮緞": "age",
+                        "瀛﹀巻": "education", "鑱岀О": "title", "鎵т笟璧勬牸": "certs",
+                        "韬唤璇佸彿": "id_no", "宸插畬椤圭洰": "lead_perfs",
+                        "绫讳技涓氱哗": "lead_perfs"}
++# 銆屼竴浜轰竴琛ㄣ€嶉敭鍊兼牱琛ㄧ壒寰佹爣璁帮紙V1.2 7.4锛夛細鍛戒腑浠讳竴 鈫?resume_each锛堟暣琛ㄥ厠闅嗭級
++RESUME_EACH_MARKERS = ("鎷熷湪鏈」鐩换鑱?, "涓昏宸ヤ綔缁忓巻", "鎵т笟璧勬牸璇佷功鍚嶇О")
+ IMAGE_LABEL_KINDS = (("绀句繚", "绀句繚"), ("韬唤璇?, "韬唤璇?),
+                      ("鑱岀О璇佷功", "鑱岀О璇佷功"), ("娉ㄥ唽璇佷功", "娉ㄥ唽璇佷功"),
+                      ("璧勬牸璇佷功", "娉ㄥ唽璇佷功"), ("鎵т笟璧勬牸", "娉ㄥ唽璇佷功"))
+ 
+ _WS_RE = re.compile(r"\s+")
++_DATA_HINT_RE = re.compile(r"\d")
+ 
+ 
+ def _norm(s: str) -> str:
+     """鍘诲叏閮ㄧ┖鐧姐€?""
+     return _WS_RE.sub("", s or "")
+ 
+ 
++def _row_has_data_semantics(pairs) -> bool:
++    """琛屽惈鏁版嵁璇箟淇″彿锛氫换涓€鍗曞厓鏍煎惈鏁板瓧锛堝簭鍙?閲戦/骞撮檺/鏃ユ湡绛夛級銆?""
++    return any(_DATA_HINT_RE.search(text or "") for _, text in pairs)
++
++
+ def _iter_block_items(doc):
+     """鎸?body 椤哄簭浜у嚭 Paragraph / Table锛堝悓 bid_template_exporter 鐨勫潡閬嶅巻鎵嬫硶锛夈€?""
+     for child in doc.element.body.iterchildren():
+         if child.tag == qn("w:p"):
+             yield Paragraph(child, doc)
+         elif child.tag == qn("w:tbl"):
+             yield Table(child, doc)
+ 
+ 
+ def _dedup_col_texts(row) -> list:
+@@ -221,20 +232,21 @@ def _classify_table(table, table_index: int, heading: str,
+     item = {
+         "table_index": table_index,
+         "header": _header_cells(table),
+         "role": "ignore",
+         "columns": {},
+         "person_scope": "",
+         "perf_scope": "",
+         "label_kind": "",
+         "person": "",
+         "header_rows": 1,
++        "mode": "",
+         "confidence": "浣?,
+         "context_heading": heading,
+         "confirmed": False,
+     }
+     rows = table.rows
+     if not rows:
+         return item
+ 
+     # 瑙勫垯 1锛氫粎 1 鍒?鈫?image_slot
+     if len(table.columns) == 1:
+@@ -249,30 +261,34 @@ def _classify_table(table, table_index: int, heading: str,
+ 
+     # 瑙勫垯 2锛氬墠 2 琛屼换涓€鍗曞厓鏍煎惈鎶ヤ环鍏抽敭璇?鈫?quote
+     if _is_quote(table):
+         item["role"] = "quote"
+         item["confidence"] = "楂?
+         return item
+ 
+     # 瑙勫垯 3锛氳〃澶磋鍏抽敭璇嶇鍚嶏紙绗?0 琛屽懡涓?< 2 涓旇鏁?鈮?2 鏃惰法琛屾嫾鎺ュ厹搴曪級銆?     # header_rows锛氭嫾鎺ュ厹搴曡Е鍙?鈫?2锛況ow0 鑷韩鍛戒腑瓒冲浣?row1 鍦ㄥ悓鍒楅噸澶?     # row0 鏍囩 鈮? 鏍硷紙鏂 vMerge 鍓〃澶达紝鐪熷疄搴曠 17脳10 浜哄憳姹囨€昏〃鍥炲綊锛?-    # 鈫?2锛涘叾浣?鈫?1銆?+    # 鈫?2锛況ow0 鏁磋鏃犳暟鎹涔夛紙鏃犳暟瀛?閲戦绛夛級涓?row1 涔熷懡涓〃澶村叧閿瘝
++    # 绛惧悕 鈮?锛堝弻灞傝〃澶村悇琛岀殕鍚叧閿瘝锛?.1 琛ュ己锛夆啋 2锛涘叾浣?鈫?1銆?     pairs = _dedup_col_texts(rows[0])
+     if _row_hit_count(pairs) < 2 and len(rows) >= 2:
+         row1 = dict(_dedup_col_texts(rows[1]))
+         pairs = [(idx, (text or "") + (row1.get(idx) or ""))
+                  for idx, text in pairs]
+         item["header_rows"] = 2
+     elif len(rows) >= 2 and _shared_header_cells(
+             pairs, _dedup_col_texts(rows[1])) >= 2:
+         item["header_rows"] = 2
++    elif (len(rows) >= 2 and not _row_has_data_semantics(pairs)
++          and _row_hit_count(_dedup_col_texts(rows[1])) >= 2):
++        item["header_rows"] = 2
+     person_map, perf_map = _match_columns(pairs)
+ 
+     # 瑙勫垯 4锛氬懡涓暟鍒ゅ畾浜哄憳琛?/ 涓氱哗琛ㄣ€?     # 鍏变韩閿綊灞炶瀹氾紙T5锛夛細"搴忓彿"涓ゆ棌鍏辨湁涓斿尮閰嶆椂 person 鏃忎紭鍏堥攣瀹氾紝
+     # 绾笟缁╄〃浼氬洜姝や涪 seq銆傝〃瑙掕壊鍒ゅ畾瀹屾垚鍚庯紝鎶婅触鏂逛粎鍛戒腑 seq 鐨勫叡浜敭
+     # 鍒楄ˉ缁欒儨鏂?columns銆?     if len(person_map) >= 2 and len(person_map) >= len(perf_map):
+         if "seq" not in person_map and set(perf_map) == {"seq"}:
+             person_map = {**person_map, "seq": perf_map["seq"]}
+         item["role"] = "person_roster"
+@@ -287,28 +303,44 @@ def _classify_table(table, table_index: int, heading: str,
+         return item
+     if len(perf_map) >= 2:
+         if "seq" not in perf_map and set(person_map) == {"seq"}:
+             perf_map = {**perf_map, "seq": person_map["seq"]}
+         item["role"] = "perf_list"
+         item["columns"] = perf_map
+         item["confidence"] = "楂? if len(perf_map) >= 3 else "浣?
+         item["perf_scope"] = "lead" if "璐熻矗浜? in heading else "all"
+         return item
+ 
+-    # 瑙勫垯 5锛?~3 鍒椾笖绗?0 鍒楅€愯鍛戒腑绠€鍘嗘爣绛?鈮?3 鈫?lead_resume
+-    if 2 <= len(table.columns) <= 3:
++    # 瑙勫垯 4.6/5锛氶敭鍊肩畝鍘嗘牱琛紙2~5 鍒楋紱V1.2 7.2 璧峰ぇ缃戞牸 鈮?0 鍒楀悓鏍疯瘑鍒紝
++    # 4~9 鍒椾腑灏忚〃鍒嗙被涓嶅彉锛夈€傚惈銆屼竴浜轰竴琛ㄣ€嶆爣璁帮紙鎷熷湪鏈」鐩换鑱?涓昏宸ヤ綔
++    # 缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О 浠讳竴锛夆啋 resume_each锛涘惁鍒?鈮? 鍒楁垨澶х綉鏍?鈫?+    # lead_resume锛堟棫琛屼负锛夈€?+    ncols = len(table.columns)
++    if (2 <= ncols <= 5) or ncols >= 10:
+         hits, columns = _match_resume(table)
+         if len(hits) >= 3:
+-            item["role"] = "lead_resume"
+-            item["columns"] = columns
+-            item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+-            return item
++            col0_text = "".join(
++                _norm(p[0][1]) for p in
++                (_dedup_col_texts(r) for r in table.rows) if p)
++            if any(m in col0_text for m in RESUME_EACH_MARKERS):
++                item["role"] = "resume_each"
++                item["columns"] = columns
++                # 涓€浜轰竴琛ㄩ粯璁ゆ暣琛ㄥ厠闅嗭紙V1.2 7.4锛氶€?N 浜?鈫?N 寮犵粨鏋勫師鏍疯〃锛?+                # 鐢ㄦ埛浠嶅彲鍦ㄧ‘璁ょ粦瀹氭椂鏀瑰洖 ""锛?+                item["mode"] = "per_person"
++                item["confidence"] = "楂? if len(hits) >= 5 else "浣?
++                return item
++            if ncols <= 3 or ncols >= 10:
++                item["role"] = "lead_resume"
++                item["columns"] = columns
++                item["confidence"] = "楂? if len(hits) >= 5 else "浣?
++                return item
+ 
+     # 瑙勫垯 6锛氭嬁涓嶅噯涓€寰?ignore
+     return item
+ 
+ 
+ def classify_tables(docx_path: str) -> list:
+     """鎵弿搴曠 docx 鍏ㄩ儴琛ㄦ牸锛屾寜琛ㄥご鍏抽敭璇嶇鍚嶄骇鍑虹粦瀹氬缓璁垪琛ㄣ€? 
+     姣忛」锛歿"table_index", "header", "role", "columns", "person_scope",
+     "perf_scope", "label_kind", "person", "confidence", "context_heading",
+diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index 9db9c9b..f2329d7 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -5,20 +5,21 @@
+ 缁存姢褰撳墠鎵€鍦ㄧ珷鑺傜姸鎬佹満锛? - H1 "涓夈€佷汉鍛橀厤澶囪〃" 鍐咃細棣栦釜琛ㄦ牸鈫掕〃A锛堜汉鍛樺畨鎺掞級锛?   H2 "2銆侀」鐩礋璐ｄ汉" 鍚庣殑 H3 "锛?锛夐」鐩礋璐ｄ汉涓氱哗" 鍐呯 1/2 寮犺〃鈫掕〃B/琛–锛堣礋璐ｄ汉涓氱哗锛夛紱
+   H2 "3銆侀」鐩粍浜哄憳" 鍚庣殑琛ㄢ啋琛―銆? - H1 "鍥涖€佺浉鍏充笟缁╀竴瑙堣〃" 鍐咃細H2 鍓嶇殑棣栬〃鈫掕〃E锛汬2 "1銆佲€? 鍚庣殑琛ㄢ啋琛‵锛汬2 "2銆佲€? 鍚庣殑琛ㄢ啋琛℅銆? 
+ 琛屾浛鎹細淇濈暀琛ㄥご琛岋紝deepcopy 棣栨暟鎹浣滀负鏍峰紡 donor 閫愭潯濉厖鍚庢彃鍏ワ紝
+ 鍒犻櫎鍏ㄩ儴鍘熸暟鎹锛堟棤璁板綍鏃跺嵆鍙墿琛ㄥご锛夈€? """
+ from copy import deepcopy
++from io import BytesIO
+ from pathlib import Path
+ import re
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
+ from docx.table import Table
+ from docx.text.paragraph import Paragraph
+ 
+ _HEADING_STYLES = {"Heading 1": 1, "Heading 2": 2, "Heading 3": 3,
+@@ -127,28 +128,154 @@ _CERT_IMAGE_KEYWORDS = ("娉ㄥ唽璇佷功", "鑱屼笟璧勬牸璇佷功", "璧勬牸璇佷功")
+ 
+ 
+ def _clear_table_images(table: Table) -> None:
+     """娓呴櫎鍗犱綅琛ㄦ暟鎹閲屽凡瀛樺湪鐨勫浘鐗囷紙妯℃澘鏄笂涓€娆℃姇鏍囧～杩囩殑鏂囨。锛屼細娈嬬暀鏃ф壂鎻忎欢锛夈€?""
+     for row in table.rows[1:]:
+         cell = row.cells[0]
+         for dr in list(cell._tc.iter(qn("w:drawing"))):
+             dr.getparent().remove(dr)
+ 
+ 
+-def _insert_image_into_table(table: Table, image_path: str) -> None:
+-    """寰€鍥剧墖鍗犱綅琛紙1鍒楋紝棣栬鏄爣绛炬枃瀛楋級鎻掑叆鍥剧墖銆傛棤鏂囦欢/璺緞鏃犳晥鍒欒烦杩囥€?""
++# ---------- 鍥剧墖绛夋瘮鑷€傚簲鎻掑叆锛圴1.2 妯″潡涓夛級 ----------
++
++def measure_image_cm(image_path: str):
++    """Pillow 璇诲浘鎸?96dpi 鎹㈢畻 (w_cm, h_cm, ratio=w/h)锛涙墦涓嶅紑/鏃?Pillow 杩斿洖 None銆?""
++    try:
++        from PIL import Image
++        with Image.open(str(image_path)) as im:
++            w, h = im.size
++    except Exception:
++        return None
++    if not w or not h:
++        return None
++    return (w / 96 * 2.54, h / 96 * 2.54, w / h)
++
++
++def fit_image_cm(image_path: str, avail_w_cm: float, avail_h_cm: float = 24.0,
++                 fallback_w_cm: float = 7.0) -> dict:
++    """绛夋瘮閫傞厤锛氬涓嶈秴杩?avail_w_cm銆侀珮涓嶈秴杩?avail_h_cm锛堣秴楂樺啀鍘嬪锛?+    鏍囪 too_long锛夛紱璇讳笉鍑哄昂瀵稿垯閫€鍖栧浐瀹氬搴︼紙degraded 璇存槑鍘熷洜锛夈€?""
++    m = measure_image_cm(image_path)
++    if m is None:
++        return {"width_cm": fallback_w_cm, "height_cm": 0,
++                "degraded": "鏃犳硶璇诲彇鍥剧墖灏哄锛岄€€鍖栦负鍥哄畾瀹藉害",
++                "too_long": False}
++    w0, h0, ratio = m
++    w = min(avail_w_cm, w0)
++    h = w / ratio
++    too_long = False
++    if h > avail_h_cm:
++        h = avail_h_cm
++        w = h * ratio
++        too_long = True
++    return {"width_cm": w, "height_cm": h, "degraded": "", "too_long": too_long}
++
++
++def insert_image_adaptive(container, image_path: str, avail_w_cm: float,
++                          avail_h_cm: float = 24.0,
++                          fallback_w_cm: float = 7.0) -> dict:
++    """鑷€傚簲鎻掑浘锛歝ontainer 涓?Paragraph 鎴?Cell锛?3000px 浣嶅浘鍏堥檷閲囨牱鍒?+    2000px 鍐呭啀鎻掑叆銆傝繑鍥?{"ok","reason","too_long","degraded"}锛?+    澶辫触鏄惧紡缁欏嚭 reason锛堜笉闈欓粯鍚炲紓甯革級銆?""
++    from docx.table import _Cell
++    if isinstance(container, _Cell):
++        para = (container.paragraphs[0] if container.paragraphs
++                else container.add_paragraph())
++    else:
++        para = container
+     if not image_path or not Path(image_path).exists():
+-        return
++        return {"ok": False, "reason": "鍥剧墖鏂囦欢涓嶅瓨鍦?,
++                "too_long": False, "degraded": ""}
++    fit = fit_image_cm(image_path, avail_w_cm, avail_h_cm, fallback_w_cm)
++    src = str(image_path)
++    if not fit["degraded"]:
++        try:
++            from PIL import Image
++            im = Image.open(str(image_path))
++            if max(im.size) > 3000:
++                im.thumbnail((2000, 2000))
++                buf = BytesIO()
++                im.save(buf, "PNG")
++                buf.seek(0)
++                src = buf
++        except Exception:
++            src = str(image_path)  # 闄嶉噰鏍峰け璐ヤ笉闃绘柇锛屾寜鍘熷浘鎻掑叆
++    try:
++        run = para.add_run()
++        if fit["height_cm"] > 0:
++            run.add_picture(src, width=Cm(fit["width_cm"]),
++                            height=Cm(fit["height_cm"]))
++        else:
++            run.add_picture(src, width=Cm(fit["width_cm"]))
++    except Exception as exc:
++        return {"ok": False, "reason": f"鎻掑叆澶辫触锛歿exc}",
++                "too_long": False, "degraded": fit["degraded"]}
++    return {"ok": True, "reason": "", "too_long": fit["too_long"],
++            "degraded": fit["degraded"]}
++
++
++def cell_available_width_cm(cell, default: float = 14.0) -> float:
++    """鍗曞厓鏍煎彲鐢ㄥ搴︼紙cm锛夛細浼樺厛鎵€鍦?w:tbl 鐨?tblGrid/gridCol 姹傚拰
++    锛坧ython-docx 瑙ｆ瀽涓?EMU锛?360000 鎹㈢畻锛夛紝鍥為€€ tcW(dxa 缂?567)锛?+    閮藉彇涓嶅埌鐢?default銆傚浘鐗囧崰浣嶈〃鍧囦负 1 鍒楋紝gridCol 姹傚拰鍗冲崟鍏冩牸瀹姐€?""
++    tc = cell._tc
++    tbl = tc.getparent()
++    while tbl is not None and tbl.tag != qn("w:tbl"):
++        tbl = tbl.getparent()
++    if tbl is not None:
++        grid = tbl.find(qn("w:tblGrid"))
++        if grid is not None:
++            total_emu = sum(int(gc.w) for gc in grid.findall(qn("w:gridCol"))
++                            if gc.w is not None)
++            if total_emu > 0:
++                return total_emu / 360000
++    tcPr = tc.tcPr
++    if tcPr is not None:
++        tcW = tcPr.find(qn("w:tcW"))
++        if tcW is not None:
++            w = tcW.get(qn("w:w"))
++            if w and w.lstrip("-").isdigit() and int(w) > 0:
++                return int(w) / 567.0
++    return default
++
++
++def page_text_width_cm(doc, default: float = 16.0) -> float:
++    """椤甸潰姝ｆ枃鍙敤瀹藉害锛坈m锛? 椤靛 - 宸﹀彸杈硅窛锛涘彇涓嶅埌鐢?default銆?""
++    try:
++        sec = doc.sections[0]
++        emu = sec.page_width - sec.left_margin - sec.right_margin
++        if emu and int(emu) > 0:
++            return int(emu) / 360000
++    except Exception:
++        return default
++    return default
++
++
++def _insert_image_into_table(table: Table, image_path: str,
++                             report: dict = None, table_index=None,
++                             person: str = "", label_kind: str = "") -> dict:
++    """寰€鍥剧墖鍗犱綅琛紙1鍒楋紝棣栬鏄爣绛炬枃瀛楋級鎻掑叆鍥剧墖锛堢瓑姣旇嚜閫傚簲锛氭寜鍗曞厓鏍?+    鍙敤瀹藉害涓庨〉闈㈠彲鐢ㄩ珮搴︾缉鏀撅紝>3000px 浣嶅浘鍏堥檷閲囨牱锛夈€?+    杩斿洖 {"ok","reason","too_long","degraded"}锛況eport 闈炵┖鏃舵寜
++    {"table_index","person","label_kind","ok","reason","too_long"}
++    璁板叆 report["images"]銆傛棤 report 鐨勬棫璋冪敤淇濇寔鍏煎銆?""
+     row = table.rows[1] if len(table.rows) > 1 else table.rows[0]
+     cell = row.cells[0]
+     para = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+-    para.add_run().add_picture(image_path, width=Cm(8))
++    result = insert_image_adaptive(
++        para, image_path, cell_available_width_cm(cell), fallback_w_cm=8.0)
++    if report is not None:
++        report.setdefault("images", []).append({
++            "table_index": table_index, "person": person,
++            "label_kind": label_kind, "ok": result["ok"],
++            "reason": result["reason"], "too_long": result["too_long"]})
++    return result
+ 
+ 
+ def _insert_person_images(doc, persons) -> None:
+     """鎸変汉鍛橀『搴忔妸鍥剧墖鎻掑叆銆屼笁銆佷汉鍛橀厤澶囪〃銆嶇殑鍗犱綅琛紙1鍒楋紝棣栬鍚爣绛炬枃瀛楋級銆?     persons 宸叉槸璐熻矗浜轰紭鍏堟帓搴忥細[{name, fields, is_lead}]銆?""
+     if not persons:
+         return
+     person_images = []
+     for p in persons:
+         f = p.get("fields") or {}
+@@ -229,37 +356,103 @@ _PROJECT_NO_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+鍙?)
+ _PROJECT_NAME_LABEL_RE = re.compile(r"椤筡s*鐩甛s*鍚峔s*绉癨s*[锛?]\s*(\S+)")
+ _DOC_DATE_RE = re.compile(
+     r"(鏃s*鏈焅s*[锛?]\s*)\d{4}\s*骞碶s*\d{1,2}\s*鏈圽s*\d{1,2}\s*鏃?)
+ _MEMBER_HEADING_RE = re.compile(r"^锛圽d+锛夐」鐩粍鍏朵粬浜哄憳-")
+ # 鏍囩寮忕┖鐧藉崰浣嶏紙P3锛夛細浠呭綋鏍囩鍚庢槸绌虹櫧/涓嬪垝绾垮崰浣嶏紙鎴栬灏撅級鏃跺～鍏咃紝
+ # 宸插惈鐪熷疄鍊肩殑琛岋紙濡?鎷涙爣浜猴細鏌愭煇涓績"锛変笉鍔? _TENDERER_LABEL_RE = re.compile(r"(鎷涙爣浜篬锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
+ _BIDDER_LABEL_RE = re.compile(r"(鎶曟爣浜哄悕绉癧锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
+ 
+ 
++# ---------- 閫氱敤鍗犱綅绗﹁鍒欐牳蹇冿紙V1.2锛?----------
++# 鍗曚竴浜嬪疄婧愶細濉厖绔紙_replace_stale_text/compute_text_subs锛変笌鏍￠獙绔?+# 锛坆id_verify锛夊叡鐢?build_placeholder_rules 浜у嚭鐨勮鍒欏垪琛ㄣ€?+
++DEFAULT_PLACEHOLDER_SYNONYMS = {
++    "宸ョ▼椤圭洰鍚嶇О": "椤圭洰鍚嶇О", "宸ョ▼鍚嶇О": "椤圭洰鍚嶇О",
++    "閲囪喘浜?: "鎷涙爣浜?, "渚涘簲鍟嗗悕绉?: "鎶曟爣浜哄悕绉?,
++}
++PLACEHOLDER_LABEL_KEYS = {
++    "椤圭洰鍚嶇О": "project_name", "鎷涙爣浜?: "tenderer",
++    "鎶曟爣浜哄悕绉?: "bidder_name", "椤圭洰缂栧彿": "project_no",
++    "鎷涙爣缂栧彿": "project_no", "鏍囨鍚嶇О": "section_name",
++    "鏍囨缂栧彿": "section_no", "鏃ユ湡": "doc_date",
++}
++BRACKET_LABEL_KEYS = {
++    "椤圭洰鍚嶇О": "project_name", "宸ョ▼鍚嶇О": "project_name",
++    "宸ョ▼椤圭洰鍚嶇О": "project_name", "鎷涙爣浜哄悕绉?: "tenderer",
++    "鎷涙爣浜?: "tenderer", "閲囪喘浜?: "tenderer",
++    "鎶曟爣浜哄悕绉?: "bidder_name", "渚涘簲鍟嗗悕绉?: "bidder_name",
++    "鏍囨鍚嶇О": "section_name", "鏍囨缂栧彿": "section_no",
++    "鏍囨": "section_name", "鏃ユ湡": "doc_date",
++}
++_SECTION_COMBO_RE = re.compile(
++    r"([锛?])\s*(?:椤圭洰鍚嶇О|宸ョ▼鍚嶇О|宸ョ▼椤圭洰鍚嶇О)\s*[锛?](\s*)"
++    r"([锛?])\s*鏍囨(?:鍚嶇О)?\s*[锛?]")
++_UNRECOGNIZED_UNDERSCORE_RE = re.compile(r"_{4,}|锛縶4,}")
++_DOC_DATE_BLANK_RE = re.compile(
++    r"(鏃s*鏈焅s*[锛?]?\s*)[_锛縗s]*骞碵_锛縗s]*鏈圼_锛縗s]*鏃?)
++_PLACEHOLDER_ONLY_RE = re.compile(r"^[_锛縗s]+$")
++
++
++def _effective_label_keys(synonyms):
++    keys = dict(PLACEHOLDER_LABEL_KEYS)
++    for alias, canonical in (synonyms or DEFAULT_PLACEHOLDER_SYNONYMS).items():
++        key = PLACEHOLDER_LABEL_KEYS.get(canonical)
++        if key and alias not in keys:
++            keys[alias] = key
++    return keys
++
++
++def _date_text(doc_date):
++    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", (doc_date or "").strip())
++    return f"{int(m.group(1))}骞磠int(m.group(2))}鏈坽int(m.group(3))}鏃? if m else ""
++
++
+ def _iter_cell_paragraphs(cell):
+     for para in cell.paragraphs:
+         yield para
+     for table in cell.tables:
+         for row in table.rows:
+             for sub in row.cells:
+                 yield from _iter_cell_paragraphs(sub)
+ 
+ 
++_MC_FALLBACK_TAG = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
++
++
++def _iter_textbox_paragraphs(doc):
++    """鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀斤紝涓嶉噸澶嶄骇鍑恒€?+    Word 鍐欏嚭鐨勬枃鏈涓?mc:AlternateContent锛歮c:Choice锛圖rawingML锛?
++    mc:Fallback锛圴ML锛夊悇鍚竴浠界浉鍚?w:txbxContent锛岃烦杩?Fallback 鍐呯殑锛?+    閬垮厤鍚屼竴娈佃惤浜у嚭涓ゆ銆?""
++    for txbx in doc.element.body.iter(qn("w:txbxContent")):
++        if any(a.tag == _MC_FALLBACK_TAG for a in txbx.iterancestors()):
++            continue
++        for child in txbx.iterchildren():
++            if child.tag == qn("w:p"):
++                yield Paragraph(child, doc)
++            elif child.tag == qn("w:tbl"):
++                for row in Table(child, doc).rows:
++                    for cell in row.cells:
++                        yield from _iter_cell_paragraphs(cell)
++
++
+ def _iter_all_paragraphs(doc):
+-    """姝ｆ枃娈佃惤 + 鎵€鏈夎〃鏍硷紙鍚祵濂楋級鍗曞厓鏍煎唴娈佃惤銆?""
++    """姝ｆ枃娈佃惤 + 鎵€鏈夎〃鏍硷紙鍚祵濂楋級鍗曞厓鏍煎唴娈佃惤 + 鏂囨湰妗嗗唴娈佃惤銆?""
+     for para in doc.paragraphs:
+         yield para
+     for table in doc.tables:
+         for row in table.rows:
+             for cell in row.cells:
+                 yield from _iter_cell_paragraphs(cell)
++    yield from _iter_textbox_paragraphs(doc)
+ 
+ 
+ def _is_toc_paragraph(para: Paragraph) -> bool:
+     style = para.style
+     name = (style.name if style is not None else "") or ""
+     return name.lower().startswith("toc")
+ 
+ 
+ def _para_text(para: Paragraph) -> str:
+     return "".join(r.text for r in para.runs)
+@@ -302,59 +495,163 @@ def _discover_stale_values(doc) -> tuple:
+                 stale_no = m.group(0)
+         if not stale_name:
+             m = _PROJECT_NAME_LABEL_RE.search(text)
+             if m:
+                 stale_name = m.group(1)
+         if stale_no and stale_name:
+             break
+     return stale_no, stale_name
+ 
+ 
+-def compute_text_subs(doc, project_no: str = "", project_name: str = "",
+-                      doc_date: str = "", tenderer: str = "",
+-                      bidder_name: str = "") -> list:
+-    """璁＄畻娈嬬暀鏂囨湰鏇挎崲瑙勫垯 [(pattern, repl)]锛堝惈 stale 缂栧彿/鍚嶇О杩愯鏃跺彂鐜帮級銆?-    _replace_stale_text 璋冩湰鍑芥暟鍐嶉€愭搴旂敤锛涘鍑轰笌闃茬鏀规牎楠岋紙bid_verify锛?-    鍏辩敤鍚屼竴濂楄鍒欙紝淇濊瘉"瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?-    tenderer/bidder_name 闈炵┖鏃惰拷鍔犳爣绛惧紡绌虹櫧鍗犱綅濉厖瑙勫垯
+-    锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夈€?""
+-    subs = []
++def build_placeholder_rules(doc, *, project_no: str = "", project_name: str = "",
++                            doc_date: str = "", tenderer: str = "",
++                            bidder_name: str = "", section_name: str = "",
++                            section_no: str = "", synonyms=None) -> list:
++    """鐢熸垚鍗犱綅绗︽浛鎹㈣鍒欏垪琛紝姣忛」 {"kind","label","key","value","pattern","repl"}銆?+    椤哄簭锛歴tale 鈫?缁勫悎 鈫?鏍囩锛堥暱搴﹂檷搴忥級鈫?鎷彿锛堥暱搴﹂檷搴忥級鈫?鏃ユ湡銆?+    濉厖绔笌鏍￠獙绔叡鐢ㄦ湰鍑芥暟锛屼繚璇?瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?""
++    values = {
++        "project_no": project_no, "project_name": project_name,
++        "doc_date": doc_date, "tenderer": tenderer,
++        "bidder_name": bidder_name, "section_name": section_name,
++        "section_no": section_no,
++    }
++    rules = []
++    # stale锛氭ā鏉挎畫鐣欑殑涓婃鎶曟爣缂栧彿/鍚嶇О锛堢┖鐧藉崰浣嶄笉绠?stale锛?     stale_no, stale_name = _discover_stale_values(doc)
+     if project_no and stale_no:
+         new_no = project_no if project_no.endswith("鍙?) else f"{project_no}鍙?
+-        subs.append((re.compile(re.escape(stale_no)), new_no))
+-    if project_name and stale_name and project_name != stale_name:
+-        subs.append((re.compile(re.escape(stale_name)), project_name))
+-    if doc_date:
+-        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", doc_date)
+-        if m:
+-            y, mo, d = (int(g) for g in m.groups())
+-            date_text = f"{y}骞磠mo}鏈坽d}鏃?
+-            subs.append((_DOC_DATE_RE, lambda match: match.group(1) + date_text))
+-    if tenderer:
+-        subs.append((_TENDERER_LABEL_RE,
+-                     lambda match: match.group(1) + tenderer))
+-    if bidder_name:
+-        subs.append((_BIDDER_LABEL_RE,
+-                     lambda match: match.group(1) + bidder_name))
+-    return subs
++        rules.append({"kind": "stale_no", "label": stale_no, "key": "project_no",
++                      "value": new_no, "pattern": re.compile(re.escape(stale_no)),
++                      "repl": new_no})
++    if (project_name and stale_name and project_name != stale_name
++            and not _PLACEHOLDER_ONLY_RE.match(stale_name)):
++        rules.append({"kind": "stale_name", "label": stale_name,
++                      "key": "project_name", "value": project_name,
++                      "pattern": re.compile(re.escape(stale_name)),
++                      "repl": project_name})
++    # 缁勫悎锛?椤圭洰鍚嶇О)(鏍囨鍚嶇О) 鈫?椤圭洰鍚?(鏍囨鍚?
++    if project_name and section_name:
++        hit = any(_SECTION_COMBO_RE.search(_para_text(p))
++                  for p in _iter_all_paragraphs(doc)
++                  if not _is_toc_paragraph(p))
++        if hit:
++            # 淇濈暀搴曠鍖归厤鍒扮殑鎷彿椋庢牸涓庝袱缁勯棿绌虹櫧
++            # 锛堝崐瑙掕緭鍏モ啋鍗婅锛屽叏瑙掕緭鍏モ啋鍏ㄨ锛?+            def _combo_repl(m, pn=project_name, sn=section_name):
++                close = "锛? if m.group(3) == "锛? else ")"
++                return f"{pn}{m.group(2)}{m.group(3)}{sn}{close}"
++            combo = f"{project_name} ({section_name})"
++            rules.append({"kind": "section_combo",
++                          "label": "(椤圭洰鍚嶇О)(鏍囨鍚嶇О)",
++                          "key": "project_name+section_name", "value": combo,
++                          "pattern": _SECTION_COMBO_RE, "repl": _combo_repl})
++    # 鏍囩寮忕┖鐧藉崰浣嶏細鏍囩鍚庝粎绌虹櫧/涓嬪垝绾匡紙鎴栬灏撅級鏃跺～鍏?+    label_keys = _effective_label_keys(synonyms)
++    for label in sorted(label_keys, key=len, reverse=True):
++        key = label_keys[label]
++        if key == "doc_date":
++            continue  # 鏃ユ湡鐢变笓鐢ㄦ棩鏈熻鍒欏鐞嗭紙鍚?____骞確_鏈坃_鏃?绌虹櫧鏍煎紡锛?+        value = str(values.get(key) or "").strip()
++        if not value:
++            continue
++        pattern = re.compile(
++            rf"({re.escape(label)}\s*[锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
++        rules.append({"kind": "label", "label": label, "key": key,
++                      "value": value, "pattern": pattern,
++                      "repl": (lambda m, l=label, v=value: m.group(1) + v)})
++    # 鎷彿寮忓崰浣嶏細(椤圭洰鍚嶇О)/锛堟嫑鏍囦汉鍚嶇О锛夌瓑
++    for label in sorted(BRACKET_LABEL_KEYS, key=len, reverse=True):
++        key = BRACKET_LABEL_KEYS[label]
++        value = str(values.get(key) or "").strip()
++        if not value:
++            continue
++        if key == "doc_date":
++            value = _date_text(doc_date)
++            if not value:
++                continue
++        pattern = re.compile(
++            rf"[锛?銆怽[]\s*{re.escape(label)}\s*[锛?銆慭]]")
++        rules.append({"kind": "bracket", "label": label, "key": key,
++                      "value": value, "pattern": pattern, "repl": value})
++    # 鏃ユ湡锛氬甫鏁板瓧鐨勬棫鏃ユ湡涓庣┖鐧芥棩鏈熷崰浣?+    date_text = _date_text(doc_date)
++    if date_text:
++        rules.append({"kind": "date", "label": "鏃ユ湡", "key": "doc_date",
++                      "value": date_text, "pattern": _DOC_DATE_RE,
++                      "repl": (lambda m, v=date_text: m.group(1) + v)})
++        rules.append({"kind": "date_blank", "label": "鏃ユ湡", "key": "doc_date",
++                      "value": date_text, "pattern": _DOC_DATE_BLANK_RE,
++                      "repl": (lambda m, v=date_text: m.group(1) + v)})
++    return rules
++
++
++def compute_text_subs(doc, project_no: str = "", project_name: str = "",
++                      doc_date: str = "", tenderer: str = "",
++                      bidder_name: str = "", section_name: str = "",
++                      section_no: str = "", synonyms=None) -> list:
++    """璁＄畻娈嬬暀鏂囨湰鏇挎崲瑙勫垯 [(pattern, repl)]锛? build_placeholder_rules 鐨?+    (pattern, repl) 鎶曞奖锛夈€傚鍑轰笌闃茬鏀规牎楠岋紙bid_verify锛夊叡鐢ㄥ悓涓€濂楄鍒欙紝
++    淇濊瘉"瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?""
++    return [(r["pattern"], r["repl"]) for r in build_placeholder_rules(
++        doc, project_no=project_no, project_name=project_name,
++        doc_date=doc_date, tenderer=tenderer, bidder_name=bidder_name,
++        section_name=section_name, section_no=section_no, synonyms=synonyms)]
++
++
++def scan_placeholders(doc, params: dict, synonyms=None) -> dict:
++    """鎵弿搴曠鍗犱綅绗﹀懡涓儏鍐碉細
++    杩斿洖 {"matched": [{"label","value","count","kind"}],
++          "suspicious": [{"text"}]}锛堟湭琚换浣曡鍒欏懡涓殑鎴愪覆涓嬪垝绾挎钀斤級銆?""
++    params = params or {}
++    if synonyms is None:
++        synonyms = params.get("synonyms")
++    rules = build_placeholder_rules(
++        doc,
++        project_no=str(params.get("project_no") or ""),
++        project_name=str(params.get("project_name") or ""),
++        doc_date=str(params.get("doc_date") or ""),
++        tenderer=str(params.get("tenderer") or ""),
++        bidder_name=str(params.get("bidder_name") or ""),
++        section_name=str(params.get("section_name") or ""),
++        section_no=str(params.get("section_no") or ""),
++        synonyms=synonyms)
++    texts = [_para_text(p) for p in _iter_all_paragraphs(doc)
++             if not _is_toc_paragraph(p)]
++    matched = []
++    for r in rules:
++        count = sum(len(r["pattern"].findall(t)) for t in texts)
++        if count:
++            matched.append({"label": r["label"], "value": r["value"],
++                            "count": count, "kind": r["kind"]})
++    suspicious = []
++    for t in texts:
++        if not t.strip():
++            continue
++        if (_UNRECOGNIZED_UNDERSCORE_RE.search(t)
++                and not any(r["pattern"].search(t) for r in rules)):
++            suspicious.append({"text": t})
++    return {"matched": matched, "suspicious": suspicious}
+ 
+ 
+ def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
+                         doc_date: str = "", tenderer: str = "",
+-                        bidder_name: str = "") -> None:
++                        bidder_name: str = "", section_name: str = "",
++                        section_no: str = "", synonyms=None) -> None:
+     """鏇挎崲妯℃澘涓畫鐣欑殑涓婃鎶曟爣鏂囨湰锛氳鍒欑敱 compute_text_subs 缁熶竴璁＄畻锛?-    姝ゅ浠呴€愭锛堝惈琛ㄦ牸鍗曞厓鏍硷紝璺宠繃 toc 娈碉級搴旂敤銆俻roject_no/doc_date 涓虹┖
+-    鍒欒烦杩囧搴旀浛鎹紝project_name 涓虹┖鍒欎笉鏇挎崲锛泃enderer/bidder_name 涓虹┖
+-    鍒欎笉濉厖瀵瑰簲鏍囩绌虹櫧銆?""
++    姝ゅ浠呴€愭锛堝惈琛ㄦ牸鍗曞厓鏍间笌鏂囨湰妗嗭紝璺宠繃 toc 娈碉級搴旂敤銆俻roject_no/doc_date
++    涓虹┖鍒欒烦杩囧搴旀浛鎹紝project_name 涓虹┖鍒欎笉鏇挎崲锛泃enderer/bidder_name/
++    section_name/section_no 涓虹┖鍒欎笉濉厖瀵瑰簲鏍囩/鎷彿绌虹櫧銆?""
+     subs = compute_text_subs(doc, project_no, project_name, doc_date,
+-                             tenderer=tenderer, bidder_name=bidder_name)
++                             tenderer=tenderer, bidder_name=bidder_name,
++                             section_name=section_name, section_no=section_no,
++                             synonyms=synonyms)
+     if not subs:
+         return
+     for para in _iter_all_paragraphs(doc):
+         if _is_toc_paragraph(para):
+             continue
+         for pattern, repl in subs:
+             _replace_in_paragraph(para, pattern, repl)
+ 
+ 
+ def _rename_member_headings(doc, member_names: list) -> None:
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index 4a27344..1081494 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -1,21 +1,21 @@
+ """搴曠濉厖闃茬鏀规牎楠岋細浜х墿 vs 搴曠閫愬潡瀵规瘮鈥斺€? 鏈粦瀹氳〃鏍硷紙鍚祵濂楋級鎵€鏈夊崟鍏冩牸鏂囨湰鍦ㄥ鐢ㄤ笌瀵煎嚭鐩稿悓鐨勭紪鍙?鍚嶇О/鏃ユ湡
+ 鏇挎崲瑙勫垯鍚庡繀椤婚€愪竴鐩哥瓑锛涙鏂囨钀芥枃鏈悓鏍峰瑙勫垯鍚庢瘮瀵广€? 鍛戒腑宸紓鍗充笉寰椾慨鏀瑰唴瀹硅鏀瑰姩銆?""
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.text.paragraph import Paragraph
+ 
+ from app.core.bid_template_exporter import (
+-    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs, _para_text,
+-    compute_text_subs,
++    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs,
++    _iter_textbox_paragraphs, _para_text, compute_text_subs,
+ )
+ 
+ 
+ def _is_section_break_para(para) -> bool:
+     """鍒嗚妭绗︽钀斤紙pPr 鍐呭惈 sectPr锛屾棤姝ｆ枃鍐呭锛夆€斺€旈〉闈㈣缃紙P2锛夋媶鑺?     浼氬湪浜х墿涓彃鍏ユ绫绘钀斤紝灞炴牸寮忓彉鍖栬€岄潪鍐呭鏀瑰姩锛屾瘮瀵规椂璺宠繃銆?""
+     pPr = para._p.find(qn("w:pPr"))
+     return pPr is not None and pPr.find(qn("w:sectPr")) is not None
+ 
+ 
+@@ -34,92 +34,141 @@ def _table_texts(table, subs=None) -> list:
+     for row in table.rows:
+         for cell in row.cells:
+             for para in _iter_cell_paragraphs(cell):
+                 text = _para_text(para)
+                 if subs and not _is_toc_paragraph(para):
+                     text = _apply_subs(text, subs)
+                 texts.append(text)
+     return texts
+ 
+ 
++def _textbox_texts(doc, subs=None) -> list:
++    """鏀堕泦鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀芥枃鏈紱subs 闈炵┖鏃堕€愭濂楃敤鏇挎崲瑙勫垯
++    锛坱oc 鏍峰紡娈甸櫎澶栵紝涓庡鍑轰晶 _replace_stale_text 瀵圭О锛夈€?""
++    out = []
++    for p in _iter_textbox_paragraphs(doc):
++        t = _para_text(p)
++        if subs and not _is_toc_paragraph(p):
++            t = _apply_subs(t, subs)
++        out.append(t)
++    return out
++
++
+ def verify_draft_fill(draft_path: str, out_path: str,
+                       bound_table_indices: set, replace_params: dict,
+                       swapped_toc: bool = False,
+-                      bound_paragraph_indices: set = None) -> dict:
++                      bound_paragraph_indices: set = None,
++                      table_insertions: dict = None) -> dict:
+     """鏍￠獙浜х墿鐩稿搴曠鐨勬湭缁戝畾鍖哄煙鏄惁琚敼鍔ㄣ€? 
+     bound_table_indices锛氬凡纭缁戝畾锛堝厑璁稿～鍏呮敼鍔級鐨勯《灞傝〃涓嬫爣闆嗗悎锛?     杩欎簺琛ㄦ暣浣撹烦杩囨瘮瀵癸紙鍏跺唴閮ㄦ钀芥湰灏变笉鍙備笌姝ｆ枃娈垫瘮瀵癸級銆?     bound_paragraph_indices锛氭巿鏉冮〉绛夌粡鐢ㄦ埛纭鍏佽姝ｆ枃濉厖鏀瑰姩鐨勬钀?-    涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗﹁繃婊ゅ悗鐨勬钀藉簭鍒楀潗鏍囩郴锛屼笌姣斿寰幆涓€鑷达級锛?+    涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗?绌烘杩囨护鍚庣殑娈佃惤搴忓垪鍧愭爣绯伙紝涓庢瘮瀵瑰惊鐜竴鑷达級锛?     杩欎簺娈佃惤鏁翠綋璺宠繃姣斿銆傞粯璁ょ┖闆嗐€?-    replace_params锛歿"project_no","project_name","doc_date"}锛屼笌瀵煎嚭鏃朵竴鑷达紱
++    table_insertions锛歿搴曠琛ㄤ笅鏍? 鍏跺悗鎻掑叆鐨勫厠闅嗚〃鏁皚锛坮esume_each
++    涓€浜轰竴琛ㄦ暣琛ㄥ厠闅嗭紝V1.2 7.4锛夛紱鍏嬮殕琛ㄦ棤搴曠瀵瑰簲锛岃鍏ヤ骇鐗╄〃鏁伴噺
++    绛夊紡涓斾笉鍙備笌姣斿锛屽簳绋胯〃鎸変笅鏍囦綅绉绘槧灏勫埌浜х墿琛ㄣ€傞粯璁ょ┖銆?+    replace_params锛歿"project_no","project_name","doc_date","tenderer",
++    "bidder_name","section_name","section_no","synonyms"}锛屼笌瀵煎嚭鏃朵竴鑷达紱
+     绌?鏌愰敭绌?鈫?compute_text_subs 鐩稿簲鏃犺鍒欙紝濂楃敤鏃犲銆?     toc 鏍峰紡娈佃惤涓や晶鎭掕烦杩囷紙瀵煎嚭鐨?_replace_stale_text 浠庝笉瑙︾ toc 娈碉級锛?     swapped_toc=True 鏃朵骇鐗?toc 娈靛凡鏁寸粍鎹负 TOC 鍩燂紝鍚屾牱鐢辫璺宠繃瑕嗙洊銆?     杩斿洖 {"ok": bool, "issues": [str], "checked_paragraphs": int,
+     "checked_tables": int}銆?     """
+     draft = Document(draft_path)
+     out = Document(out_path)
+     params = replace_params or {}
+     subs = compute_text_subs(
+         draft,
+         project_no=str(params.get("project_no") or ""),
+         project_name=str(params.get("project_name") or ""),
+         doc_date=str(params.get("doc_date") or ""),
+         tenderer=str(params.get("tenderer") or ""),
+-        bidder_name=str(params.get("bidder_name") or ""))
++        bidder_name=str(params.get("bidder_name") or ""),
++        section_name=str(params.get("section_name") or ""),
++        section_no=str(params.get("section_no") or ""),
++        synonyms=params.get("synonyms"))
+ 
+     def _split(doc):
+         paras, tables = [], []
+         for block in _iter_block_items(doc):
+             if isinstance(block, Paragraph):
+                 paras.append(block)
+             else:
+                 tables.append(block)
+         return paras, tables
+ 
+     d_paras, d_tables = _split(draft)
+     o_paras, o_tables = _split(out)
+ 
+     issues = []
+     checked_paragraphs = 0
+     checked_tables = 0
+     bound = set(bound_table_indices or set())
+     bound_paras = set(bound_paragraph_indices or set())
+ 
+-    # 椤跺眰琛ㄦ暟閲忥細bound 涔嬪鐨勬湭缁戝畾琛ㄦ暟蹇呴』涓€鑷达紙鎬绘暟涓€鑷村嵆绛変环锛?-    if len(d_tables) != len(o_tables):
++    # 椤跺眰琛ㄦ暟閲忥細bound 涔嬪鐨勬湭缁戝畾琛ㄦ暟蹇呴』涓€鑷达紱resume_each 鍏嬮殕琛?+    # 锛坱able_insertions锛夋棤搴曠瀵瑰簲锛岃鍏ヤ骇鐗╂暟閲忕瓑寮忎笖涓嶅弬涓庢瘮瀵?+    insertions = {int(k): int(v) for k, v in (table_insertions or {}).items()}
++    total_added = sum(insertions.values())
++    if len(o_tables) != len(d_tables) + total_added:
+         issues.append(
+-            f"椤跺眰琛ㄦ牸鏁伴噺涓嶄竴鑷达細搴曠 {len(d_tables)} 寮狅紝浜х墿 {len(o_tables)} 寮?)
+-    for i, (d_tab, o_tab) in enumerate(zip(d_tables, o_tables)):
++            f"椤跺眰琛ㄦ牸鏁伴噺涓嶄竴鑷达細搴曠 {len(d_tables)} 寮狅紝"
++            f"浜х墿 {len(o_tables)} 寮狅紙鍚櫥璁板厠闅?{total_added} 寮狅級")
++    # 搴曠琛ㄤ笅鏍?鈫?浜х墿琛ㄤ笅鏍囷紙鍏嬮殕鎻掑叆浣垮叾鍚庤〃鏁翠綋浣嶇Щ锛?+    draft_to_out, shift = {}, 0
++    for i in range(len(d_tables)):
++        draft_to_out[i] = i + shift
++        shift += insertions.get(i, 0)
++    for i, d_tab in enumerate(d_tables):
+         if i in bound:
+             continue
++        oi = draft_to_out[i]
++        if oi >= len(o_tables):
++            continue  # 鏁伴噺涓嶄竴鑷村凡鎶ワ紝璺宠繃闃茶秺鐣?+        o_tab = o_tables[oi]
+         checked_tables += 1
+         # 搴曠渚у鐢ㄤ笌瀵煎嚭鐩稿悓鐨勬浛鎹㈣鍒欙紙_replace_stale_text 浼氭敼鍐?         # 鏈粦瀹氳〃鍗曞厓鏍煎唴鐨勬畫鐣欑紪鍙?鍚嶇О/鏃ユ湡锛夛紝浜х墿渚у師鏍锋瘮瀵?         if _table_texts(d_tab, subs) != _table_texts(o_tab):
+             issues.append(f"琛ㄦ牸[{i}] 鏈粦瀹氫絾鍐呭琚敼鍔?)
+ 
+     # 娈佃惤锛歵oc 鏍峰紡娈典袱渚ф亽璺宠繃锛坃replace_stale_text 浠庝笉瑙︾ toc 娈碉紱
+     # swapped_toc 鏃朵骇鐗?toc 娈垫暣缁勬崲涓?TOC 鍩燂紝鍚屾牱琚烦杩囪鐩栵級锛?-    # 鍒嗚妭绗︽钀斤紙P2 鎷嗚妭鎻掑叆锛夊悓鏍疯烦杩?+    # 鍒嗚妭绗︽钀斤紙P2 鎷嗚妭鎻掑叆锛夊悓鏍疯烦杩囷紱绌烘锛堟棤鏂囨湰锛変笉鎼哄甫鍐呭銆?+    # 涓や晶鎭掕烦杩団€斺€斿厠闅嗚〃鍒嗛殧绌烘锛坮esume_each 涓€浜轰竴琛ㄦ彃鍏ワ級绛夌粨鏋勬€?+    # 鍙樺寲涓嶈涓哄唴瀹规敼鍔紱娉ㄦ剰浠呭惈鍥剧墖锛堟棤鏂囨湰锛夌殑娈佃惤鍚屽睘绌烘锛?+    # 涓嶅弬涓庢钀芥瘮瀵癸紙鍥剧墖鏀瑰姩鐢辫〃鏍?鏂囨湰妗嗙淮搴﹁鐩栦笉鍒帮紝灞炲凡鐭ヨ眮鍏嶏級锛?+    # bound_paragraph_indices 鍧愭爣绯诲悓涓恒€岄潪绌烘銆?     d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
+-               and not _is_section_break_para(p)]
++               and not _is_section_break_para(p) and _para_text(p)]
+     o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
+-               and not _is_section_break_para(p)]
++               and not _is_section_break_para(p) and _para_text(p)]
+     if len(d_paras) != len(o_paras):
+         issues.append(
+             f"娈佃惤鏁伴噺涓嶄竴鑷达細搴曠 {len(d_paras)} 娈碉紝浜х墿 {len(o_paras)} 娈?)
+     for i, (d_para, o_para) in enumerate(zip(d_paras, o_paras)):
+         if i in bound_paras:
+             continue
+         checked_paragraphs += 1
+         expected = _apply_subs(_para_text(d_para), subs)
+         if expected != _para_text(o_para):
+             snippet = _para_text(d_para)[:30]
+             issues.append(f'娈佃惤[{i}] "{snippet}" 鍐呭琚敼鍔?)
+ 
++    # 鏂囨湰妗嗭細搴曠渚у鐢ㄥ悓涓€濂楁浛鎹㈣鍒欏悗涓庝骇鐗╅€愭姣斿
++    d_txbx = _textbox_texts(draft, subs)
++    o_txbx = _textbox_texts(out)
++    if d_txbx != o_txbx:
++        if len(d_txbx) != len(o_txbx):
++            issues.append(
++                f"鏂囨湰妗嗗唴瀹硅鏀瑰姩锛氬簳绋?{len(d_txbx)} 娈碉紝浜х墿 {len(o_txbx)} 娈?)
++        else:
++            for i, (d_t, o_t) in enumerate(zip(d_txbx, o_txbx)):
++                if d_t != o_t:
++                    issues.append(f"鏂囨湰妗嗘钀絒{i}] 鍐呭琚敼鍔?)
++
+     return {"ok": not issues, "issues": issues,
+             "checked_paragraphs": checked_paragraphs,
+             "checked_tables": checked_tables}
+diff --git a/backend/app/db.py b/backend/app/db.py
+index 1aef736..fca0eea 100644
+--- a/backend/app/db.py
++++ b/backend/app/db.py
+@@ -130,20 +130,29 @@ class Database:
+                     cut_end TEXT DEFAULT '',
+                     bindings TEXT DEFAULT '{}',
+                     tenderer TEXT DEFAULT '',
+                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                 )
+             """)
+         self._migrate_project_assets_columns()
+         self._migrate_perfs_to_contracts()
+         self._migrate_bid_templates_columns()
++        self._migrate_projects_columns()
++
++    def _migrate_projects_columns(self):
++        """骞傜瓑杩佺Щ锛氭棫搴撶殑 projects 琛ㄨˉ section_name/section_no 鍒楋紙V1.2 鏍囨锛夈€?""
++        with self._connect() as conn:
++            cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
++            for name in ("section_name", "section_no"):
++                if name not in cols:
++                    conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT DEFAULT ''")
+ 
+     def _migrate_bid_templates_columns(self):
+         """骞傜瓑杩佺Щ锛氭棫搴撶殑 bid_templates 琛ㄨˉ tenderer 鍒楋紙P3 鎷涙爣浜哄悕绉帮級銆?""
+         with self._connect() as conn:
+             cols = {r[1] for r in conn.execute("PRAGMA table_info(bid_templates)")}
+             if "tenderer" not in cols:
+                 conn.execute("ALTER TABLE bid_templates "
+                              "ADD COLUMN tenderer TEXT DEFAULT ''")
+ 
+     def _migrate_project_assets_columns(self):
+@@ -219,21 +228,22 @@ class Database:
+             rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+             return [dict(r) for r in rows]
+ 
+     def get_project(self, project_id: int) -> Optional[dict]:
+         with self._connect() as conn:
+             conn.row_factory = sqlite3.Row
+             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+             return dict(row) if row else None
+ 
+     def update_project(self, project_id: int, **kwargs):
+-        allowed = {"name", "client", "bid_date", "project_type", "notes", "tender_file_path"}
++        allowed = {"name", "client", "bid_date", "project_type", "notes",
++                   "tender_file_path", "section_name", "section_no"}
+         fields = {k: v for k, v in kwargs.items() if k in allowed}
+         if not fields:
+             return
+         set_clause = ", ".join(f"{k} = ?" for k in fields)
+         with self._connect() as conn:
+             conn.execute(
+                 f"UPDATE projects SET {set_clause}, updated_at = ? WHERE id = ?",
+                 list(fields.values()) + [datetime.now().isoformat(), project_id])
+ 
+     def delete_project(self, project_id: int):
+diff --git a/backend/app/routers/bid.py b/backend/app/routers/bid.py
+index 257df89..ed0facb 100644
+--- a/backend/app/routers/bid.py
++++ b/backend/app/routers/bid.py
+@@ -3,20 +3,21 @@ import json
+ import tempfile
+ import uuid
+ from pathlib import Path
+ from urllib.parse import quote
+ 
+ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+ from fastapi.responses import FileResponse
+ from pydantic import BaseModel
+ 
+ from app import config
++from app import settings_store
+ from app.core.bid_draft_exporter import fill_draft
+ from app.core.bid_exporter import build_bid_docx, build_bid_xlsx
+ from app.core.bid_template_exporter import build_bid_docx_from_template
+ from app.db import Database
+ from app.deps import get_db
+ from app.services import bid_service
+ 
+ router = APIRouter()
+ 
+ 
+@@ -47,20 +48,22 @@ class BidAssetsIn(BaseModel):
+ class BidTemplateExportIn(BaseModel):
+     persons: list[TemplatePersonPick] = []
+     contracts: list[TemplateContractPick] = []
+     project_no: str = ""      # 椤圭洰缂栧彿锛堢┖鍒欎笉鏇挎崲妯℃澘娈嬬暀缂栧彿锛?     project_name: str = ""    # 椤圭洰鍚嶇О瑕嗙洊锛堢┖鍒欑敤鏁版嵁搴撻」鐩悕锛?     doc_date: str = ""        # 鏂囨。鏃ユ湡 YYYY-MM-DD锛堢┖鍒欎笉鏇挎崲妯℃澘娈嬬暀鏃ユ湡锛?     tenderer: str = ""        # 鎷涙爣浜哄悕绉帮紙绌哄垯涓嶅～鍏?鎷涙爣浜猴細____"绌虹櫧锛?     bidder_name: str = ""     # 鎶曟爣浜哄悕绉帮紙绌哄垯涓嶅～鍏?鎶曟爣浜哄悕绉帮細____"绌虹櫧锛?     legal_rep_id: int | None = None   # 娉曞畾浠ｈ〃浜猴紙legal 璧勪骇 id锛?     agent_id: int | None = None       # 濮旀墭浠ｇ悊浜猴紙legal 璧勪骇 id锛?+    section_name: str = ""   # 鏍囨鍚嶇О锛堢┖鍒欎笉濉厖"鏍囨鍚嶇О锛歘___/锛堟爣娈靛悕绉帮級"鍗犱綅锛?+    section_no: str = ""     # 鏍囨缂栧彿锛堢┖鍒欎笉濉厖"鏍囨缂栧彿锛歘___"鍗犱綅锛? 
+ 
+ def _legal_person(db: Database, asset_id: int | None) -> dict | None:
+     """鎶?legal 璧勪骇瑙ｆ瀽鎴愭巿鏉冮〉濉厖鎵€闇€瀛楀吀锛坽name, 韬唤璇佸彿, 姝ｅ弽闈㈡壂鎻忎欢}锛夈€?""
+     if asset_id is None:
+         return None
+     a = db.get_asset(asset_id)
+     if not a or a.get("type") != "legal":
+         return None
+     fields = a.get("fields") or {}
+@@ -128,20 +131,28 @@ def export_bid_assets(project_id: int, background_tasks: BackgroundTasks,
+ @router.post("/projects/{project_id}/bid-assets/export-template")
+ def export_bid_template(project_id: int, body: BidTemplateExportIn,
+                         background_tasks: BackgroundTasks,
+                         db: Database = Depends(get_db)):
+     """妯℃澘寮忓晢鍔℃爣瀵煎嚭锛氶」鐩湁搴曠锛坆id_templates锛夎蛋缁戝畾椹卞姩鏂扮绾?     锛坒ill_draft + X-Fill-Report 澶达級锛屽惁鍒欏洖閫€鏃фā鏉胯矾寰?     锛坉ata/鍟嗗姟鏍囨ā鏉?docx + build_bid_docx_from_template锛岃涓轰笉鍙橈級銆?""
+     project = _get_project_or_404(db, project_id)
+     if not body.persons and not body.contracts:
+         raise HTTPException(422, "璇峰厛鍕鹃€変汉鍛樻垨涓氱哗")
++    # 鏍囨瀛楁闈炵┖鏃舵寔涔呭寲鍒?projects锛堜笅娆″鍑哄彲鍥炴樉锛?+    section_update = {}
++    if (body.section_name or "").strip():
++        section_update["section_name"] = body.section_name.strip()
++    if (body.section_no or "").strip():
++        section_update["section_no"] = body.section_no.strip()
++    if section_update:
++        db.update_project(project_id, **section_update)
+     effective_name = (body.project_name or "").strip() or project["name"]
+     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in effective_name)
+     dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_鍟嗗姟鏍?docx"
+     filename = quote(f"{effective_name}_鍟嗗姟鏍?docx")
+     headers = {"Content-Disposition": f"attachment; filename*=utf-8''{filename}"}
+ 
+     bt = db.get_project_bid_template(project_id)
+     if bt and Path(bt.get("file_path") or "").exists():
+         # 鏂扮绾匡細搴曠 + 鐢ㄦ埛纭 bindings 濉厖锛岄檮濉厖/鏍￠獙鎶ュ憡
+         bindings = bt.get("bindings") or {}
+@@ -151,21 +162,24 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
+             [c.model_dump() for c in body.contracts])
+         auth = {"legal_rep": _legal_person(db, body.legal_rep_id),
+                 "agent": _legal_person(db, body.agent_id),
+                 "doc_date": (body.doc_date or "").strip()}
+         report = fill_draft(bt["file_path"], str(dest), bindings, data,
+                             project_no=(body.project_no or "").strip(),
+                             project_name=effective_name,
+                             doc_date=(body.doc_date or "").strip(),
+                             tenderer=(body.tenderer or "").strip(),
+                             bidder_name=(body.bidder_name or "").strip(),
+-                            auth=auth)
++                            auth=auth,
++                            section_name=(body.section_name or "").strip(),
++                            section_no=(body.section_no or "").strip(),
++                            synonyms=settings_store.get_placeholder_synonyms())
+         headers["X-Fill-Report"] = quote(
+             json.dumps(report, ensure_ascii=False))
+     else:
+         # 鏃ц矾寰勶細鍥哄畾妯℃澘濉厖锛堟棤搴曠鏃朵繚鎸佸師鏈夎涓猴級
+         template = config.BID_TEMPLATE_PATH
+         if not template.exists():
+             raise HTTPException(503, "鍟嗗姟鏍囨ā鏉挎湭閰嶇疆锛坉ata/鍟嗗姟鏍囨ā鏉?docx 缂哄け锛?)
+         data = bid_service.assemble_bid_template_data(
+             db,
+             [p.model_dump() for p in body.persons],
+diff --git a/backend/app/routers/bid_draft.py b/backend/app/routers/bid_draft.py
+index fc6bde0..2175fec 100644
+--- a/backend/app/routers/bid_draft.py
++++ b/backend/app/routers/bid_draft.py
+@@ -1,20 +1,23 @@
+-"""鍟嗗姟鏍囧簳绋?API锛氱珷鑺傚畾浣?/ 鐢熸垚锛堣鍒囷級/ 鎵嬪姩涓婁紶 / 棰勮鍥炴樉 / 缁戝畾纭銆?-璺敱灞傚彧鍋氬弬鏁版牎楠屼笌閿欒鐮佹槧灏勶紝涓氬姟缂栨帓鍦?BidDraftService銆?""
++"""鍟嗗姟鏍囧簳绋?API锛氱珷鑺傚畾浣?/ 鐢熸垚锛堣鍒囷級/ 鎵嬪姩涓婁紶 / 棰勮鍥炴樉 / 缁戝畾纭 /
++鍗犱綅绗﹂瑙堛€傝矾鐢卞眰鍙仛鍙傛暟鏍￠獙涓庨敊璇爜鏄犲皠锛屼笟鍔＄紪鎺掑湪 BidDraftService銆?""
+ import tempfile
+ from pathlib import Path
+ 
++from docx import Document
+ from fastapi import APIRouter, Depends, HTTPException, UploadFile
+ from pydantic import BaseModel
+ 
++from app import settings_store
+ from app.core.bid_draft import BidDraftError
+ from app.core.bid_table_classifier import ROLES
++from app.core.bid_template_exporter import scan_placeholders
+ from app.core.input_convert import InputConvertError
+ from app.db import Database
+ from app.deps import get_db
+ from app.services.bid_draft_service import BidDraftService
+ 
+ router = APIRouter()
+ 
+ 
+ class GenerateDraftIn(BaseModel):
+     start_heading: str = ""
+@@ -26,28 +29,40 @@ class GenerateDraftIn(BaseModel):
+ 
+ class TableBindingIn(BaseModel):
+     table_index: int
+     role: str
+     columns: dict = {}
+     person_scope: str = "all"
+     perf_scope: str = "all"
+     label_kind: str = ""
+     person: str = ""
+     header_rows: int = 1   # 琛ㄥご琛屾暟锛堜袱琛岃〃澶?2锛屽～鍏呮椂淇濈暀骞朵互鍏跺悗棣栬涓?donor锛?+    mode: str = ""         # "per_person"=涓€浜轰竴琛ㄦ暣琛ㄥ厠闅嗭紙resume_each锛夛紱绌?鍗曚唤濉厖
+     confirmed: bool = False
+ 
+ 
+ class BindingsIn(BaseModel):
+     tables: list[TableBindingIn] = []
+     swap_toc: bool = False
+ 
+ 
++class PlaceholderPreviewIn(BaseModel):
++    """鍗犱綅绗﹂瑙堝弬鏁帮紙鍏ㄥ彲閫夛紝榛樿绌衡€斺€旂┖鍊间笉鍙備笌瑙勫垯锛夈€?""
++    project_no: str = ""
++    project_name: str = ""
++    doc_date: str = ""
++    tenderer: str = ""
++    bidder_name: str = ""
++    section_name: str = ""
++    section_no: str = ""
++
++
+ def _project_or_404(db: Database, project_id: int) -> dict:
+     project = db.get_project(project_id)
+     if not project:
+         raise HTTPException(404, "椤圭洰涓嶅瓨鍦?)
+     return project
+ 
+ 
+ def _svc(db: Database) -> BidDraftService:
+     return BidDraftService(db.db_path)
+ 
+@@ -106,12 +121,30 @@ def save_bid_draft_bindings(project_id: int, body: BindingsIn,
+     row = db.get_project_bid_template(project_id)
+     if not row:
+         raise HTTPException(422, "灏氭棤搴曠锛岃鍏堢敓鎴愭垨涓婁紶搴曠")
+     for t in body.tables:
+         if t.role not in ROLES:
+             raise HTTPException(422, f"闈炴硶琛ㄦ牸瑙掕壊锛歿t.role}")
+         if t.table_index < 0:
+             raise HTTPException(422, "table_index 蹇呴』 鈮?0")
+         if not 1 <= t.header_rows <= 4:
+             raise HTTPException(422, "header_rows 蹇呴』鍦?1..4 涔嬮棿")
++        if t.mode not in ("", "per_person"):
++            raise HTTPException(422, f"闈炴硶濉厖妯″紡锛歿t.mode}")
+     db.update_bid_template(row["id"], bindings=body.model_dump())
+     return {"ok": True}
++
++
++@router.post("/projects/{project_id}/bid-draft/placeholders")
++def preview_placeholders(project_id: int, body: PlaceholderPreviewIn = None,
++                         db: Database = Depends(get_db)):
++    """鍗犱綅绗﹂瑙堬紙V1.2锛夛細瀵瑰綋鍓嶅簳绋胯窇 scan_placeholders锛堣鍒欏敮涓€鏉ユ簮
++    鍦?core锛岃矾鐢变笉澶嶅埗锛夛紝鍚屼箟璇嶅彇鍏ㄥ眬璁剧疆銆傛棤搴曠 鈫?404銆?+    杩斿洖 {"matched":[{label,value,count,kind}], "suspicious":[{text}]}銆?""
++    _project_or_404(db, project_id)
++    row = db.get_project_bid_template(project_id)
++    if not row or not Path(row.get("file_path") or "").exists():
++        raise HTTPException(404, "灏氭棤搴曠锛岃鍏堢敓鎴愭垨涓婁紶搴曠")
++    doc = Document(row["file_path"])
++    params = body.model_dump() if body else {}
++    return scan_placeholders(
++        doc, params, synonyms=settings_store.get_placeholder_synonyms())
+diff --git a/backend/app/routers/settings.py b/backend/app/routers/settings.py
+index 4a5c99d..d47625d 100644
+--- a/backend/app/routers/settings.py
++++ b/backend/app/routers/settings.py
+@@ -1,17 +1,20 @@
+ from fastapi import APIRouter
+ from pydantic import BaseModel
+ 
+ from app.core.llm_parser import (
+     CODING_DEFAULT_MODEL, CODING_MODELS, _friendly_api_error, _make_client, is_coding_key,
+ )
+-from app.settings_store import get_api_key, get_model, load_settings, save_settings
++from app.settings_store import (
++    get_api_key, get_model, get_placeholder_synonyms, load_settings,
++    save_placeholder_synonyms, save_settings,
++)
+ 
+ router = APIRouter()
+ 
+ 
+ class SettingsIn(BaseModel):
+     api_key: str | None = None
+     model: str | None = None
+ 
+ 
+ @router.get("")
+@@ -23,20 +26,35 @@ def read_settings():
+ def write_settings(body: SettingsIn):
+     data = load_settings()
+     if body.api_key is not None:
+         data["api_key"] = body.api_key
+     if body.model is not None:
+         data["model"] = body.model
+     save_settings(data)
+     return {"ok": True}
+ 
+ 
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙V1.2 Task 8a锛?----------
++
++@router.get("/placeholder-synonyms")
++def read_placeholder_synonyms():
++    """璇诲彇鍗犱綅绗﹀悓涔夎瘝搴擄紙鍒悕鈫掕鑼冩爣绛撅紱榛樿搴?+ 宸插瓨瑕嗙洊椤癸級銆?""
++    return get_placeholder_synonyms()
++
++
++@router.put("/placeholder-synonyms")
++def write_placeholder_synonyms(body: dict[str, str]):
++    """淇濆瓨鍚屼箟璇嶈鐩栭」锛坽鍒悕: 瑙勮寖鏍囩}锛岀┖閿?绌哄€艰娓呮礂锛夛紝
++    杩斿洖瑙勮寖鍖栧悗鐨勮鐩栭」銆?""
++    return save_placeholder_synonyms(body)
++
++
+ @router.post("/test")
+ def test_connection(body: SettingsIn | None = None):
+     # 璇锋眰浣擄紙琛ㄥ崟褰撳墠鍊硷級浼樺厛锛屼负绌?缂虹渷鏃跺洖閫€鍒扮鐩樺凡淇濆瓨鍊?     api_key = (body.api_key if body else None) or get_api_key()
+     if not api_key:
+         return {"ok": False, "message": "鏈厤缃?API Key"}
+     model = (body.model if body else None) or get_model()
+     # 涓?parse_with_llm 涓€鑷达細缂栫▼璁㈤槄 Key 鍙兘璧扮紪绋嬫ā鍨?     if is_coding_key(api_key) and model not in CODING_MODELS:
+         model = CODING_DEFAULT_MODEL
+diff --git a/backend/app/services/bid_draft_service.py b/backend/app/services/bid_draft_service.py
+index fca022e..28be8b2 100644
+--- a/backend/app/services/bid_draft_service.py
++++ b/backend/app/services/bid_draft_service.py
+@@ -16,21 +16,21 @@ from app.core.bid_draft import (
+ )
+ from app.core.bid_table_classifier import classify_tables
+ from app.core.bid_template_exporter import _is_toc_paragraph
+ from app.core.input_convert import ensure_docx
+ from app.db import Database
+ 
+ # 鍏ュ簱 bindings 鐨勮〃椤逛粎淇濈暀 schema 瀛楁锛圱ableBindingIn 瀵归綈锛夛紱
+ # header/confidence/context_heading 绛夊睍绀哄瓧娈电敱 preview 瀹炴椂鍒嗙被渚涚粰
+ _BINDING_KEYS = ("table_index", "role", "columns", "person_scope",
+                  "perf_scope", "label_kind", "person", "header_rows",
+-                 "confirmed")
++                 "mode", "confirmed")
+ 
+ _TOC_WARNING = "搴曠鍚洰褰曢〉锛屽鍑哄悗璇峰湪 Word 涓洿鏂伴〉鐮侊紙F9锛?
+ 
+ 
+ def _normalize_binding(item: dict) -> dict:
+     """鍒嗙被寤鸿椤?鈫?bindings schema 瀛楁锛坈onfirmed 鎭?false锛夈€?""
+     return {k: item.get(k) for k in _BINDING_KEYS}
+ 
+ 
+ class BidDraftService:
+diff --git a/backend/app/services/bid_service.py b/backend/app/services/bid_service.py
+index b4677b8..03e8271 100644
+--- a/backend/app/services/bid_service.py
++++ b/backend/app/services/bid_service.py
+@@ -392,33 +392,48 @@ def contract_semantics(c: dict, seq: int) -> dict:
+ 
+ def _perf_year(fields: dict) -> str:
+     """涓氱哗骞翠唤锛氫紭鍏?fields["骞翠唤"]锛屽惁鍒欏彇 绛捐鏃ユ湡 鍓?4 浣嶆暟瀛椼€?""
+     year = str((fields or {}).get("骞翠唤") or "").strip()
+     if year:
+         return year
+     sign = str((fields or {}).get("绛捐鏃ユ湡") or "").strip()
+     return sign[:4] if len(sign) >= 4 and sign[:4].isdigit() else ""
+ 
+ 
++def _perf_lines_for(name: str, contracts: list) -> list:
++    """鏌愪汉鍚嶄笅鍖归厤涓氱哗閫愯 "椤圭洰鍚嶇О锛堝勾浠斤級"
++    锛堝尮閰嶈鍒欙細fields["椤圭洰璐熻矗浜?]==濮撳悕锛涘勾浠藉彇 fields["骞翠唤"]锛?+    缂虹渷鍥為€€绛捐鏃ユ湡鍓?4 浣嶏級銆?""
++    lines = []
++    for c in contracts or []:
++        fields = c.get("fields") or {}
++        if str(fields.get("椤圭洰璐熻矗浜?) or "").strip() == (name or "").strip():
++            year = _perf_year(fields)
++            lines.append(f"{c['name']}锛坽year}锛? if year
++                         else str(c.get("name") or ""))
++    return lines
++
++
+ def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
+                             contract_picks: list) -> dict:
+     """搴曠椹卞姩瀵煎嚭鐨勫垪璇箟鏁版嵁缁勮銆傜鍚嶅畾绋匡細(db, project_id, person_picks,
+     contract_picks)鈥斺€斿繀椤绘帴鏀?project_id 浠ヤ究鏌?db.get_project_assets(project_id)
+     宸蹭繚瀛樺嬀閫夎ˉ鍏ㄤ汉鍛?role锛沺icks 娌跨敤 export-template 杞借嵎褰㈡€?     锛坧ersons: {asset_id, is_lead, certs?}锛沜ontracts: {asset_id, section}锛夈€?-    杩斿洖 {"persons": [{"name","fields","is_lead","role","sem"}],
++    杩斿洖 {"persons": [{"name","fields","is_lead","role","sem","perfs_text"}],
+            "contracts": [{"name","fields","section","sem"}],
+            "lead_perfs_text": str}銆?     persons 璐熻矗浜轰紭鍏堢ǔ瀹氭帓搴忥紙鍚?assemble_bid_template_data锛夛紱sem 涓?     person_semantics/contract_semantics 浜у嚭鐨勫垪璇箟琛屻€?-    lead_perfs_text = 璐熻矗浜哄悕涓嬪尮閰嶄笟缁╅€愯 "椤圭洰鍚嶇О锛堝勾浠斤級"锛圽n 杩炴帴锛?-    鍖归厤瑙勫垯鍚?assemble_bid_template_data锛歠ields["椤圭洰璐熻矗浜?]==璐熻矗浜哄鍚嶏級锛?+    perfs_text = 璇ヤ汉鍚嶄笅鍖归厤涓氱哗閫愯 "椤圭洰鍚嶇О锛堝勾浠斤級"锛圽n 杩炴帴锛?+    鍖归厤瑙勫垯鍚?assemble_bid_template_data锛歠ields["椤圭洰璐熻矗浜?]==鏈汉濮撳悕锛?+    V1.2 7.4 涓€浜轰竴琛ㄧ敤锛夛紱lead_perfs_text = 璐熻矗浜虹殑 perfs_text锛堟棫閿吋瀹癸級锛?     鏃犺礋璐ｄ汉鎴栨棤鍖归厤 鈫?""銆?""
+     saved_roles = {
+         row["asset_id"]: row.get("role") or ""
+         for row in db.get_project_assets(project_id, asset_type="person")
+     }
+ 
+     persons = []
+     for pick in person_picks or []:
+         asset = db.get_asset(pick.get("asset_id"))
+         if asset and asset.get("type") == "person":
+@@ -440,20 +455,19 @@ def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
+     for pick in contract_picks or []:
+         asset = db.get_asset(pick.get("asset_id"))
+         if asset and asset.get("type") == "contract":
+             contracts.append({"name": asset["name"],
+                               "fields": asset.get("fields") or {},
+                               "section": pick.get("section")})
+     for i, c in enumerate(contracts, 1):
+         c["sem"] = contract_semantics(c, i)
+ 
+     lead = next((p for p in persons if p["is_lead"]), None)
+-    lead_lines = []
+-    if lead is not None:
+-        for c in contracts:
+-            if str(c["fields"].get("椤圭洰璐熻矗浜?) or "").strip() == lead["name"]:
+-                year = _perf_year(c["fields"])
+-                lead_lines.append(
+-                    f"{c['name']}锛坽year}锛? if year else c["name"])
++    # V1.2 7.4锛氭瘡浜轰骇鍑?perfs_text锛堟湰浜哄悕涓嬩笟缁╂枃鏈紝涓€浜轰竴琛ㄧ敤锛夛紱
++    # lead_perfs_text = 璐熻矗浜虹殑 perfs_text锛堟棫閿吋瀹癸級
++    for p in persons:
++        p["perfs_text"] = "\n".join(_perf_lines_for(p["name"], contracts))
++    lead_lines = _perf_lines_for(lead["name"], contracts) \
++        if lead is not None else []
+ 
+     return {"persons": persons, "contracts": contracts,
+             "lead_perfs_text": "\n".join(lead_lines)}
+diff --git a/backend/app/settings_store.py b/backend/app/settings_store.py
+index c78b0b4..b5fa771 100644
+--- a/backend/app/settings_store.py
++++ b/backend/app/settings_store.py
+@@ -137,10 +137,37 @@ def save_field_config(cfg: dict) -> dict:
+         normalized["contract_subtypes"] = {
+             st: _normalize_field_list(raw_sub.get(st)) for st in CONTRACT_SUBTYPES}
+     else:
+         # 鏈彁浜?contract_subtypes 鏃朵繚鐣欏凡瀛樺€硷紝閬垮厤 PUT 鏃х粨鏋勯厤缃椂涓㈠け
+         prev = (all_settings.get("field_config") or {}).get("contract_subtypes")
+         if prev:
+             normalized["contract_subtypes"] = prev
+     all_settings["field_config"] = normalized
+     save_settings(all_settings)
+     return normalized
++
++
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙璁剧疆 API 鍦ㄥ悗缁换鍔℃帴鍏ワ級 ----------
++
++from app.core.bid_template_exporter import DEFAULT_PLACEHOLDER_SYNONYMS
++
++
++def get_placeholder_synonyms() -> dict:
++    """璇诲彇鍗犱綅绗﹀悓涔夎瘝锛堝埆鍚嶁啋瑙勮寖鏍囩锛夛紝鏈繚瀛樼殑椤瑰洖閫€榛樿搴撱€?""
++    raw = load_settings().get("placeholder_synonyms") or {}
++    base = dict(DEFAULT_PLACEHOLDER_SYNONYMS)
++    for alias, canonical in raw.items():
++        alias, canonical = str(alias).strip(), str(canonical).strip()
++        if alias and canonical:
++            base[alias] = canonical
++    return base
++
++
++def save_placeholder_synonyms(m: dict) -> dict:
++    """淇濆瓨鍗犱綅绗﹀悓涔夎瘝瑕嗙洊椤癸紙瀛?settings 鐨?placeholder_synonyms 閿級锛?+    杩斿洖娓呮礂鍚庣殑 dict銆?""
++    clean = {str(k).strip(): str(v).strip()
++             for k, v in (m or {}).items() if str(k).strip() and str(v).strip()}
++    s = load_settings()
++    s["placeholder_synonyms"] = clean
++    save_settings(s)
++    return clean
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 9347268..cae25ca 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -3,10 +3,11 @@ uvicorn[standard]>=0.29
+ PyMuPDF>=1.24
+ python-docx>=1.1
+ openpyxl>=3.1
+ openai>=1.30
+ python-multipart>=0.0.9
+ pytest>=8.0
+ httpx>=0.27
+ rapidocr_onnxruntime>=1.2
+ pywin32>=306; platform_system=="Windows"
+ pdf2docx>=0.5.8
++Pillow>=10
+diff --git a/backend/tests/test_api_bid.py b/backend/tests/test_api_bid.py
+index f68b473..b99b9d7 100644
+--- a/backend/tests/test_api_bid.py
++++ b/backend/tests/test_api_bid.py
+@@ -1,15 +1,17 @@
+ """鍟嗗姟鏍?API 娴嬭瘯锛堣璁℃枃妗?搂8 娴嬭瘯璁″垝 1-8锛夛細
+ 鍕鹃€?PUT鈫扜ET 寰€杩?/ 瑕嗙洊璇箟 / 鏍￠獙閿欒 / xlsx銆乨ocx 瀵煎嚭 /
+ 绌哄嬀閫夊鍑?422 / expiring-detail 鏄庣粏 / 璇佷功鏈夋晥鏈熻鍛婏紙expired銆乻oon锛夈€?""
+ from datetime import date, timedelta
+ from io import BytesIO
++from urllib.parse import unquote
++import json
+ 
+ import pytest
+ from docx import Document
+ from fastapi.testclient import TestClient
+ from openpyxl import load_workbook
+ 
+ from app.core.bid_exporter import PERSON_HEADERS
+ from app.db import Database
+ from app.deps import get_db
+ from app.main import app
+@@ -371,10 +373,96 @@ def test_cert_warning_soon_with_past_bid_date(client):
+         "persons": [{"asset_id": person_id, "role": ""}], "contracts": []})
+ 
+     data = client.get(_bid_url(pid)).json()
+     warnings = data["persons"][0]["cert_warnings"]
+     assert len(warnings) == 1
+     w = warnings[0]
+     assert w["level"] == "soon"
+     assert w["cert_name"] == "涓€绾у缓閫犲笀"
+     assert w["days_left"] == 15
+     assert "15" in w["message"]
++
++
++# ---------- 9. 鏍囨瀛楁锛圴1.2 Task 2锛?----------
++
++def test_projects_has_section_columns(client):
++    from app.db import Database
++    db = Database(); db.init_schema(); db.init_schema()   # 骞傜瓑
++    with db._connect() as conn:
++        cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
++    assert {"section_name", "section_no"} <= cols
++
++
++def _make_section_draft(client, db_path, pid, tmp_path):
++    """鐩存帴閫犲簳绋匡細鍚?鏍囨鍚嶇О锛歘___锛堟爣绛剧┖鐧斤級涓?锛堟爣娈靛悕绉帮級锛堟嫭鍙峰崰浣嶏級銆?""
++    doc = Document()
++    doc.add_paragraph("鏍囨鍚嶇О锛歘___")
++    doc.add_paragraph("锛堟爣娈靛悕绉帮級")
++    path = tmp_path / "draft.docx"
++    doc.save(str(path))
++    db = Database(db_path)
++    db.create_bid_template(pid, "搴曠", str(path))
++    return path
++
++
++def test_export_section_param_fills_label_and_bracket(client, db_path, tmp_path):
++    """瀵煎嚭 body 甯?section_name/section_no 鈫?搴曠鏍囩绌虹櫧涓庢嫭鍙峰崰浣嶈濉厖锛?+    section 瀛楁闈炵┖鏃舵寔涔呭寲鍒?projects銆?""
++    pid = _make_project(client)
++    _make_section_draft(client, db_path, pid, tmp_path)
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": [],
++        "section_name": "涓€鏍囨", "section_no": "A1"})
++    assert r.status_code == 200
++    out = Document(BytesIO(r.content))
++    texts = [p.text for p in out.paragraphs]
++    assert "鏍囨鍚嶇О锛氫竴鏍囨" in texts
++    assert "涓€鏍囨" in texts and "锛堟爣娈靛悕绉帮級" not in texts
++    # 鏍￠獙绔叡鐢ㄥ悓涓€濂楄鍒?鈫?涓嶈鎶?+    report = json.loads(unquote(r.headers["x-fill-report"]))
++    assert report["verify"]["ok"] is True
++    # 闈炵┖鏍囨鎸佷箙鍖栧埌 projects
++    row = Database(db_path).get_project(pid)
++    assert row["section_name"] == "涓€鏍囨"
++    assert row["section_no"] == "A1"
++
++
++def test_export_section_empty_skips_fill(client, db_path, tmp_path):
++    """section 涓虹┖ 鈫?涓嶅～鍏咃紝绌虹櫧鍗犱綅淇濇寔鍘熸牱锛宲rojects 涓嶅啓鏍囨銆?""
++    pid = _make_project(client)
++    _make_section_draft(client, db_path, pid, tmp_path)
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": []})
++    assert r.status_code == 200
++    out = Document(BytesIO(r.content))
++    texts = [p.text for p in out.paragraphs]
++    assert "鏍囨鍚嶇О锛歘___" in texts
++    assert "锛堟爣娈靛悕绉帮級" in texts
++    row = Database(db_path).get_project(pid)
++    assert row["section_name"] == "" and row["section_no"] == ""
++
++
++def test_export_uses_placeholder_synonyms(client, db_path, tmp_path):
++    """PUT 鍚屼箟璇嶅簱锛堢敳鏂光啋鎷涙爣浜猴級鍚庡鍑猴細搴曠"鐢叉柟锛歘___"琚～锛?+    涓?verify 鍚屾簮涓嶈鎶ワ紙V1.2 4.5 瀵煎嚭绔帴鍏ュ悓涔夎瘝搴擄級銆?""
++    pid = _make_project(client)
++    doc = Document()
++    doc.add_paragraph("鐢叉柟锛歘___")
++    p = tmp_path / "draft.docx"
++    doc.save(str(p))
++    Database(db_path).create_bid_template(pid, "搴曠", str(p))
++    r = client.put("/api/settings/placeholder-synonyms",
++                   json={"鐢叉柟": "鎷涙爣浜?})
++    assert r.status_code == 200
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": [], "tenderer": "鏌愪腑蹇?})
++    assert r.status_code == 200
++    texts = [p.text for p in Document(BytesIO(r.content)).paragraphs]
++    assert "鐢叉柟锛氭煇涓績" in texts
++    report = json.loads(unquote(r.headers["x-fill-report"]))
++    assert report["verify"]["ok"] is True
+diff --git a/backend/tests/test_api_bid_draft.py b/backend/tests/test_api_bid_draft.py
+index 62e5d68..a11076f 100644
+--- a/backend/tests/test_api_bid_draft.py
++++ b/backend/tests/test_api_bid_draft.py
+@@ -270,20 +270,82 @@ def test_put_bindings_header_rows_roundtrip(client, tmp_path):
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "header_rows": 2,
+                     "confirmed": True}],
+         "swap_toc": False})
+     assert r.status_code == 200
+     g = client.get(f"/api/projects/{pid}/bid-draft").json()
+     assert g["tables"][0]["header_rows"] == 2
+ 
+ 
++def test_put_bindings_header_rows_three_accepted(client, tmp_path):
++    """header_rows=3 灞炲悎娉曞煙 1..4锛圴1.2 Task 4 杈圭晫琛ュ厖锛夆啋 200 涓斿洖鏄俱€?""
++    pid = _make_project(client)
++    _upload_tender(client, pid, tmp_path)
++    gen = _generate(client, pid)
++    sug = gen["tables"][0]
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
++        "tables": [{"table_index": sug["table_index"], "role": sug["role"],
++                    "columns": sug["columns"], "header_rows": 3,
++                    "confirmed": True}],
++        "swap_toc": False})
++    assert r.status_code == 200
++    g = client.get(f"/api/projects/{pid}/bid-draft").json()
++    assert g["tables"][0]["header_rows"] == 3
++
++
++def test_put_bindings_mode_validation_and_roundtrip(client, tmp_path):
++    """mode锛圴1.2 涓€浜轰竴琛級锛?per_person"/"" 鎺ュ彈涓斿洖鏄撅紱闈炴硶鍊?鈫?422銆?""
++    pid = _make_project(client)
++    _upload_tender(client, pid, tmp_path)
++    gen = _generate(client, pid)
++    sug = gen["tables"][0]
++    base = {"table_index": sug["table_index"], "role": sug["role"],
++            "columns": sug["columns"], "confirmed": True}
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
++                   json={"tables": [{**base, "mode": "per_person"}],
++                         "swap_toc": False})
++    assert r.status_code == 200
++    g = client.get(f"/api/projects/{pid}/bid-draft").json()
++    assert g["tables"][0]["mode"] == "per_person"
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
++                   json={"tables": [{**base, "mode": "bogus"}],
++                         "swap_toc": False})
++    assert r.status_code == 422
++
++
++# ---------- 鍗犱綅绗﹂瑙堬紙V1.2 Task 8a锛?----------
++
++def test_placeholders_preview_no_draft_404(client):
++    pid = _make_project(client)
++    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders", json={})
++    assert r.status_code == 404
++
++
++def test_placeholders_preview_matched(client, tmp_path, db_path):
++    """搴曠鍚?鎷涙爣浜猴細____" 鈫?棰勮 matched 鍚?鎷涙爣浜?浼犲叆 tenderer銆?""
++    from app.db import Database
++    pid = _make_project(client)
++    doc = Document()
++    doc.add_paragraph("鎷涙爣浜猴細____")
++    p = tmp_path / "draft.docx"
++    doc.save(str(p))
++    Database(db_path).create_bid_template(pid, "搴曠", str(p))
++    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders",
++                    json={"tenderer": "鏌愪腑蹇?})
++    assert r.status_code == 200
++    data = r.json()
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in data["matched"])
++    assert "suspicious" in data
++
++
+ def test_put_bindings_roundtrip(client, tmp_path):
+     pid = _make_project(client)
+     _upload_tender(client, pid, tmp_path)
+     gen = _generate(client, pid)
+     sug = gen["tables"][0]
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "person_scope": "all",
+                     "perf_scope": "all", "label_kind": "", "person": "",
+                     "confirmed": True}],
+diff --git a/backend/tests/test_api_settings.py b/backend/tests/test_api_settings.py
+index 786913a..dbae65f 100644
+--- a/backend/tests/test_api_settings.py
++++ b/backend/tests/test_api_settings.py
+@@ -49,10 +49,32 @@ def test_test_connection_falls_back_to_disk_values(client, monkeypatch):
+     assert captured["api_key"] == "sk-disk-saved"
+ 
+ 
+ def test_test_connection_coding_key_model_fallback(client, monkeypatch):
+     # sk-kimi- 缂栫▼ Key + 闈炵紪绋嬫ā鍨?鈫?鍥為€€鍒?CODING_DEFAULT_MODEL
+     captured = {}
+     _patch_make_client(monkeypatch, captured)
+     r = client.post("/api/settings/test", json={"api_key": "sk-kimi-abc123", "model": "kimi-k3"})
+     assert r.status_code == 200 and r.json()["ok"] is True
+     assert captured["create"]["model"] == CODING_DEFAULT_MODEL
++
++
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙V1.2 Task 8a锛?----------
++
++def test_placeholder_synonyms_get_default(client):
++    """GET 榛樿搴擄細鍚?閲囪喘浜衡啋鎷涙爣浜?绛夊唴寤哄悓涔夎瘝銆?""
++    r = client.get("/api/settings/placeholder-synonyms")
++    assert r.status_code == 200
++    data = r.json()
++    assert data["閲囪喘浜?] == "鎷涙爣浜?
++    assert data["宸ョ▼椤圭洰鍚嶇О"] == "椤圭洰鍚嶇О"
++
++
++def test_placeholder_synonyms_put_roundtrip(client):
++    """PUT 鑷畾涔夎鐩栵紙绌洪敭/绌哄€艰娓呮礂锛夆啋 鍥炶涓€鑷翠笖榛樿搴撲粛鍦ㄣ€?""
++    r = client.put("/api/settings/placeholder-synonyms",
++                   json={"鐢叉柟": "鎷涙爣浜?, "  ": "鏌愭爣绛?})
++    assert r.status_code == 200
++    assert r.json() == {"鐢叉柟": "鎷涙爣浜?}
++    data = client.get("/api/settings/placeholder-synonyms").json()
++    assert data["鐢叉柟"] == "鎷涙爣浜?
++    assert data["閲囪喘浜?] == "鎷涙爣浜?   # 榛樿搴撲笉琚鐩栦涪澶?diff --git a/backend/tests/test_bid_classifier.py b/backend/tests/test_bid_classifier.py
+index e9877aa..932ea5e 100644
+--- a/backend/tests/test_bid_classifier.py
++++ b/backend/tests/test_bid_classifier.py
+@@ -259,10 +259,81 @@ def test_merged_header_cells(tmp_path):
+     result = classify_tables(_save(doc, tmp_path))
+     item = result[0]
+     assert item["role"] == "person_roster"
+     # 鍚堝苟鍚?搴忓彿/濮撳悕 鍚屽崰缃戞牸鍒?0锛屽叾浣欏垪鎸夌綉鏍间笅鏍囦笉閿欎綅
+     assert item["columns"]["title"] == 2
+     assert item["columns"]["work_years"] == 3
+     assert item["columns"]["certs"] == 4
+     col0_sem = "name" if item["columns"].get("name") == 0 else "seq"
+     assert item["columns"][col0_sem] == 0
+     assert max(item["columns"].values()) < 5
++
++
++# ---------- 鎷熸淳宀椾綅鍒楋紙V1.2 Task 4锛?----------
++
++def test_role_column_keywords_include_bendan():
++    from app.core.bid_table_classifier import PERSON_COL_KEYWORDS
++    assert "鏈」鐩换鑱? in PERSON_COL_KEYWORDS["role"]
++    assert "鏈」鐩亴鍔? in PERSON_COL_KEYWORDS["role"]
++
++
++def test_person_roster_maps_role_column(tmp_path):
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩换鑱?],
++        ["寮犱笁", "纭曞＋", "椤圭洰缁忕悊"],
++    ])
++    item = next(s for s in classify_tables(_save(doc, tmp_path))
++                if s["role"] == "person_roster")
++    assert "role" in item["columns"]
++    assert item["columns"]["role"] == 2
++
++
++def test_role_beats_label_on_bendan_zhiwu(tmp_path):
++    """銆屾湰椤圭洰鑱屽姟銆嶅惈 label 鍏抽敭璇嶃€岃亴鍔°€嶏細闀垮叧閿瘝浼樺厛锛宺ole 鍛戒腑鎶㈠垪锛?+    label 涓嶅緱鎴儭锛圴1.2 7.6 闃插洖褰掞級銆?""
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩亴鍔?],
++        ["寮犱笁", "纭曞＋", "椤圭洰缁忕悊"],
++    ])
++    item = classify_tables(_save(doc, tmp_path))[0]
++    assert item["columns"].get("role") == 2
++    assert item["columns"].get("label") != 2
++
++
++def test_header_rows_two_when_row0_no_data_and_row1_header(tmp_path):
++    """鍙岃琛ㄥご绗笁瑙勫垯锛?.1 琛ュ己锛夛細row0 鍛戒腑琛ㄥご鍏抽敭璇嶄絾鏁磋鏃犳暟鎹涔?+    锛堟棤鏁板瓧/閲戦绛夛級锛屼笖 row1 涔熷懡涓〃澶村叧閿瘝绛惧悕锛堚墺2锛夆啋 header_rows=2銆?""
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "鑱岀О", "鎵т笟璧勬牸"],        # row0锛氫笂灞傝〃澶达紙鏃犳暟瀛楋級
++        ["鑱屽姟", "涓撲笟宸ヤ綔骞撮檺", "璧勬牸璇佷功"],  # row1锛氫笅灞傝〃澶达紙鍚屾牱鍛戒腑鍏抽敭璇嶏級
++        ["寮犱笁", "宸ョ▼甯?, "閫犱环宸ョ▼甯?],     # row2 璧蜂负鏁版嵁
++    ])
++    item = classify_tables(_save(doc, tmp_path))[0]
++    assert item["role"] == "person_roster"
++    assert item["header_rows"] == 2
++
++
++def test_export_role_column_filled(tmp_path):
++    """绔埌绔細浜哄憳琛?role 鍒?鈫?fill_draft 鍐欏叆 person_semantics 鐨?role 鍊笺€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    _make_table(doc, [
++        ["濮撳悕", "瀛﹀巻", "鏈」鐩换鑱?],
++        ["鏃у悕", "鏃у鍘?, "鏃у矖浣?],
++    ])
++    draft = _save(doc, tmp_path)
++    out = str(tmp_path / "out.docx")
++    bindings = {"tables": [{
++        "table_index": 0, "role": "person_roster",
++        "columns": {"name": 0, "education": 1, "role": 2},
++        "person_scope": "all", "confirmed": True}], "swap_toc": False}
++    data = {"persons": [{"name": "寮犱笁", "is_lead": True,
++                         "sem": {"name": "寮犱笁", "education": "纭曞＋",
++                                 "role": "椤圭洰缁忕悊"}}],
++            "contracts": []}
++    report = fill_draft(draft, out, bindings, data)
++    rows = [[c.text for c in r.cells] for r in Document(out).tables[0].rows]
++    assert rows[1][2] == "椤圭洰缁忕悊"
++    assert report["verify"]["ok"] is True
+\ No newline at end of file
+diff --git a/backend/tests/test_bid_draft_export.py b/backend/tests/test_bid_draft_export.py
+index bc75bf4..43db5e0 100644
+--- a/backend/tests/test_bid_draft_export.py
++++ b/backend/tests/test_bid_draft_export.py
+@@ -200,21 +200,22 @@ def test_lead_resume_no_lead_writes_nothing(tmp_path):
+ def test_image_slot_insert(tmp_path):
+     png = tmp_path / "cert.png"
+     png.write_bytes(PNG_1X1)
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, _bindings(), _data(scan=str(png)))
+     table = Document(out).tables[3]
+     assert table._tbl.findall(f".//{qn('w:drawing')}")
+     img = report["images"][0]
+     assert img == {"table_index": 3, "person": "寮犱笁",
+-                   "label_kind": "娉ㄥ唽璇佷功", "ok": True}
++                   "label_kind": "娉ㄥ唽璇佷功", "ok": True,
++                   "reason": "", "too_long": False}
+ 
+ 
+ def test_image_slot_missing_file_no_throw(tmp_path):
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, _bindings(),
+                         _data(scan=str(tmp_path / "涓嶅瓨鍦?png")))
+     assert report["images"][0]["ok"] is False
+     assert not Document(out).tables[3]._tbl.findall(f".//{qn('w:drawing')}")
+ 
+@@ -367,21 +368,21 @@ def test_report_structure_and_quote_skip(tmp_path):
+          "person_scope": "", "perf_scope": "", "label_kind": "",
+          "person": "", "confirmed": True})
+     bindings["tables"].append(
+         {"table_index": 99, "role": "person_roster", "columns": {},
+          "person_scope": "all", "perf_scope": "", "label_kind": "",
+          "person": "", "confirmed": True})
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, bindings, _data())
+     assert set(report) == {"filled", "images", "skipped", "verify", "page_setup",
+-                           "authority_images", "auth_bound"}
++                           "authority_images", "auth_bound", "placeholders"}
+     reasons = {(s.get("table_index"), s.get("reason"))
+                for s in report["skipped"]}
+     assert (4, "鎶ヤ环琛ㄩ渶鎵嬪伐濉啓") in reasons
+     assert (99, "琛ㄤ笉瀛樺湪锛屽彲鑳藉簳绋垮凡閲嶆柊鐢熸垚") in reasons
+     # quote 琛ㄦ湭琚～鍏呮敼鍔?     assert Document(out).tables[4].cell(0, 0).text == PROMISE_TEXT
+     verify = report["verify"]
+     assert verify["ok"] is True
+     assert verify["issues"] == []
+     assert verify["checked_paragraphs"] == 3   # 3 灏侀潰锛坱oc 娈垫亽璺宠繃锛?@@ -488,10 +489,108 @@ def test_two_row_header_no_data_rows(tmp_path):
+     data["persons"] = data["persons"][:1]
+     out = str(tmp_path / "out.docx")
+     fill_draft(draft, out, _two_row_header_bindings(), data)
+     table = Document(out).tables[0]
+     assert len(table.rows) == 3  # 2 琛ㄥご + 1 濉叆琛?     assert [c.text for c in table.rows[1].cells] == ["搴忓彿", "濮撳悕", "璇佸彿"]
+     assert [c.text for c in table.rows[2].cells] == ["1", "寮犱笁", "涓€绾ч€犱环甯?]
+     # 鍏嬮殕鑷〃澶寸殑 donor 宸插墧闄?vMerge
+     for cell in table.rows[2].cells:
+         assert cell._tc.tcPr.find(qn("w:vMerge")) is None
++
++
++# ---------- 13. 绠€鍘嗗ぇ缃戞牸鐭╅樀濉厖锛圴1.2 7.2锛孭3锛?----------
++
++from app.core.bid_draft_exporter import (
++    expand_table_matrix, _fill_resume_grid_mesh)
++
++
++def _grid_table(doc):
++    # 2x2 琛細鏍囩鏍煎湪 (0,0)锛屽€煎湪 (0,1)锛?1,0) 鏍囩锛屽€煎湪 (1,1)
++    t = doc.add_table(2, 2)
++    t.rows[0].cells[0].text = "濮撳悕"
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    return t
++
++
++def test_expand_table_matrix_identity_for_plain_grid():
++    doc = Document(); t = _grid_table(doc)
++    m = expand_table_matrix(t)
++    assert len(m) == 2 and len(m[0]) == 2
++    assert m[0][0] == m[0][0]  # origin 绋冲畾
++
++
++def test_grid_mesh_writes_right_and_below():
++    doc = Document(); t = _grid_table(doc)
++    written = _fill_resume_grid_mesh(
++        t, {"濮撳悕": "name", "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++        {"name": "寮犱笁"}, "鐢查」鐩紙2024锛?)
++    assert t.rows[0].cells[1].text == "寮犱笁"
++    assert t.rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert written == 2
++
++
++def test_grid_mesh_writes_below_when_no_right():
++    """鏍囩鏍煎悓琛屾棤鍙抽偦锛堝崟鍒楄锛夆啋 鍐欎笅鏂瑰悓鍒楅涓笉鍚?origin 鏍笺€?""
++    doc = Document(); t = doc.add_table(2, 1)
++    t.rows[0].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    written = _fill_resume_grid_mesh(
++        t, {"涓昏宸ヤ綔缁忓巻": "lead_perfs"}, {}, "鐢查」鐩紙2024锛?)
++    assert t.rows[1].cells[0].text == "鐢查」鐩紙2024锛?
++    assert written == 1
++
++
++def test_grid_span_label_writes_right_origin():
++    """妯悜鍚堝苟鏍囩鏍?gridSpan=2 鈫?鍙充晶棣栦釜涓嶅悓 origin 鐩爣鏍硷紱
++    鐭╅樀涓法鍒楀悇鏍兼寚鍚戝悓涓€ origin銆?""
++    doc = Document(); t = doc.add_table(1, 3)
++    t.cell(0, 0).merge(t.cell(0, 1))
++    t.cell(0, 0).text = "濮撳悕"
++    m = expand_table_matrix(t)
++    assert m[0][0] is m[0][1]
++    assert m[0][2] is not m[0][0]
++    written = _fill_resume_grid_mesh(t, {"濮撳悕": "name"}, {"name": "寮犱笁"}, "")
++    assert t.rows[0].cells[2].text == "寮犱笁"
++    assert written == 1
++
++
++def test_grid_mesh_vmerge_continuation_maps_to_origin():
++    """绾靛悜鍚堝苟锛坴Merge锛夛細缁鏍兼槧灏勫埌 restart origin锛沴abel 鍙鐞嗕竴娆★紝
++    鍊煎啓 origin 鍙充晶锛岀画琛屼笉鍐欍€?""
++    doc = Document(); t = doc.add_table(2, 2)
++    t.cell(0, 0).merge(t.cell(1, 0))
++    t.cell(0, 0).text = "濮撳悕"
++    m = expand_table_matrix(t)
++    assert m[1][0] is m[0][0]
++    written = _fill_resume_grid_mesh(t, {"濮撳悕": "name"}, {"name": "寮犱笁"}, "")
++    assert t.rows[0].cells[1].text == "寮犱笁"
++    assert t.rows[1].cells[1].text == ""
++    assert written == 1
++
++
++def test_fill_draft_lead_resume_large_grid_uses_mesh(tmp_path):
++    """绔埌绔細鈮?0 鍒楃畝鍘嗗ぇ缃戞牸缁戝畾 lead_resume 鈫?鐭╅樀濉厖锛堜笉閲嶅缓琛紝
++    filled 璁?mode="grid"锛夛紝鍚堝苟缁撴瀯淇濈暀銆?""
++    doc = Document()
++    t = doc.add_table(2, 10)
++    t.rows[0].cells[0].text = "濮撳悕"
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    # 鍒堕€犲瘑闆嗗悎骞朵箣澶栫殑鏅€氬ぇ缃戞牸锛氬€肩洰鏍囨牸 = 鍚勬爣绛惧彸閭?+    draft = str(tmp_path / "draft.docx")
++    doc.save(draft)
++    out = str(tmp_path / "out.docx")
++    bindings = {"tables": [{"table_index": 0, "role": "lead_resume",
++                            "columns": {"濮撳悕": "name",
++                                        "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++                            "confirmed": True}],
++                "swap_toc": False}
++    data = {"persons": [{"name": "寮犱笁", "is_lead": True,
++                         "sem": {"name": "寮犱笁"},
++                         "perfs_text": "鐢查」鐩紙2024锛?, "fields": {}}],
++            "contracts": [], "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(draft, out, bindings, data)
++    table = Document(out).tables[0]
++    assert len(table.rows) == 2 and len(table.columns) == 10  # 鏈噸寤?+    assert table.rows[0].cells[1].text == "寮犱笁"
++    assert table.rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert report["filled"][0]["mode"] == "grid"
++    assert report["verify"]["ok"] is True
+diff --git a/backend/tests/test_bid_draft_service.py b/backend/tests/test_bid_draft_service.py
+index 438a1a3..841c51d 100644
+--- a/backend/tests/test_bid_draft_service.py
++++ b/backend/tests/test_bid_draft_service.py
+@@ -210,10 +210,34 @@ def test_assemble_bid_draft_data_lead_without_matching_perf(db):
+     assert data["lead_perfs_text"] == ""
+ 
+ 
+ def test_assemble_bid_draft_data_role_missing_when_not_saved(db):
+     """鍕鹃€夋湭淇濆瓨杩囨椂 role 鍥炶惤涓虹┖涓诧紝涓嶆姏閿欍€?""
+     pid, zhang, _, _, _, _ = _seed(db)
+     data = assemble_bid_draft_data(
+         db, pid, person_picks=[{"asset_id": zhang, "is_lead": True}],
+         contract_picks=[])
+     assert data["persons"][0]["role"] == ""
++
++
++def test_assemble_bid_draft_data_perfs_text_per_person(db):
++    """V1.2 7.4锛氭瘡涓?person 浜у嚭 perfs_text锛堟湰浜哄悕涓嬩笟缁?+    "椤圭洰鍚嶇О锛堝勾浠斤級" 鎹㈣杩炴帴锛涙棤鍖归厤 鈫?""锛夛紱lead_perfs_text 淇濈暀鍏煎銆?""
++    pid, zhang, li, ca, cb, cc = _seed(db)
++    db.replace_project_assets(
++        pid,
++        [{"asset_id": zhang, "role": "椤圭洰缁忕悊", "is_lead": True},
++         {"asset_id": li, "role": "缁勫憳"}],
++        [{"asset_id": ca, "section": 1}, {"asset_id": cb, "section": 1},
++         {"asset_id": cc, "section": 2}])
++    data = assemble_bid_draft_data(
++        db, pid,
++        person_picks=[{"asset_id": li, "is_lead": False},
++                      {"asset_id": zhang, "is_lead": True}],
++        contract_picks=[{"asset_id": ca, "section": 1},
++                        {"asset_id": cb, "section": 1},
++                        {"asset_id": cc, "section": 2}])
++    persons = data["persons"]
++    assert persons[0]["perfs_text"] == "椤圭洰A锛?024锛塡n椤圭洰C锛?022锛?  # 寮犱笁
++    assert persons[1]["perfs_text"] == ""                            # 鏉庡洓鏃犱笟缁?+    # 鏃ч敭鍏煎锛歭ead_perfs_text = 璐熻矗浜虹殑 perfs_text
++    assert data["lead_perfs_text"] == persons[0]["perfs_text"]
+diff --git a/backend/tests/test_bid_images.py b/backend/tests/test_bid_images.py
+new file mode 100644
+index 0000000..086c65b
+--- /dev/null
++++ b/backend/tests/test_bid_images.py
+@@ -0,0 +1,36 @@
++from PIL import Image
++from docx import Document
++from app.core.bid_template_exporter import (
++    fit_image_cm, insert_image_adaptive, cell_available_width_cm)
++
++def _png(path, w, h):
++    Image.new("RGB", (w, h), "white").save(path)
++
++def test_fit_image_limits_by_height(tmp_path):
++    p = tmp_path / "tall.png"; _png(p, 400, 4000)   # 10:1 绔栭暱
++    r = fit_image_cm(str(p), avail_w_cm=7.0, avail_h_cm=24.0)
++    assert r["height_cm"] <= 24.0 + 1e-6
++    assert r["width_cm"] < 7.0
++    assert r["too_long"] is True
++
++def test_fit_image_uses_cell_width_when_wide(tmp_path):
++    p = tmp_path / "wide.png"; _png(p, 2000, 1000)
++    r = fit_image_cm(str(p), avail_w_cm=7.0, avail_h_cm=24.0)
++    assert abs(r["width_cm"] - 7.0) < 1e-6
++    assert abs(r["height_cm"] - 3.5) < 0.01
++
++def test_insert_reports_missing_file(tmp_path):
++    doc = Document(); cell = doc.add_table(1, 1).rows[0].cells[0]
++    r = insert_image_adaptive(cell, str(tmp_path / "nope.png"), 6.0)
++    assert r["ok"] is False and "涓嶅瓨鍦? in r["reason"]
++
++def test_insert_reports_unsupported_format(tmp_path):
++    f = tmp_path / "x.emf"; f.write_bytes(b"not an image")
++    doc = Document(); cell = doc.add_table(1, 1).rows[0].cells[0]
++    r = insert_image_adaptive(cell, str(f), 6.0)
++    assert r["ok"] is False and r["reason"]
++
++def test_cell_width_from_tblgrid(tmp_path):
++    from docx.shared import Cm
++    doc = Document(); t = doc.add_table(1, 1); t.columns[0].width = Cm(6)
++    assert 5.5 < cell_available_width_cm(t.rows[0].cells[0]) < 6.5
+diff --git a/backend/tests/test_bid_page_setup.py b/backend/tests/test_bid_page_setup.py
+index 5be7b33..1b1f4d2 100644
+--- a/backend/tests/test_bid_page_setup.py
++++ b/backend/tests/test_bid_page_setup.py
+@@ -170,10 +170,132 @@ def test_pg_num_type_inserted_before_later_elements():
+     etree.SubElement(sp, _wq("docGrid"))
+     _attach_refs(sp, "rId9001", "rId9002", restart_page=True)
+     tags = [etree.QName(c).localname for c in sp]
+     pg_pos = tags.index("pgNumType")
+     # pgNumType 鍏堜簬鎵€鏈夊悗缃厓绱狅紙vAlign/docGrid锛夛紝涓斿湪寮曠敤/pgSz/pgMar 涔嬪悗
+     assert pg_pos < tags.index("vAlign")
+     assert pg_pos < tags.index("docGrid")
+     assert pg_pos > tags.index("pgMar")
+     assert tags.index("headerReference") == 0
+     assert tags.index("footerReference") == 1
++
++
++# ---------- 6. 闈欐€佹枃鏈洰褰曞垎鑺?+ 椤电爜灞呬腑鏂█ + 鍒嗚妭鎶ュ憡锛圴1.2 7.5锛?----------
++
++from app.core.bid_page_setup import (
++    apply_page_setup, check_footer_page_centered, is_static_toc_group)
++
++
++def _page_field_footer_doc(path, alignment=None):
++    """鏋勯€犻〉鑴氬惈 PAGE 鍩熸钀界殑 docx锛沘lignment 闈炵┖鏃舵樉寮忚缃榻愩€?""
++    doc = Document()
++    section = doc.sections[0]
++    section.footer.is_linked_to_previous = False
++    fp = section.footer.paragraphs[0]
++    if alignment is not None:
++        fp.alignment = alignment
++    run = fp.add_run()
++    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
++    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve")
++    instr.text = "PAGE \\* MERGEFORMAT"
++    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
++    run._r.append(begin); run._r.append(instr); run._r.append(end)
++    doc.save(str(path))
++    return path
++
++
++def test_is_static_toc_group_detected():
++    body = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>鎶曟爣鏂囦欢灏侀潰</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>鐩綍</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗竴绔?姒傝堪 ........ 1</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗簩绔?鏂规 ........ 5</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>姝ｆ枃寮€濮?/w:t></w:r></w:p></w:body>')
++    children = list(body)
++    idx = is_static_toc_group(children)
++    assert idx is not None
++    assert idx == 3  # 鐩綍缁勬湯鍏冪礌 = 绗簩涓〉鐮佹
++
++
++def test_is_static_toc_group_requires_both_signals():
++    """鍙岄噸鐗瑰緛缂轰竴涓嶅彲锛氫粎銆岀洰褰曘€嶆爣棰樻棤椤电爜娈电粍 鈫?None锛?+    浠呴〉鐮佸舰鎬佹鏃犮€岀洰褰曘€嶆爣棰?鈫?None锛堥槻姝ｆ枃璇垽锛夈€?""
++    only_title = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>鐩綍</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>姝ｆ枃娈佃惤</w:t></w:r></w:p></w:body>')
++    assert is_static_toc_group(list(only_title)) is None
++    only_entries = etree.fromstring(
++        f'<w:body xmlns:w="{W}">'
++        '<w:p><w:r><w:t>绗竴绔?姒傝堪 ........ 1</w:t></w:r></w:p>'
++        '<w:p><w:r><w:t>绗簩绔?鏂规 ........ 5</w:t></w:r></w:p></w:body>')
++    assert is_static_toc_group(list(only_entries)) is None
++
++
++def test_footer_page_centered_warns_when_left(tmp_path):
++    """椤佃剼 PAGE 鍩熸钀芥樉寮忛潪灞呬腑锛坖c=left锛屾湁鎰忚缃級鈫?闈炵┖鍛婅鍚?part 鍚嶃€?""
++    from docx.enum.text import WD_ALIGN_PARAGRAPH
++    p = _page_field_footer_doc(tmp_path / "x.docx",
++                               alignment=WD_ALIGN_PARAGRAPH.LEFT)
++    warnings = check_footer_page_centered(str(p))
++    assert warnings and any("footer" in w for w in warnings)
++
++
++def test_footer_page_centered_autofix_missing_jc(tmp_path):
++    """椤佃剼 PAGE 鍩熸钀芥棤 jc锛堢己鐪侊級鈫?瀹夊叏琛?center 鍚庡妫€閫氳繃锛氭棤鍛婅锛?+    涓斾骇鐗╄淇锛堝箓绛夛細浜屾璋冪敤浠嶆棤鍛婅锛夈€?""
++    p = _page_field_footer_doc(tmp_path / "x.docx")
++    assert check_footer_page_centered(str(p)) == []
++    assert check_footer_page_centered(str(p)) == []
++    with zipfile.ZipFile(str(p)) as z:
++        footers = [n for n in z.namelist()
++                   if n.startswith("word/footer") and n.endswith(".xml")]
++        assert footers
++        assert 'w:val="center"' in z.read(footers[0]).decode("utf-8")
++
++
++def test_footer_page_centered_ok_when_center(tmp_path):
++    from docx.enum.text import WD_ALIGN_PARAGRAPH
++    p = _page_field_footer_doc(tmp_path / "x.docx",
++                               alignment=WD_ALIGN_PARAGRAPH.CENTER)
++    assert check_footer_page_centered(str(p)) == []
++
++
++def test_apply_page_setup_reports_sections(tmp_path, reference):
++    """闈欐€佹枃鏈洰褰曪紙鏃?toc 鏍峰紡娈碉級涔熷垎鑺傦細灏侀潰+鐩綍涓鸿妭1锛堟棤寮曠敤鏃犻噸璧凤級锛?+    姝ｆ枃鑺傛寕鍙傝€冮〉鐪夐〉鑴氫笖椤电爜浠?1 璧凤紱result 鎶ュ憡 sections /
++    section_page_numbers / warnings銆?""
++    doc = Document()
++    doc.add_paragraph("鎶曟爣鏂囦欢灏侀潰")
++    doc.add_paragraph("鐩綍")
++    doc.add_paragraph("绗竴绔?姒傝堪 ........ 1")
++    doc.add_paragraph("绗簩绔?鏂规 ........ 5")
++    doc.add_paragraph("姝ｆ枃寮€濮?)
++    p = tmp_path / "out.docx"
++    doc.save(str(p))
++    result = apply_page_setup(str(p))
++    assert result["header_applied"] is True
++    assert result["sections"] >= 2
++    assert result["section_page_numbers"][0] is False   # 灏侀潰+鐩綍鑺?+    assert result["section_page_numbers"][-1] is True   # 姝ｆ枃鑺?+    assert result["warnings"] == []
++    with zipfile.ZipFile(str(p)) as z:
++        in_p, body_sp = _sectprs(z)
++    assert len(in_p) == 1
++    assert _refs(in_p[0], "headerReference") == []
++    pg = body_sp.find(_wq("pgNumType"))
++    assert pg is not None and pg.get(_wq("start")) == "1"
++
++
++def test_apply_page_setup_degraded_still_reports_keys(tmp_path, monkeypatch):
++    """鍙傝€冪己澶遍檷绾ц矾寰勶細鏂板鎶ュ憡閿粛鍦紙sections/section_page_numbers/
++    warnings锛夛紝琛屼负涓嶅彉涓嶆姤閿欍€?""
++    monkeypatch.setattr(config, "BID_HEADER_SOURCE_PATH",
++                        tmp_path / "涓嶅瓨鍦?docx")
++    p = tmp_path / "out.docx"
++    Document().save(str(p))
++    result = apply_page_setup(str(p))
++    assert result["degraded"]
++    assert result["sections"] >= 1
++    assert isinstance(result["section_page_numbers"], list)
++    assert result["warnings"] == []
+diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+new file mode 100644
+index 0000000..5e83963
+--- /dev/null
++++ b/backend/tests/test_bid_placeholders.py
+@@ -0,0 +1,171 @@
++import re
++from docx import Document
++from docx.shared import Cm
++
++from app.core.bid_template_exporter import (
++    DEFAULT_PLACEHOLDER_SYNONYMS, _iter_all_paragraphs,
++    _iter_textbox_paragraphs, build_placeholder_rules, scan_placeholders,
++)
++
++
++def _doc_with(paras):
++    doc = Document()
++    for p in paras:
++        doc.add_paragraph(p)
++    return doc
++
++
++def test_label_blank_fills_expanded_labels():
++    doc = _doc_with(["椤圭洰鍚嶇О锛歘___", "閲囪喘浜猴細____", "鏍囨鍚嶇О锛歘___",
++                     "鏍囨缂栧彿锛?, "鏃ユ湡锛歘___骞確_鏈坃_鏃?])
++    rules = build_placeholder_rules(
++        doc, project_name="閲屼笅娌抽」鐩?, tenderer="鏌愪腑蹇?,
++        section_name="涓€鏍囨", section_no="A1", doc_date="2026-09-10")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "椤圭洰鍚嶇О锛氶噷涓嬫渤椤圭洰" in full
++    assert "閲囪喘浜猴細鏌愪腑蹇? in full          # 鍚屼箟璇?閲囪喘浜衡啋鎷涙爣浜?+    assert "鏍囨鍚嶇О锛氫竴鏍囨" in full
++    assert "鏍囨缂栧彿锛欰1" in full
++    assert "鏃ユ湡锛?026骞?鏈?0鏃? in full
++
++
++def test_bracket_half_and_full_width_filled():
++    doc = _doc_with(["(椤圭洰鍚嶇О) (鏍囨鍚嶇О)", "锛堟嫑鏍囦汉鍚嶇О锛夛紙鎶曟爣浜哄悕绉帮級"])
++    rules = build_placeholder_rules(
++        doc, project_name="P", tenderer="T", bidder_name="B",
++        section_name="S")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "P (S)" in full
++    assert "T" in full and "B" in full
++    assert "锛? not in full and "(椤圭洰鍚嶇О)" not in full
++
++
++def test_section_combo_keeps_full_width_brackets():
++    """鍏ㄨ缁勫悎鍗犱綅锛堥」鐩悕绉帮級锛堟爣娈靛悕绉帮級鈫?淇濈暀鍏ㄨ鎷彿椋庢牸銆?""
++    doc = _doc_with(["锛堥」鐩悕绉帮級锛堟爣娈靛悕绉帮級"])
++    rules = build_placeholder_rules(doc, project_name="P", section_name="S")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "P锛圫锛? in full
++    assert "锛堥」鐩悕绉帮級" not in full
++
++
++def test_textbox_paragraphs_are_traversed_and_no_dup():
++    doc = Document()
++    p = doc.add_paragraph()
++    run = p.add_run()
++    # 鏋勯€犱竴涓惈 w:txbxContent 鐨勬瀬绠€ drawing
++    xml = (
++        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
++        '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
++        '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData '
++        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:txbx><w:txbxContent><w:p><w:r><w:t>鎷涙爣浜猴細____</w:t></w:r></w:p>'
++        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline>'
++        '</w:drawing></w:r></w:p>')
++    from lxml import etree
++    p._p.addnext(etree.fromstring(xml))
++    texts = [t.text for t in _iter_textbox_paragraphs(doc)]
++    assert texts.count("鎷涙爣浜猴細____") == 1
++
++
++def test_textbox_alternate_content_fallback_not_duplicated():
++    """Word 鐪熷疄鍐欐硶鐨勬枃鏈锛歮c:AlternateContent 涓?mc:Choice锛圖rawingML锛?+    涓?mc:Fallback锛圴ML锛夊悇鍚竴浠界浉鍚?w:txbxContent 鈥斺€?鍙簲浜у嚭涓€娆°€?""
++    doc = Document()
++    p = doc.add_paragraph()
++    run = p.add_run()
++    inner = ('<w:p><w:r><w:t>鎷涙爣浜猴細____</w:t></w:r></w:p>')
++    xml = (
++        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
++        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
++        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
++        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
++        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
++        'xmlns:v="urn:schemas-microsoft-com:vml">'
++        '<w:r><mc:AlternateContent>'
++        '<mc:Choice Requires="wps">'
++        '<w:drawing><wp:inline><a:graphic><a:graphicData '
++        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:wsp><wps:txbx><w:txbxContent>' + inner +
++        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>'
++        '</wp:inline></w:drawing>'
++        '</mc:Choice>'
++        '<mc:Fallback>'
++        '<w:pict><v:shape><v:textbox><w:txbxContent>' + inner +
++        '</w:txbxContent></v:textbox></v:shape></w:pict>'
++        '</mc:Fallback>'
++        '</mc:AlternateContent></w:r></w:p>')
++    from lxml import etree
++    p._p.addnext(etree.fromstring(xml))
++    texts = [t.text for t in _iter_textbox_paragraphs(doc)]
++    assert texts.count("鎷涙爣浜猴細____") == 1
++
++
++def test_scan_placeholders_reports_match_and_suspicious():
++    doc = _doc_with(["鎷涙爣浜猴細____", "______________________________"])
++    res = scan_placeholders(doc, {"tenderer": "鏌愪腑蹇?})
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in res["matched"])
++    assert res["suspicious"], "瀛ょ珛涓嬪垝绾垮簲鍒楀叆鍙枒娓呭崟"
++
++
++def test_fill_draft_synonyms_fill_alias(tmp_path):
++    """瀵煎嚭绔帴鍏ュ悓涔夎瘝搴擄紙V1.2 4.5锛夛細synonyms={"鐢叉柟":"鎷涙爣浜?} 鏃跺簳绋?+    "鐢叉柟锛歘___"琚～鍏呬笖 verify 鍚屾簮涓嶈鎶ワ紱涓嶄紶 synonyms 鏃朵笉濉€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("鐢叉柟锛歘___")
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out),
++                        {"tables": [], "swap_toc": False}, {},
++                        tenderer="鏌愪腑蹇?, synonyms={"鐢叉柟": "鎷涙爣浜?})
++    texts = [p.text for p in Document(str(out)).paragraphs]
++    assert "鐢叉柟锛氭煇涓績" in texts
++    assert report["verify"]["ok"] is True
++
++    out2 = tmp_path / "o2.docx"
++    fill_draft(str(draft), str(out2), {"tables": [], "swap_toc": False}, {},
++               tenderer="鏌愪腑蹇?)
++    texts2 = [p.text for p in Document(str(out2)).paragraphs]
++    assert "鐢叉柟锛歘___" in texts2
++
++
++def test_fill_draft_report_includes_placeholders(tmp_path):
++    """瀵煎嚭鎶ュ憡绾冲叆鍗犱綅绗︽竻鍗曪紙V1.2 4.3 楠屾敹 7锛夛細filled=璇嗗埆灏嗗～锛?+    suspicious=鏈瘑鍒垚涓蹭笅鍒掔嚎锛屼笉闈欓粯銆?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("鎷涙爣浜猴細____")
++    doc.add_paragraph("______________________________")
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out), {"tables": [], "swap_toc": False},
++                        {}, tenderer="鏌愪腑蹇?)
++    ph = report["placeholders"]
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in ph["filled"])
++    assert ph["suspicious"], "鏈瘑鍒殑瀛ょ珛涓嬪垝绾垮簲鍒楀叆 suspicious"
++    assert report["verify"]["ok"] is True
++
++
++def test_fill_draft_report_placeholders_empty_keys(tmp_path):
++    """鏃犲崰浣嶇搴曠 鈫?filled/suspicious 鍧囦负绌哄垪琛紙閿亽瀛樺湪锛夈€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("姝ｆ枃鏃犲崰浣嶇銆?)
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out),
++                        {"tables": [], "swap_toc": False}, {})
++    assert report["placeholders"] == {"filled": [], "suspicious": []}
+diff --git a/backend/tests/test_bid_resume_clone.py b/backend/tests/test_bid_resume_clone.py
+new file mode 100644
+index 0000000..6c273c1
+--- /dev/null
++++ b/backend/tests/test_bid_resume_clone.py
+@@ -0,0 +1,194 @@
++"""绠€鍘嗚〃銆屼竴浜轰竴琛ㄣ€嶆暣琛ㄥ厠闅嗘祴璇曪紙V1.2 7.4锛夛細閫?N 浜?鈫?鏍疯〃 + N-1 浠?+XML 绾у厠闅嗭紙缁撴瀯鍘熸牱锛氳鍒楁暟/鍚堝苟/琛岄珮淇濈暀锛夛紝閫愪汉濉厖锛涘厠闅嗚〃鐧昏杩?+verify锛坱able_insertions锛変笉璇姤锛涙棤 mode=per_person 淇濇寔鏃ц涓恒€?+鍙﹀惈 7.3 donor 鍏嬮殕琛?vMerge 鍓旈櫎鍥炲綊銆?""
++from docx import Document
++from docx.oxml.ns import qn
++from docx.shared import Cm
++
++from app.core.bid_draft_exporter import fill_draft
++
++
++def _sample_resume_table(doc):
++    t = doc.add_table(2, 2)
++    t.rows[0].cells[0].text = "濮撳悕"; t.rows[0].cells[1].text = ""
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"; t.rows[1].cells[1].text = ""
++    return t
++
++
++def _persons():
++    return [
++        {"name": "寮犱笁", "is_lead": True, "role": "椤圭洰缁忕悊",
++         "sem": {"name": "寮犱笁"}, "perfs_text": "鐢查」鐩紙2024锛?, "fields": {}},
++        {"name": "鏉庡洓", "is_lead": False, "role": "閫犱环鍛?,
++         "sem": {"name": "鏉庡洓"}, "perfs_text": "涔欓」鐩紙2023锛?, "fields": {}},
++    ]
++
++
++def _bindings(mode="per_person"):
++    return {"tables": [{"table_index": 0, "role": "resume_each",
++                        "columns": {"濮撳悕": "name", "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++                        "mode": mode, "confirmed": True}],
++            "swap_toc": False}
++
++
++def test_per_person_clone_count_and_structure(tmp_path):
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(), data,
++                        project_no="", project_name="", doc_date="")
++    out = Document(str(dst))
++    assert len(out.tables) == 2                       # 鏍疯〃 + 1 鍏嬮殕
++    assert out.tables[0].rows[0].cells[1].text == "寮犱笁"
++    assert out.tables[1].rows[0].cells[1].text == "鏉庡洓"
++    # 閫愪汉 perfs_text锛歭ead_perfs 璇箟閿啓鏈汉涓氱哗鏂囨湰
++    assert out.tables[0].rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert out.tables[1].rows[1].cells[1].text == "涔欓」鐩紙2023锛?
++    assert report["verify"]["ok"] is True             # 鍏嬮殕宸茬櫥璁帮紝涓嶈鎶?+    assert report["filled"][0]["cloned"] == 2
++
++
++def test_clone_preserves_row_col_merge_and_height(tmp_path):
++    """deepcopy 鍏嬮殕淇濈暀缁撴瀯锛氳鍒楁暟銆佹í鍚戝悎骞讹紙鍚?_tc锛夈€佽楂樸€?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    t = doc.add_table(3, 2)
++    t.rows[0].cells[0].text = "濮撳悕"; t.rows[0].cells[1].text = ""
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"; t.rows[1].cells[1].text = ""
++    t.rows[2].cells[0].text = "鑱岀О"; t.rows[2].cells[1].text = ""
++    t.rows[0].cells[0].merge(t.rows[0].cells[1])   # 妯悜鍚堝苟棣栬
++    t.rows[1].height = Cm(1.5)
++    doc.save(src)
++    persons = _persons() + [
++        {"name": "鐜嬩簲", "is_lead": False, "role": "缁勫憳",
++         "sem": {"name": "鐜嬩簲"}, "perfs_text": "", "fields": {}}]
++    data = {"persons": persons, "contracts": [], "lead_perfs_text": ""}
++    report = fill_draft(str(src), str(dst), _bindings(), data)
++    # 琛岄珮浠ュ簳绋胯嚜韬殑钀界洏鍊间负鍑嗭紙Cm鈫抰wips 鏈夊彇鏁达級锛屽厠闅嗛』涓庡叾瀹屽叏涓€鑷?+    draft_height = Document(str(src)).tables[0].rows[1].height
++    assert draft_height is not None
++    out = Document(str(dst))
++    assert len(out.tables) == 3
++    for tb in out.tables:
++        assert len(tb.rows) == 3 and len(tb.columns) == 2
++        # 棣栬妯悜鍚堝苟淇濈暀锛氫袱鏍煎悓 _tc
++        assert tb.rows[0].cells[0]._tc is tb.rows[0].cells[1]._tc
++        # 琛岄珮淇濈暀锛堜笌搴曠鍚屽€硷級
++        assert tb.rows[1].height == draft_height
++    assert report["verify"]["ok"] is True
++
++
++def test_resume_each_without_mode_keeps_single_lead(tmp_path):
++    """鏃?mode=per_person锛歳esume_each 閫€鍖栦负鏃?lead_resume 琛屼负
++    锛堜粎璐熻矗浜哄崟浠藉～鍏咃紝涓嶅厠闅嗭級銆?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(mode=""), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 1
++    assert out.tables[0].rows[0].cells[1].text == "寮犱笁"
++    assert "cloned" not in report["filled"][0]
++    assert report["verify"]["ok"] is True
++
++
++def test_classifier_resume_each_vs_lead_resume(tmp_path):
++    """鍒嗙被鍣細閿€兼牱琛ㄥ惈銆屼富瑕佸伐浣滅粡鍘嗐€嶇瓑涓€浜轰竴琛ㄦ爣璁?鈫?resume_each锛?+    涓嶅惈鏍囪鐨勬棫鏍疯〃浠?鈫?lead_resume锛堝悜鍚庡吋瀹癸級銆?""
++    from app.core.bid_table_classifier import classify_tables
++    doc2 = Document()
++    t = doc2.add_table(4, 2)
++    for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "涓昏宸ヤ綔缁忓巻"]):
++        t.rows[r].cells[0].text = label
++    path2 = tmp_path / "d2.docx"; doc2.save(path2)
++    items2 = classify_tables(str(path2))
++    assert items2[0]["role"] == "resume_each"
++    assert items2[0]["mode"] == "per_person"  # 涓€浜轰竴琛ㄩ粯璁ゆ暣琛ㄥ厠闅嗭紙鍙敼鍥烇級
++    # 鏃犳爣璁伴敭鍊艰〃 鈫?lead_resume锛堟棫琛屼负涓嶅洖褰掞紝mode 淇濇寔榛樿绌猴級
++    doc3 = Document()
++    t3 = doc3.add_table(4, 2)
++    for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "瀛﹀巻"]):
++        t3.rows[r].cells[0].text = label
++    path3 = tmp_path / "d3.docx"; doc3.save(path3)
++    item3 = classify_tables(str(path3))[0]
++    assert item3["role"] == "lead_resume"
++    assert item3["mode"] == ""
++
++
++def test_no_adjacent_tables_after_clone(tmp_path):
++    """淇杞洖褰掞細鍏嬮殕 3 浜哄悗浜х墿 body 涓换鎰忕浉閭讳袱鍏勫紵涓嶅緱閮芥槸 w:tbl
++    锛堢浉閭?w:tbl 浼氳 Word 鍚堝苟娓叉煋涓轰竴寮犺〃锛夈€?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    persons = _persons() + [
++        {"name": "鐜嬩簲", "is_lead": False, "role": "缁勫憳",
++         "sem": {"name": "鐜嬩簲"}, "perfs_text": "", "fields": {}}]
++    data = {"persons": persons, "contracts": [], "lead_perfs_text": ""}
++    fill_draft(str(src), str(dst), _bindings(), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 3
++    tags = [ch.tag for ch in out.element.body.iterchildren()]
++    for a, b in zip(tags, tags[1:]):
++        assert not (a == qn("w:tbl") and b == qn("w:tbl")), \
++            "鐩搁偦 w:tbl 涔嬮棿蹇呴』鏈?w:p 鍒嗛殧"
++
++
++def test_clone_shift_mapping_sentinel_table(tmp_path):
++    """浣嶇Щ鏄犲皠鍥炲綊锛氬簳绋?[鏍疯〃, 鍝ㄥ叺琛╙锛屽厠闅?2 浜哄悗浜х墿鍝ㄥ叺琛ㄥ唴瀹逛繚鐣欙紱
++    绡℃敼鍝ㄥ叺琛ㄥ崟鍏冩牸 鈫?verify.ok=False 涓?issue 鎸囧悜搴曠涓嬫爣琛ㄦ牸[1]
++    锛堝厠闅嗙偣涔嬪悗鐨勫簳绋胯〃缁?draft_to_out 姝ｇ‘绌块€忥級銆?""
++    from app.core.bid_verify import verify_draft_fill
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    _sample_resume_table(doc)
++    sentinel = doc.add_table(1, 1)
++    sentinel.cell(0, 0).text = "鍝ㄥ叺鍐呭"
++    doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 3                    # 鏍疯〃 + 鍏嬮殕 + 鍝ㄥ叺
++    assert out.tables[2].cell(0, 0).text == "鍝ㄥ叺鍐呭"
++    assert report["verify"]["ok"] is True
++    # 绡℃敼鍝ㄥ叺琛?鈫?verify 蹇呴』閫綇骞舵寚鍚戝簳绋夸笅鏍?1
++    doc2 = Document(str(dst))
++    doc2.tables[2].cell(0, 0).text = "琚鏀圭殑鍝ㄥ叺"
++    doc2.save(str(dst))
++    result = verify_draft_fill(str(src), str(dst), {0}, {},
++                               table_insertions={0: 1})
++    assert result["ok"] is False
++    assert any("琛ㄦ牸[1]" in issue for issue in result["issues"])
++
++
++def test_fill_strips_vmerge_from_donor(tmp_path):
++    """7.3 鍥炲綊锛歞onor 鏁版嵁琛屽惈 vMerge 鍏冪礌鏃讹紝鍏嬮殕鍐欏嚭鐨勬暟鎹涓嶅緱鎼哄甫
++    vMerge锛堝惁鍒欎細寤剁画/寮€鍚旱鍚戝悎骞跺尯锛岀牬鍧忕粨鏋勶級銆?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    t = doc.add_table(3, 2)
++    t.cell(0, 0).text = "濮撳悕"; t.cell(0, 1).text = "鑱岀О"
++    t.cell(1, 0).text = "鏃у悕"; t.cell(1, 1).text = "鏃ц亴绉?
++    t.cell(2, 0).text = "鏃у悕2"; t.cell(2, 1).text = "鏃ц亴绉?"
++    tc_pr = t.rows[1].cells[0]._tc.get_or_add_tcPr()
++    tc_pr.append(tc_pr.makeelement(qn("w:vMerge"), {}))
++    doc.save(src)
++    bindings = {"tables": [{"table_index": 0, "role": "person_roster",
++                            "columns": {"name": 0, "title": 1},
++                            "person_scope": "all", "confirmed": True}],
++                "swap_toc": False}
++    data = {"persons": [
++        {"name": "寮犱笁", "is_lead": True,
++         "sem": {"name": "寮犱笁", "title": "楂樼骇宸ョ▼甯?}, "fields": {}},
++        {"name": "鏉庡洓", "is_lead": False,
++         "sem": {"name": "鏉庡洓", "title": "宸ョ▼甯?}, "fields": {}}],
++        "contracts": []}
++    fill_draft(str(src), str(dst), bindings, data)
++    out_tbl = Document(str(dst)).tables[0]
++    assert not out_tbl._tbl.findall(f".//{qn('w:vMerge')}")
++    rows = [[c.text for c in r.cells] for r in out_tbl.rows]
++    assert rows[1] == ["寮犱笁", "楂樼骇宸ョ▼甯?]
++    assert rows[2] == ["鏉庡洓", "宸ョ▼甯?]
+diff --git a/frontend/src/api/index.js b/frontend/src/api/index.js
+index 203e1e2..e284b0b 100644
+--- a/frontend/src/api/index.js
++++ b/frontend/src/api/index.js
+@@ -141,29 +141,40 @@ export const mimicPlan = (pid, templateId) =>
+   api.post(`/projects/${pid}/mimic/plan`, { template_id: templateId }).then(r => r.data)
+ export const mimicApply = (pid, templateId, ops) =>
+   api.post(`/projects/${pid}/mimic/apply`, { template_id: templateId, ops }).then(r => r.data)
+ export const mimicDownloadUrl = (pid, file) =>
+   `/api/projects/${pid}/mimic/download?file=${encodeURIComponent(file)}`
+ 
+ // 鍟嗗姟鏍? export const getBidAssets = (pid) => api.get(`/projects/${pid}/bid-assets`).then(r => r.data)
+ export const saveBidAssets = (pid, data) => api.put(`/projects/${pid}/bid-assets`, data).then(r => r.data)
+ export const bidExportUrl = (pid, format) => `/api/projects/${pid}/bid-assets/export?format=${format}`
+-// 鍟嗗姟鏍囨ā鏉垮鍑猴細payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}] }
++// 鍟嗗姟鏍囨ā鏉垮鍑猴細payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}],
++//   project_no, project_name, doc_date, tenderer, bidder_name, legal_rep_id, agent_id,
++//   section_name, section_no }锛堟爣娈靛悕绉?鏍囨缂栧彿鍙€夛紝鐢ㄤ簬鍗犱綅绗﹀～鍏咃級
+ // 杩斿洖瀹屾暣鍝嶅簲锛坆lob + headers锛夛紝璋冪敤鏂逛粠 Content-Disposition 鍙栨枃浠跺悕锛? // 鏈夊簳绋挎椂鍝嶅簲澶村甫 X-Fill-Report锛圲RL 缂栫爜鐨?fill_report JSON锛夛紝鏃фā鏉胯矾寰勬棤姝ゅご
+ export const exportBidTemplate = (pid, payload) =>
+   api.post(`/projects/${pid}/bid-assets/export-template`, payload, { responseType: 'blob' })
++// 鍗犱綅绗﹂瑙堬細body {project_no, project_name, doc_date, tenderer, bidder_name, section_name, section_no}锛堝潎鍙┖锛?+// 杩斿洖 { matched: [{label, value, count, kind}], suspicious: [{text}] }锛涙棤搴曠鏃跺悗绔姤閿欙紝璋冪敤鏂归渶浼橀泤闄嶇骇
++export const previewBidPlaceholders = (pid, payload) =>
++  api.post(`/projects/${pid}/bid-draft/placeholders`, payload).then(r => r.data)
+ // 鍟嗗姟鏍囧簳绋匡細headings 渚涙墜鍔ㄩ€夋嫨瑁佸垏璧锋锛坰uggested 涓鸿嚜鍔ㄥ畾浣嶅缓璁紝鍙兘涓?null锛? export const getBidDraftHeadings = (pid) => api.get(`/projects/${pid}/bid-draft/headings`).then(r => r.data)
+ // 鐢熸垚搴曠锛歜ody {start_heading, end_heading}锛岀┖=鑷姩瀹氫綅/鍒版湯灏撅紱422=鏈瘑鍒牸寮忕珷鑺傞渶鎵嬪姩璧锋
+ export const generateBidDraft = (pid, data) => api.post(`/projects/${pid}/bid-draft/generate`, data).then(r => r.data)
+ export const uploadBidDraft = (pid, file) => {
+   const fd = new FormData()
+   fd.append('file', file)
+   return api.post(`/projects/${pid}/bid-draft/upload`, fd).then(r => r.data)
+ }
+ // 鏈夊簳绋胯繑鍥為瑙堝璞★紱鏃犲簳绋胯繑鍥?{ draft: null }
+ export const getBidDraft = (pid) => api.get(`/projects/${pid}/bid-draft`).then(r => r.data)
++// 缁戝畾淇濆瓨锛歵ables 姣忚 { table_index, role, columns, person_scope, perf_scope, label_kind,
++//   person, confirmed, header_rows(1..4 琛ㄥご琛屾暟), mode('' 鎴?'per_person'锛岀畝鍘嗚〃姣忎汉涓€寮? }
+ export const saveBidDraftBindings = (pid, data) => api.put(`/projects/${pid}/bid-draft/bindings`, data).then(r => r.data)
++// 鍗犱綅绗﹀悓涔夎瘝鏄犲皠锛堣缃〉鐢級锛歿 鍒悕: 鏍囧噯鏍囩 }
++export const getPlaceholderSynonyms = () => api.get('/settings/placeholder-synonyms').then(r => r.data)
++export const savePlaceholderSynonyms = (mapping) => api.put('/settings/placeholder-synonyms', mapping).then(r => r.data)
+ // 璇佷功绾у埌鏈熸槑缁嗭紙棣栭〉鎻愰啋鏉★級锛歔{ type, asset_name, cert_type, cert_name, expiry_date, days_left }]
+ export const getExpiringDetail = (days = 30) => api.get('/assets/expiring-detail', { params: { days } }).then(r => r.data)
+diff --git a/frontend/src/components/BidPanel.vue b/frontend/src/components/BidPanel.vue
+index 7d462ac..46a36d0 100644
+--- a/frontend/src/components/BidPanel.vue
++++ b/frontend/src/components/BidPanel.vue
+@@ -1,17 +1,17 @@
+ <script setup>
+ import { computed, nextTick, onMounted, ref, watch } from 'vue'
+ import { ElMessage, ElMessageBox } from 'element-plus'
+ import {
+   bidExportUrl, exportBidTemplate, generateBidDraft, getBidAssets, getBidDraft,
+-  getBidDraftHeadings, getProject, listAssets, saveBidAssets, saveBidDraftBindings,
+-  uploadBidDraft,
++  getBidDraftHeadings, getProject, listAssets, previewBidPlaceholders, saveBidAssets,
++  saveBidDraftBindings, uploadBidDraft,
+ } from '../api'
+ import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
+ 
+ const props = defineProps({ projectId: Number, bidDate: String, projectName: { type: String, default: '' } })
+ 
+ const persons = ref([])
+ const contracts = ref([])
+ const selectedContracts = ref([])
+ const roles = ref({})
+ const contractTable = ref(null)
+@@ -281,49 +281,80 @@ async function onExport(fmt) {
+   try {
+     await saveBidAssets(props.projectId, buildSavePayload())
+     window.open(bidExportUrl(props.projectId, fmt), '_blank')
+   } catch { /* 淇濆瓨澶辫触锛氭嫤鎴櫒宸插脊閿欙紝涓瀵煎嚭 */ } finally {
+     exportingLegacy.value = ''
+   }
+ }
+ 
+ // ---------- 瀵煎嚭鍟嗗姟鏍囧璇濇锛氭瘡娆℃墦寮€鏃舵寜褰撳墠椤圭洰淇℃伅閲嶆柊鍒濆鍖?----------
+ const exportDialogVisible = ref(false)
+-const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '', legal_rep_id: null, agent_id: null })
++const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '', legal_rep_id: null, agent_id: null, section_name: '', section_no: '' })
+ // 娉曞畾浠ｈ〃浜?濮旀墭浠ｇ悊浜哄€欓€夛紙legal 璧勪骇锛? const legalCandidates = ref([])
+ 
++// ---------- 鍗犱綅绗︾‘璁わ細瀵煎嚭瀵硅瘽妗嗗唴棰勮搴曠鍗犱綅绗︾殑鍖归厤缁撴灉 ----------
++const placeholderPreview = ref(null)     // { matched: [...], suspicious: [...] }锛沶ull = 鏈姞杞?+const placeholderLoading = ref(false)
++const placeholderFailed = ref(false)     // 鏃犲簳绋挎垨璇锋眰澶辫触 鈫?浼橀泤闄嶇骇锛堟彁绀轰絾涓嶉樆濉炲鍑猴級
++const placeholderSkipped = ref(false)    // 鐢ㄦ埛閫夋嫨銆屾寜榛樿濉厖锛岃烦杩囩‘璁ゃ€?+
++async function loadPlaceholderPreview() {
++  placeholderLoading.value = true
++  placeholderFailed.value = false
++  try {
++    const f = exportForm.value
++    placeholderPreview.value = await previewBidPlaceholders(props.projectId, {
++      project_no: f.project_no, project_name: f.project_name, doc_date: f.doc_date,
++      tenderer: f.tenderer, bidder_name: f.bidder_name,
++      section_name: f.section_name, section_no: f.section_no,
++    })
++  } catch {
++    // 鏃犲簳绋挎垨璇锋眰澶辫触锛氭嫤鎴櫒宸插脊閿欙紝瀵硅瘽妗嗗唴闄嶇骇鎻愮ず锛屼笉闃诲瀵煎嚭
++    placeholderPreview.value = null
++    placeholderFailed.value = true
++  } finally {
++    placeholderLoading.value = false
++  }
++}
++
+ async function loadLegalCandidates() {
+   try {
+     legalCandidates.value = await listAssets('legal')
+   } catch { /* 鎷︽埅鍣ㄥ凡寮归敊锛涗笅鎷変负绌轰笉褰卞搷瀵煎嚭 */ }
+ }
+ 
+ watch(exportDialogVisible, async v => {
+   if (!v) return
+   exportForm.value = {
+     project_no: '',
+     project_name: props.projectName,
+     doc_date: props.bidDate || '',
+     // 鎷涙爣浜猴細搴曠鎻愬彇鍊间紭鍏堬紝缂虹渷鍥炶惤椤圭洰濮旀墭浜猴紙涓嬫柟寮傛琛ラ綈锛?     tenderer: draft.value?.tenderer || '',
+     bidder_name: '瀹忎俊澶╁痉宸ョ▼椤鹃棶鏈夐檺鍏徃',
+     legal_rep_id: null,
+     agent_id: null,
++    section_name: '',
++    section_no: '',
+   }
++  placeholderPreview.value = null
++  placeholderSkipped.value = false
+   loadLegalCandidates()
+   if (!exportForm.value.tenderer) {
+     try {
+       const p = await getProject(props.projectId)
+       exportForm.value.tenderer = p.client || ''
+     } catch { /* 鎷︽埅鍣ㄥ凡寮归敊锛涚暀绌哄彲鎵嬪～ */ }
+   }
++  // 琛ㄥ崟鍊煎氨缁悗棰勮鍗犱綅绗︼紙鏃犲簳绋挎椂鑷姩闄嶇骇涓烘彁绀烘潯锛?+  loadPlaceholderPreview()
+ })
+ 
+ // 瀵煎嚭鍟嗗姟鏍囷細is_lead / certs / section 涓庝繚瀛樿浇鑽峰悓婧愶紙鍧囧凡鎸佷箙鍖栵級锛屽彟鍔犲璇濇瀛楁
+ async function onExportTemplate() {
+   if (!exportForm.value.project_name.trim()) {
+     ElMessage.warning('璇峰～鍐欓」鐩悕绉?)
+     return
+   }
+   exporting.value = true
+   try {
+@@ -335,20 +366,22 @@ async function onExportTemplate() {
+       contracts: selectedContracts.value.map(r => ({
+         asset_id: r.id, section: Number(sections.value[r.id] || 1),
+       })),
+       project_no: exportForm.value.project_no,
+       project_name: exportForm.value.project_name.trim(),
+       doc_date: exportForm.value.doc_date || '',
+       tenderer: exportForm.value.tenderer.trim(),
+       bidder_name: exportForm.value.bidder_name.trim(),
+       legal_rep_id: exportForm.value.legal_rep_id,
+       agent_id: exportForm.value.agent_id,
++      section_name: exportForm.value.section_name.trim(),
++      section_no: exportForm.value.section_no.trim(),
+     }
+     const r = await exportBidTemplate(props.projectId, payload)
+     const cd = r.headers['content-disposition'] || ''
+     const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="?([^";]+)"?/)
+     const filename = m ? decodeURIComponent(m[1]) : '鍟嗗姟鏍?docx'
+     const url = URL.createObjectURL(r.data)
+     const a = document.createElement('a')
+     a.href = url
+     a.download = filename
+     a.click()
+@@ -372,20 +405,21 @@ async function onExportTemplate() {
+     }
+   } finally {
+     exporting.value = false
+   }
+ }
+ 
+ // ---------- 鍟嗗姟鏍囧簳绋匡細鐢熸垚 / 涓婁紶 / 棰勮纭 / 缁戝畾淇濆瓨 ----------
+ const DRAFT_ROLE_OPTIONS = [
+   { value: 'person_roster', label: '浜哄憳涓€瑙堣〃' },
+   { value: 'lead_resume', label: '璐熻矗浜虹畝鍘嗚〃' },
++  { value: 'resume_each', label: '绠€鍘嗚〃锛堟瘡浜轰竴浠斤級' },
+   { value: 'perf_list', label: '涓氱哗涓€瑙堣〃' },
+   { value: 'quote', label: '鎶ヤ环琛? },
+   { value: 'image_slot', label: '鍥剧墖鍗犱綅' },
+   { value: 'ignore', label: '蹇界暐' },
+ ]
+ const PERSON_SCOPE_OPTIONS = [
+   { value: 'all', label: '鍏ㄩ儴' },
+   { value: 'lead', label: '浠呰礋璐ｄ汉' },
+   { value: 'members', label: '浠呮垚鍛? },
+ ]
+@@ -431,24 +465,28 @@ function needManualConfirm(row) {
+ async function loadDraft() {
+   draftLoading.value = true
+   try {
+     const r = await getBidDraft(props.projectId)
+     draft.value = (r && 'draft' in r) ? r.draft : r
+   } catch { /* 鎷︽埅鍣ㄥ凡寮归敊 */ } finally {
+     draftLoading.value = false
+   }
+ }
+ 
+-// 鐢ㄩ瑙堝璞″埛鏂板崱鐗囦笌瀵硅瘽妗嗙姸鎬侊紙bindings 鎷疯礉涓哄彲缂栬緫琛岋級
++// 鐢ㄩ瑙堝璞″埛鏂板崱鐗囦笌瀵硅瘽妗嗙姸鎬侊紙bindings 鎷疯礉涓哄彲缂栬緫琛岋紝琛ラ綈 header_rows/mode 缂虹渷鍊硷級
+ function applyDraftPreview(preview) {
+   draft.value = preview
+-  bindingRows.value = (preview.tables || []).map(t => ({ ...t }))
++  bindingRows.value = (preview.tables || []).map(t => ({
++    ...t,
++    header_rows: Number(t.header_rows) >= 1 ? Number(t.header_rows) : 1,
++    mode: t.mode || '',
++  }))
+   swapToc.value = !!preview.swap_toc
+   // 瑁佸垏鑼冨洿鍦?headings 鍔犺浇鍚庣敱 syncRangeFromDraft 鍥炲～锛坱itle 鈫?index锛? }
+ 
+ // 閲嶅悕鏍囬闆嗗悎锛堢洰褰曟潯鐩尯涓庢鏂囧尯鍚屽悕鏃堕渶瑕佸簭鍙峰悗缂€鍖哄垎锛? const dupHeadingTitles = computed(() => {
+   const count = {}
+   for (const h of draftHeadings.value) count[h.title] = (count[h.title] || 0) + 1
+   return new Set(Object.keys(count).filter(t => count[t] > 1))
+ })
+@@ -570,41 +608,48 @@ async function onUploadDraft(uploadFile) {
+   try {
+     const preview = await uploadBidDraft(props.projectId, file)
+     applyDraftPreview(preview)
+     ElMessage.success('搴曠宸蹭笂浼狅紝璇烽瑙堝苟纭琛ㄦ牸缁戝畾')
+     openDraftDialog()
+   } catch { /* 鎷︽埅鍣ㄥ凡寮归敊 */ } finally {
+     draftLoading.value = false
+   }
+ }
+ 
+-// 瑙掕壊鍒囨崲鏃堕噸缃琛岀殑鏉′欢瀛楁涓洪粯璁ゅ€硷紙閬垮厤娈嬬暀鍏跺畠瑙掕壊鐨勬潯浠讹級
++// 瑙掕壊鍒囨崲鏃堕噸缃琛岀殑鏉′欢瀛楁涓洪粯璁ゅ€硷紙閬垮厤娈嬬暀鍏跺畠瑙掕壊鐨勬潯浠讹級锛?+// resume_each锛堢畝鍘嗚〃-姣忎汉涓€浠斤級榛樿寮€鍚瘡浜轰竴寮犺〃锛屽叾浣欒鑹叉竻绌?mode
+ function onBindingRoleChange(row) {
+   row.person_scope = 'all'
+   row.perf_scope = 'all'
+   row.label_kind = LABEL_KIND_OPTIONS[0]
+   row.person = 'lead'
++  row.mode = row.role === 'resume_each' ? 'per_person' : ''
+ }
+ 
++// 绠€鍘嗚〃锛堟瘡浜轰竴浠斤級浜烘暟棰勮锛歂 = 褰撳墠宸插嬀閫変汉鍛樻暟
++const resumeEachCount = computed(() => selectedPersons.value.length)
++
+ // 銆岀‘璁ゅ苟淇濆瓨缁戝畾銆嶏細鏁磋〃鎻愪氦锛屾墍鏈夎 confirmed=true锛堟彁浜ゅ悗鍗崇敓鏁堬紝鏈‘璁ょ殑琛ㄤ笉浼氳濉厖锛? async function onSaveBindings() {
+   bindingsSaving.value = true
+   try {
+     await saveBidDraftBindings(props.projectId, {
+       tables: bindingRows.value.map(r => ({
+         table_index: r.table_index,
+         role: r.role,
+         columns: r.columns,
+         person_scope: r.person_scope,
+         perf_scope: r.perf_scope,
+         label_kind: r.label_kind,
+         person: r.person,
++        header_rows: Number(r.header_rows) >= 1 ? Math.min(4, Number(r.header_rows)) : 1,
++        mode: r.role === 'resume_each' && r.mode === 'per_person' ? 'per_person' : '',
+         confirmed: true,
+       })),
+       swap_toc: swapToc.value,
+     })
+     ElMessage.success('缁戝畾宸蹭繚瀛橈紝瀵煎嚭鏃跺皢鎸夌‘璁ょ粨鏋滃～鍏?)
+     draftDialogVisible.value = false
+     loadDraft()
+   } catch { /* 鎷︽埅鍣ㄥ凡寮归敊 */ } finally {
+     bindingsSaving.value = false
+   }
+@@ -747,28 +792,34 @@ onMounted(() => { load(); loadDraft() })
+     <el-space style="margin-top: 16px">
+       <el-button type="primary" :loading="saving" @click="onSave">淇濆瓨鍕鹃€?/el-button>
+       <el-tooltip :disabled="!!draft" content="鏈敓鎴愬簳绋匡紝浣跨敤鍐呯疆妯℃澘瀵煎嚭" placement="top">
+         <el-button type="primary" plain :loading="exporting"
+                    @click="exportDialogVisible = true">瀵煎嚭鍟嗗姟鏍?/el-button>
+       </el-tooltip>
+       <el-button :loading="exportingLegacy === 'xlsx'" @click="onExport('xlsx')">瀵煎嚭 Excel</el-button>
+       <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">瀵煎嚭 Word</el-button>
+     </el-space>
+ 
+-    <el-dialog v-model="exportDialogVisible" title="瀵煎嚭鍟嗗姟鏍? width="440px">
++    <el-dialog v-model="exportDialogVisible" title="瀵煎嚭鍟嗗姟鏍? width="560px">
+       <el-form label-width="80px">
+         <el-form-item label="椤圭洰缂栧彿">
+           <el-input v-model="exportForm.project_no" placeholder="璇疯緭鍏ラ」鐩紪鍙? />
+         </el-form-item>
+         <el-form-item label="椤圭洰鍚嶇О">
+           <el-input v-model="exportForm.project_name" placeholder="璇疯緭鍏ラ」鐩悕绉? />
+         </el-form-item>
++        <el-form-item label="鏍囨鍚嶇О">
++          <el-input v-model="exportForm.section_name" placeholder="璇疯緭鍏ユ爣娈靛悕绉帮紙鍙暀绌猴級" />
++        </el-form-item>
++        <el-form-item label="鏍囨缂栧彿">
++          <el-input v-model="exportForm.section_no" placeholder="璇疯緭鍏ユ爣娈电紪鍙凤紙鍙暀绌猴級" />
++        </el-form-item>
+         <el-form-item label="鎷涙爣浜?>
+           <el-input v-model="exportForm.tenderer" placeholder="璇疯緭鍏ユ嫑鏍囦汉鍚嶇О锛堢暀绌哄垯涓嶅～鍏咃級" />
+         </el-form-item>
+         <el-form-item label="鎶曟爣浜?>
+           <el-input v-model="exportForm.bidder_name" placeholder="璇疯緭鍏ユ姇鏍囦汉鍚嶇О锛堢暀绌哄垯涓嶅～鍏咃級" />
+         </el-form-item>
+         <el-form-item label="娉曞畾浠ｈ〃浜?>
+           <el-select v-model="exportForm.legal_rep_id" filterable clearable placeholder="閫夋嫨娉曞畾浠ｈ〃浜猴紙鍙暀绌猴級"
+                      style="width: 100%">
+             <el-option v-for="a in legalCandidates" :key="a.id" :label="a.name" :value="a.id" />
+@@ -778,27 +829,72 @@ onMounted(() => { load(); loadDraft() })
+           <el-select v-model="exportForm.agent_id" filterable clearable placeholder="閫夋嫨濮旀墭浠ｇ悊浜猴紙鍙暀绌猴級"
+                      style="width: 100%">
+             <el-option v-for="a in legalCandidates" :key="a.id" :label="a.name" :value="a.id" />
+           </el-select>
+         </el-form-item>
+         <el-form-item label="鏃ユ湡">
+           <el-date-picker v-model="exportForm.doc_date" type="date" value-format="YYYY-MM-DD"
+                           placeholder="閫夋嫨鏃ユ湡" style="width: 100%" />
+         </el-form-item>
+       </el-form>
++
++      <!-- 鍗犱綅绗︾‘璁わ細棰勮搴曠鍗犱綅绗︾殑鍖归厤缁撴灉锛涙棤搴曠/澶辫触鏃堕檷绾ф彁绀猴紝涓嶉樆濉炲鍑?-->
++      <div v-loading="placeholderLoading"
++           style="border-top: 1px dashed #ebeef5; padding-top: 10px; margin-top: -6px">
++        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
++          <span style="font-size: 13px; font-weight: 600">鍗犱綅绗︾‘璁?/span>
++          <el-button size="small" link type="primary" :loading="placeholderLoading"
++                     @click="loadPlaceholderPreview">閲嶆柊棰勮</el-button>
++          <el-button v-if="placeholderPreview && !placeholderSkipped" size="small" link
++                     @click="placeholderSkipped = true">鎸夐粯璁ゅ～鍏咃紝璺宠繃纭</el-button>
++          <el-button v-else-if="placeholderSkipped" size="small" link type="primary"
++                     @click="placeholderSkipped = false">鏌ョ湅纭</el-button>
++        </div>
++        <el-alert v-if="placeholderFailed" type="info" :closable="false"
++                  title="鏆傛棤娉曢瑙堝崰浣嶇锛堟湭鐢熸垚搴曠鎴栬姹傚け璐ワ級锛屼笉褰卞搷瀵煎嚭锛屽彲鍦ㄥ鍑烘姤鍛婁腑鏍稿銆?
++                  style="margin-bottom: 4px" />
++        <template v-else-if="placeholderPreview && !placeholderSkipped">
++          <template v-if="(placeholderPreview.matched || []).length">
++            <div style="font-size: 12px; color: #909399; margin: 4px 0 2px">灏嗗～鍏?/div>
++            <div v-for="(m, i) in placeholderPreview.matched" :key="i"
++                 style="font-size: 13px; margin: 2px 0">
++              <span style="color: #606266">{{ m.label }}</span>
++              <span style="color: #c0c4cc; margin: 0 6px">鈫?/span>
++              <span>{{ m.value || '锛堢┖锛? }}</span>
++              <span v-if="m.count > 1" style="color: #909399; font-size: 12px">銆€濉厖 {{ m.count }} 澶?/span>
++            </div>
++          </template>
++          <template v-if="(placeholderPreview.suspicious || []).length">
++            <div style="font-size: 12px; color: #e6a23c; margin: 8px 0 2px">鏈瘑鍒紙鐤戜技鍗犱綅锛?/div>
++            <div v-for="(s, i) in placeholderPreview.suspicious" :key="i"
++                 style="font-size: 13px; margin: 2px 0; color: #e6a23c">
++              {{ s.text }}
++            </div>
++            <div style="font-size: 12px; color: #e6a23c; margin-top: 2px">
++              浠ヤ笂鍗犱綅绗︽湭鍖归厤鍒板～鍐欏唴瀹癸紝瀵煎嚭鍚庡皢淇濈暀鍘熸牱锛岃浜哄伐鏍稿銆?+            </div>
++          </template>
++          <div v-if="!(placeholderPreview.matched || []).length && !(placeholderPreview.suspicious || []).length"
++               style="font-size: 13px; color: #909399">搴曠涓湭妫€娴嬪埌鍗犱綅绗︺€?/div>
++        </template>
++        <div v-else-if="placeholderSkipped" style="font-size: 12px; color: #909399">
++          宸茶烦杩囩‘璁わ紝瀵煎嚭鏃跺皢鎸変笂鏂瑰～鍐欏唴瀹圭洿鎺ュ～鍏咃紝鏈瘑鍒崰浣嶇淇濈暀鍘熸牱銆?+        </div>
++      </div>
++
+       <template #footer>
+         <el-button @click="exportDialogVisible = false">鍙栨秷</el-button>
+         <el-button type="primary" :loading="exporting" @click="onExportTemplate">纭畾瀵煎嚭</el-button>
+       </template>
+     </el-dialog>
+ 
+-    <el-dialog v-model="draftDialogVisible" title="鍟嗗姟鏍囧簳绋块瑙堜笌纭" width="760px">
++    <el-dialog v-model="draftDialogVisible" title="鍟嗗姟鏍囧簳绋块瑙堜笌纭" width="900px">
+       <!-- 椤堕儴宸ュ叿鍖猴細瑁佸垏璧锋 + 鎸夎寖鍥达紙閲嶆柊锛夌敓鎴?-->
+       <el-space wrap style="margin-bottom: 12px">
+         <el-select v-model="draftRange.start" filterable placeholder="璧峰鏍囬" style="width: 240px">
+           <el-option v-for="h in draftHeadings" :key="h.index" :label="headingLabel(h)" :value="h.index" />
+         </el-select>
+         <span>锝?/span>
+         <el-select v-model="draftRange.end" filterable placeholder="鎴嚦鏍囬" style="width: 240px">
+           <el-option label="鏂囨。鏈熬" :value="-1" />
+           <el-option v-for="h in draftHeadings" :key="h.index" :label="headingLabel(h)" :value="h.index" />
+         </el-select>
+@@ -826,40 +922,55 @@ onMounted(() => { load(); loadDraft() })
+         <h4 style="margin: 12px 0 4px">琛ㄦ牸缁戝畾</h4>
+         <el-table :data="bindingRows" size="small" max-height="320">
+           <el-table-column prop="table_index" label="#" width="50" />
+           <el-table-column label="琛ㄥご棰勮" min-width="160" show-overflow-tooltip>
+             <template #default="{ row }">{{ (row.header || []).join(' / ') || '-' }}</template>
+           </el-table-column>
+           <el-table-column prop="context_heading" label="鍓嶆枃鏍囬" min-width="120"
+                            show-overflow-tooltip>
+             <template #default="{ row }">{{ row.context_heading || '-' }}</template>
+           </el-table-column>
+-          <el-table-column label="瑙掕壊" width="140">
++          <el-table-column label="瑙掕壊" width="150">
+             <template #default="{ row }">
+               <el-select v-model="row.role" size="small" @change="onBindingRoleChange(row)">
+                 <el-option v-for="o in DRAFT_ROLE_OPTIONS" :key="o.value"
+                            :label="o.label" :value="o.value" />
+               </el-select>
+             </template>
+           </el-table-column>
+-          <el-table-column label="鏉′欢" min-width="190">
++          <el-table-column label="琛ㄥご琛屾暟" width="100" align="center">
++            <template #default="{ row }">
++              <el-input-number v-model="row.header_rows" size="small" :min="1" :max="4"
++                               style="width: 76px" />
++            </template>
++          </el-table-column>
++          <el-table-column label="鏉′欢" min-width="200">
+             <template #default="{ row }">
+               <el-select v-if="row.role === 'person_roster'" v-model="row.person_scope"
+                          size="small" placeholder="浜哄憳鑼冨洿">
+                 <el-option v-for="o in PERSON_SCOPE_OPTIONS" :key="o.value"
+                            :label="o.label" :value="o.value" />
+               </el-select>
+               <el-select v-else-if="row.role === 'perf_list'" v-model="row.perf_scope"
+                          size="small" placeholder="涓氱哗鑼冨洿">
+                 <el-option v-for="o in PERF_SCOPE_OPTIONS" :key="o.value"
+                            :label="o.label" :value="o.value" />
+               </el-select>
++              <div v-else-if="row.role === 'resume_each'">
++                <el-checkbox :model-value="row.mode === 'per_person'"
++                             @change="v => row.mode = v ? 'per_person' : ''">
++                  姣忎汉涓€寮犺〃
++                </el-checkbox>
++                <div style="font-size: 12px; color: #909399">
++                  {{ row.mode === 'per_person' ? `姣忎汉涓€寮犺〃 脳 ${resumeEachCount} 浜篳 : '宸插叧闂瘡浜轰竴寮犺〃锛屾寜鍗曡〃濉厖' }}
++                </div>
++              </div>
+               <el-space v-else-if="row.role === 'image_slot'" wrap>
+                 <el-select v-model="row.label_kind" size="small" placeholder="鍥剧墖绫诲瀷"
+                            style="width: 110px">
+                   <el-option v-for="k in LABEL_KIND_OPTIONS" :key="k" :label="k" :value="k" />
+                 </el-select>
+                 <el-select v-model="row.person" size="small" placeholder="褰掑睘浜哄憳"
+                            style="width: 90px">
+                   <el-option v-for="o in imagePersonOptions" :key="o.value"
+                              :label="o.label" :value="o.value" />
+                 </el-select>
+@@ -898,30 +1009,75 @@ onMounted(() => { load(); loadDraft() })
+           <li v-for="(s, i) in fillReport.verify.issues" :key="i">{{ s }}</li>
+         </ul>
+ 
+         <template v-if="(fillReport.filled || []).length">
+           <h4 style="margin: 8px 0 4px">宸插～鍏?/h4>
+           <div v-for="(f, i) in fillReport.filled" :key="i" style="font-size: 13px; margin: 2px 0">
+             琛ㄦ牸#{{ f.table_index }}锛坽{ roleLabel(f.role) }}锛夛細濉厖 {{ f.rows }} 琛?           </div>
+         </template>
+ 
++        <template v-if="fillReport.placeholders">
++          <template v-if="(fillReport.placeholders.filled || []).length">
++            <h4 style="margin: 12px 0 4px">鍗犱綅绗?/h4>
++            <div v-for="(p, i) in fillReport.placeholders.filled" :key="i"
++                 style="font-size: 13px; margin: 2px 0">
++              <span style="color: #606266">{{ p.label }}</span>
++              <span style="color: #c0c4cc; margin: 0 6px">鈫?/span>
++              <span>{{ p.value || '锛堢┖锛? }}</span>
++              <span v-if="p.count > 1" style="color: #909399; font-size: 12px">銆€濉厖 {{ p.count }} 澶?/span>
++            </div>
++          </template>
++          <template v-if="(fillReport.placeholders.suspicious || []).length">
++            <h4 style="margin: 12px 0 4px; color: #e6a23c">鏈瘑鍒紙鐤戜技鍗犱綅锛?/h4>
++            <div v-for="(s, i) in fillReport.placeholders.suspicious" :key="i"
++                 style="font-size: 13px; margin: 2px 0; color: #e6a23c">
++              {{ s.text }}
++            </div>
++            <div style="font-size: 12px; color: #e6a23c; margin-top: 2px">
++              浠ヤ笂鍗犱綅绗︽湭鍖归厤鍒板～鍐欏唴瀹癸紝宸蹭繚鐣欏師鏍凤紝璇峰湪瀵煎嚭鏂囦欢涓汉宸ユ牳瀵广€?+            </div>
++          </template>
++        </template>
++
+         <template v-if="(fillReport.images || []).length">
+-          <h4 style="margin: 8px 0 4px">鍥剧墖</h4>
+-          <div v-for="(im, i) in fillReport.images" :key="i"
+-               :style="`font-size: 13px; margin: 2px 0; ${im.ok ? '' : 'color: #f56c6c'}`">
+-            #{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }}{{ im.ok ? '' : ' 鎻掑叆澶辫触' }}
++          <h4 style="margin: 12px 0 4px">鍥剧墖</h4>
++          <div v-for="(im, i) in fillReport.images" :key="i" style="font-size: 13px; margin: 2px 0">
++            <template v-if="im.ok">#{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }}</template>
++            <span v-else style="color: #f56c6c; font-weight: 500">
++              #{{ im.table_index }} {{ im.person }} 路 {{ im.label_kind }} 鎻掑叆澶辫触锛歿{ im.reason || '鏈煡鍘熷洜' }}
++            </span>
++            <!-- 楂樺害鎴《鎻愮ず锛氭垚鍔燂紙too_long锛変笌澶辫触琛岄兘鍙兘鍑虹幇锛屾晠鏀惧湪 ok 鍒ゆ柇涔嬪 -->
++            <span v-if="im.too_long" :style="`color: ${im.ok ? '#e6a23c' : '#f56c6c'}`">锛堟壂鎻忎欢杩囬暱锛屽缓璁媶鍒嗭級</span>
++          </div>
++        </template>
++
++        <template v-if="fillReport.page_setup">
++          <h4 style="margin: 12px 0 4px">椤电爜 / 鍒嗚妭</h4>
++          <div style="font-size: 13px; margin: 2px 0">
++            鍒嗚妭鏁帮細{{ fillReport.page_setup.sections ?? '-' }}
++            <template v-if="Array.isArray(fillReport.page_setup.section_page_numbers)">
++              <span v-for="(v, i) in fillReport.page_setup.section_page_numbers" :key="i"
++                    style="margin-left: 10px; color: #606266">
++                绗瑊{ i + 1 }}鑺傦細{{ v ? '宸叉寕椤电爜' : '鏈寕椤电爜' }}
++              </span>
++            </template>
+           </div>
++          <el-alert v-if="fillReport.page_setup.degraded" type="warning" :closable="false"
++                    style="margin: 4px 0"
++                    :title="`椤电爜/鍒嗚妭澶勭悊宸查檷绾э細${fillReport.page_setup.degraded}`" />
++          <el-alert v-for="(w, i) in fillReport.page_setup.warnings || []" :key="i"
++                    type="warning" :closable="false" :title="w" style="margin: 4px 0" />
+         </template>
+ 
+         <template v-if="(fillReport.skipped || []).length">
+-          <h4 style="margin: 8px 0 4px">宸茶烦杩?/h4>
++          <h4 style="margin: 12px 0 4px">宸茶烦杩?/h4>
+           <div v-for="(s, i) in fillReport.skipped" :key="i"
+                style="font-size: 13px; margin: 2px 0; color: #909399">
+             琛ㄦ牸#{{ s.table_index }}锛坽{ roleLabel(s.role) }}锛夛細{{ s.reason }}
+           </div>
+         </template>
+       </template>
+       <template #footer>
+         <el-button type="primary" @click="reportDialogVisible = false">鐭ラ亾浜?/el-button>
+       </template>
+     </el-dialog>
+diff --git a/frontend/src/views/SettingsView.vue b/frontend/src/views/SettingsView.vue
+index f1f6e1c..9195c85 100644
+--- a/frontend/src/views/SettingsView.vue
++++ b/frontend/src/views/SettingsView.vue
+@@ -1,26 +1,27 @@
+ <script setup>
+ import { onMounted, ref, computed } from 'vue'
+ import { ElMessage } from 'element-plus'
+ import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
+ import {
+-  getFieldConfig, getImportSettings, getSettings, saveFieldConfig, saveImportSettings,
+-  saveSettings, testSettings,
++  getFieldConfig, getImportSettings, getPlaceholderSynonyms, getSettings, saveFieldConfig,
++  saveImportSettings, savePlaceholderSynonyms, saveSettings, testSettings,
+ } from '../api'
+ 
+ const form = ref({ api_key: '', model: 'kimi-k3' })
+ const testing = ref(false)
+ 
+ onMounted(async () => {
+   form.value = await getSettings()
+   loadImportSettings()
+   loadFieldConfig()
++  loadSynonyms()
+ })
+ 
+ async function save() {
+   try {
+     await saveSettings(form.value)
+     ElMessage.success('宸蹭繚瀛?)
+   } catch (e) {
+     ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
+   }
+ }
+@@ -88,20 +89,59 @@ async function saveImport() {
+       llm_extract_enabled: importForm.value.llm_extract_enabled,
+     })
+     ElMessage.success('瀵煎叆閰嶇疆宸蹭繚瀛?)
+   } catch (e) {
+     ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
+   } finally {
+     importSaving.value = false
+   }
+ }
+ 
++// ---------- 鍗犱綅绗﹀悓涔夎瘝锛堝晢鍔℃爣搴曠鍗犱綅绗︼細鍒悕 鈫?瑙勮寖鏍囩锛屽叏閲忚鐩栦繚瀛橈級 ----------
++const SYNONYM_LABEL_OPTIONS = ['椤圭洰鍚嶇О', '鎷涙爣浜?, '鎶曟爣浜哄悕绉?, '椤圭洰缂栧彿', '鎷涙爣缂栧彿', '鏍囨鍚嶇О', '鏍囨缂栧彿', '鏃ユ湡']
++
++const synonymRows = ref([])
++const synonymSaving = ref(false)
++
++async function loadSynonyms() {
++  try {
++    const r = await getPlaceholderSynonyms()
++    synonymRows.value = Object.entries(r || {}).map(([alias, label]) => ({ alias, label }))
++  } catch {
++    // 鍚庣鏈氨缁椂鐣欑┖锛屽彲浠庨浂寮€濮嬮厤缃?+  }
++}
++
++async function saveSynonyms() {
++  // 绌哄埆鍚嶈鐩存帴蹇界暐锛涙湁鍒悕浣嗘湭閫夎鑼冩爣绛剧殑琛岃涓哄綍鍏ヤ笉瀹屾暣锛屾彁绀哄悗涓
++  if (synonymRows.value.some(r => r.alias.trim() && !r.label)) {
++    ElMessage.warning('瀛樺湪鏈€夋嫨瑙勮寖鏍囩鐨勫埆鍚嶏紝璇疯ˉ鍏ㄦ垨鍒犻櫎鍚庡啀淇濆瓨')
++    return
++  }
++  synonymSaving.value = true
++  try {
++    const mapping = {}
++    for (const r of synonymRows.value) {
++      const alias = r.alias.trim()
++      if (alias && r.label) mapping[alias] = r.label
++    }
++    const r = await savePlaceholderSynonyms(mapping)
++    // 浠ユ湇鍔＄杩斿洖锛堣鑼冨寲鍚庯級涓哄噯鍒锋柊
++    synonymRows.value = Object.entries(r || mapping).map(([alias, label]) => ({ alias, label }))
++    ElMessage.success('鍗犱綅绗﹀悓涔夎瘝宸蹭繚瀛?)
++  } catch (e) {
++    ElMessage.error('淇濆瓨澶辫触锛? + (e.response?.data?.detail || e.message))
++  } finally {
++    synonymSaving.value = false
++  }
++}
++
+ // ---------- 璧勪骇瀛楁閰嶇疆 ----------
+ const FIELD_TYPES = [
+   { value: 'text', label: '鏂囨湰' },
+   { value: 'date', label: '鏃ユ湡' },
+   { value: 'dropdown', label: '涓嬫媺' },
+ ]
+ 
+ const fieldTab = ref('person')
+ const personFields = ref([])
+ const contractFields = ref([])
+@@ -242,20 +282,52 @@ async function saveFields() {
+           <el-switch v-model="importForm.llm_extract_enabled" />
+           <div class="mapping-tip">寮€鍚悗鐢ㄥぇ妯″瀷浠庤瘉浠躲€佸悎鍚屼腑鎶藉彇瀛楁锛堥渶閰嶇疆 LLM API锛屽唴缃戝彲鑳戒笉鍙敤锛?/div>
+         </div>
+       </el-form-item>
+       <el-form-item>
+         <el-button type="primary" :loading="importSaving" @click="saveImport">淇濆瓨瀵煎叆閰嶇疆</el-button>
+       </el-form-item>
+     </el-form>
+   </el-card>
+ 
++  <el-card style="max-width: 720px; margin-bottom: 16px">
++    <template #header>鍗犱綅绗﹀悓涔夎瘝</template>
++    <div class="mapping-tip" style="margin-bottom: 10px">
++      鍒悕鐢ㄤ簬搴曠涓笌瑙勮寖鏍囩涓嶅悓鐨勫啓娉曪紙濡傘€岄噰璐汉銆嶈涓恒€屾嫑鏍囦汉銆嶏級锛涘鍑轰笌鏍￠獙鍏辩敤鍚屼竴鍚屼箟璇嶅簱銆?+    </div>
++    <el-table :data="synonymRows" size="small">
++      <el-table-column label="鍒悕">
++        <template #default="{ row }">
++          <el-input v-model="row.alias" size="small" placeholder="濡傦細閲囪喘浜? />
++        </template>
++      </el-table-column>
++      <el-table-column label="瑙勮寖鏍囩" width="180">
++        <template #default="{ row }">
++          <el-select v-model="row.label" size="small" placeholder="閫夋嫨瑙勮寖鏍囩" style="width: 100%">
++            <el-option v-for="t in SYNONYM_LABEL_OPTIONS" :key="t" :label="t" :value="t" />
++          </el-select>
++        </template>
++      </el-table-column>
++      <el-table-column label="" width="70">
++        <template #default="{ $index }">
++          <el-button size="small" type="danger" link
++                     @click="synonymRows.splice($index, 1)">鍒犻櫎</el-button>
++        </template>
++      </el-table-column>
++    </el-table>
++    <el-button size="small" style="margin-top: 8px"
++               @click="synonymRows.push({ alias: '', label: '' })">娣诲姞涓€琛?/el-button>
++    <div style="margin-top: 16px">
++      <el-button type="primary" :loading="synonymSaving" @click="saveSynonyms">淇濆瓨鍚屼箟璇?/el-button>
++    </div>
++  </el-card>
++
+   <el-card style="max-width: 920px">
+     <template #header>璧勪骇瀛楁閰嶇疆</template>
+     <div class="mapping-tip" style="margin-bottom: 10px">
+       閰嶇疆璧勪骇搴撲腑銆屽父鐢ㄤ汉鍛樸€嶈〃鏍煎垪涓庤〃鍗曞瓧娈碉紝浠ュ強浜哄憳涓氱哗鐨勫睍绀哄瓧娈碉紱瀛楁椤哄簭鍗宠〃鏍煎垪椤哄簭銆?     </div>
+     <el-tabs v-model="fieldTab">
+       <el-tab-pane label="浜哄憳瀛楁" name="person" />
+       <el-tab-pane label="鍚堝悓瀛楁" name="contract" />
+     </el-tabs>
+     <el-table :data="fieldRows" size="small">

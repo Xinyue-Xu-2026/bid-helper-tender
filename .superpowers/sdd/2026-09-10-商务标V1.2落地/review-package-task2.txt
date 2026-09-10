@@ -1,0 +1,323 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 0d35ad2..1ced3e6 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -333,24 +333,27 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
+     if scope == "section1":
+         return [c for c in contracts if c.get("section") == 1]
+     if scope == "section2":
+         return [c for c in contracts if c.get("section") == 2]
+     return list(contracts)
+ 
+ 
+ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+                project_no: str = "", project_name: str = "",
+                doc_date: str = "", tenderer: str = "",
+-               bidder_name: str = "", auth: dict = None) -> dict:
++               bidder_name: str = "", auth: dict = None,
++               section_name: str = "", section_no: str = "") -> dict:
+     """鎸夌‘璁ょ殑 bindings 濉厖搴曠骞跺彟瀛?dest_path锛岃繑鍥?fill_report銆?     dest 涓?draft 涓嶅緱鍚岃矾寰勩€倀enderer/bidder_name 涓虹┖鍒欒烦杩囧搴?-    鏍囩绌虹櫧锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夊～鍏呫€?+    鏍囩绌虹櫧锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夊～鍏咃紱section_name/
++    section_no 涓虹┖鍒欒烦杩囨爣娈垫爣绛?鎷彿鍗犱綅锛堟爣娈靛悕绉帮細____ /
++    锛堟爣娈靛悕绉帮級绛夛級濉厖銆?     auth锛氬彲閫夛紝{"legal_rep": {濮撳悕/韬唤璇佸彿/姝ｅ弽闈㈡壂鎻忎欢璺緞...} | {},
+     "agent": {...}, "doc_date": str}鈥斺€旀巿鏉冮〉锛堟硶瀹氫唬琛ㄤ汉韬唤璇佹槑/鎺堟潈
+     濮旀墭涔︼級绛惧悕鍖轰笌韬唤璇侀檮鍥惧～鍏咃紱鏈彁渚涙垨瀛楁涓虹┖鍒欒烦杩囥€?""
+     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
+         raise ValueError("dest 涓?draft 涓嶅緱鍚岃矾寰?)
+     doc = Document(draft_path)
+     # doc.tables锛氶《灞傝〃鏍笺€佹枃妗ｉ『搴忥紙python-docx 鎸?body 涓?w:tbl 椤哄簭鏀堕泦锛?     # 宸查獙璇佷笌鍧楅亶鍘嗕竴鑷达級锛屼笌 T5 table_index 鍚屽潗鏍囩郴銆?     tables = doc.tables
+     data = data or {}
+@@ -359,21 +362,22 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     report = {"filled": [], "images": [], "skipped": [], "verify": None,
+               "page_setup": None, "authority_images": 0, "auth_bound": []}
+ 
+     # 娈嬬暀鏂囨湰鏇挎崲椤诲湪濉厖涔嬪墠鎵ц锛氭浛鎹㈣鍒欙紙compute_text_subs锛夊熀浜?     # 濉厖鍓嶇殑搴曠璁＄畻锛屼笌 verify_draft_fill 鐨勫簳绋夸晶鍚屾簮鈥斺€斿惁鍒?stale 鍊?     # 浠呭瓨鍦ㄤ簬缁戝畾琛ㄦ暟鎹崟鍏冩牸鏃讹紝濉厖瑕嗗啓鍚庤鍒欏彂鐜颁笉鍒版棫鍊硷紝
+     # 灏侀潰/姝ｆ枃娈嬬暀涓嶈鏇挎崲涓?verify 璇姤銆傚～鍏呮暣浣撹鍐欐暟鎹崟鍏冩牸锛?     # 鎻愬墠鏇挎崲涓嶆敼鍙樹骇鐗╁唴瀹广€?     _replace_stale_text(doc, project_no=project_no,
+                         project_name=project_name, doc_date=doc_date,
+-                        tenderer=tenderer, bidder_name=bidder_name)
++                        tenderer=tenderer, bidder_name=bidder_name,
++                        section_name=section_name, section_no=section_no)
+ 
+     # 鎺堟潈椤垫鏂囧～鍏咃細鏀瑰姩鐨勬槸鏅€氭鏂囨锛岄』鎶婅鏀规鍔犲叆 verify 鐨?     # bound锛坧aragraph 涓嬫爣锛宼oc/鍒嗚妭绗﹁繃婊ゅ潗鏍囩郴锛夐伩鍏嶈鎶?     auth_bound = set()
+     if auth:
+         auth = {**auth, "bidder_name": bidder_name}
+         _auth_signature_block(doc, auth_bound, report, auth)
+         report["auth_bound"] = sorted(auth_bound)
+ 
+     image_slots = []
+@@ -431,14 +435,16 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     if swap_toc:
+         _swap_toc(doc)
+     doc.save(str(dest_path))
+     # 椤电湁绉绘 + 鍒嗚妭椤电爜锛堝弬鑰冪己澶辫嚜鍔ㄩ檷绾э紝瑙?bid_page_setup锛?     report["page_setup"] = apply_page_setup(str(dest_path))
+     report["verify"] = verify_draft_fill(
+         str(draft_path), str(dest_path),
+         bound_table_indices=bound_indices,
+         replace_params={"project_no": project_no, "project_name": project_name,
+                         "doc_date": doc_date, "tenderer": tenderer,
+-                        "bidder_name": bidder_name},
++                        "bidder_name": bidder_name,
++                        "section_name": section_name,
++                        "section_no": section_no},
+         swapped_toc=swap_toc,
+         bound_paragraph_indices=auth_bound)
+     return report
+diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index e40396b..f10f45f 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -501,27 +501,30 @@ def scan_placeholders(doc, params: dict, synonyms=None) -> dict:
+         if not t.strip():
+             continue
+         if (_UNRECOGNIZED_UNDERSCORE_RE.search(t)
+                 and not any(r["pattern"].search(t) for r in rules)):
+             suspicious.append({"text": t})
+     return {"matched": matched, "suspicious": suspicious}
+ 
+ 
+ def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
+                         doc_date: str = "", tenderer: str = "",
+-                        bidder_name: str = "") -> None:
++                        bidder_name: str = "", section_name: str = "",
++                        section_no: str = "", synonyms=None) -> None:
+     """鏇挎崲妯℃澘涓畫鐣欑殑涓婃鎶曟爣鏂囨湰锛氳鍒欑敱 compute_text_subs 缁熶竴璁＄畻锛?-    姝ゅ浠呴€愭锛堝惈琛ㄦ牸鍗曞厓鏍硷紝璺宠繃 toc 娈碉級搴旂敤銆俻roject_no/doc_date 涓虹┖
+-    鍒欒烦杩囧搴旀浛鎹紝project_name 涓虹┖鍒欎笉鏇挎崲锛泃enderer/bidder_name 涓虹┖
+-    鍒欎笉濉厖瀵瑰簲鏍囩绌虹櫧銆?""
++    姝ゅ浠呴€愭锛堝惈琛ㄦ牸鍗曞厓鏍间笌鏂囨湰妗嗭紝璺宠繃 toc 娈碉級搴旂敤銆俻roject_no/doc_date
++    涓虹┖鍒欒烦杩囧搴旀浛鎹紝project_name 涓虹┖鍒欎笉鏇挎崲锛泃enderer/bidder_name/
++    section_name/section_no 涓虹┖鍒欎笉濉厖瀵瑰簲鏍囩/鎷彿绌虹櫧銆?""
+     subs = compute_text_subs(doc, project_no, project_name, doc_date,
+-                             tenderer=tenderer, bidder_name=bidder_name)
++                             tenderer=tenderer, bidder_name=bidder_name,
++                             section_name=section_name, section_no=section_no,
++                             synonyms=synonyms)
+     if not subs:
+         return
+     for para in _iter_all_paragraphs(doc):
+         if _is_toc_paragraph(para):
+             continue
+         for pattern, repl in subs:
+             _replace_in_paragraph(para, pattern, repl)
+ 
+ 
+ def _rename_member_headings(doc, member_names: list) -> None:
+diff --git a/backend/app/db.py b/backend/app/db.py
+index 1aef736..fca0eea 100644
+--- a/backend/app/db.py
++++ b/backend/app/db.py
+@@ -130,20 +130,29 @@ class Database:
+                     cut_end TEXT DEFAULT '',
+                     bindings TEXT DEFAULT '{}',
+                     tenderer TEXT DEFAULT '',
+                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                 )
+             """)
+         self._migrate_project_assets_columns()
+         self._migrate_perfs_to_contracts()
+         self._migrate_bid_templates_columns()
++        self._migrate_projects_columns()
++
++    def _migrate_projects_columns(self):
++        """骞傜瓑杩佺Щ锛氭棫搴撶殑 projects 琛ㄨˉ section_name/section_no 鍒楋紙V1.2 鏍囨锛夈€?""
++        with self._connect() as conn:
++            cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
++            for name in ("section_name", "section_no"):
++                if name not in cols:
++                    conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT DEFAULT ''")
+ 
+     def _migrate_bid_templates_columns(self):
+         """骞傜瓑杩佺Щ锛氭棫搴撶殑 bid_templates 琛ㄨˉ tenderer 鍒楋紙P3 鎷涙爣浜哄悕绉帮級銆?""
+         with self._connect() as conn:
+             cols = {r[1] for r in conn.execute("PRAGMA table_info(bid_templates)")}
+             if "tenderer" not in cols:
+                 conn.execute("ALTER TABLE bid_templates "
+                              "ADD COLUMN tenderer TEXT DEFAULT ''")
+ 
+     def _migrate_project_assets_columns(self):
+@@ -219,21 +228,22 @@ class Database:
+             rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+             return [dict(r) for r in rows]
+ 
+     def get_project(self, project_id: int) -> Optional[dict]:
+         with self._connect() as conn:
+             conn.row_factory = sqlite3.Row
+             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+             return dict(row) if row else None
+ 
+     def update_project(self, project_id: int, **kwargs):
+-        allowed = {"name", "client", "bid_date", "project_type", "notes", "tender_file_path"}
++        allowed = {"name", "client", "bid_date", "project_type", "notes",
++                   "tender_file_path", "section_name", "section_no"}
+         fields = {k: v for k, v in kwargs.items() if k in allowed}
+         if not fields:
+             return
+         set_clause = ", ".join(f"{k} = ?" for k in fields)
+         with self._connect() as conn:
+             conn.execute(
+                 f"UPDATE projects SET {set_clause}, updated_at = ? WHERE id = ?",
+                 list(fields.values()) + [datetime.now().isoformat(), project_id])
+ 
+     def delete_project(self, project_id: int):
+diff --git a/backend/app/routers/bid.py b/backend/app/routers/bid.py
+index 257df89..c7e95db 100644
+--- a/backend/app/routers/bid.py
++++ b/backend/app/routers/bid.py
+@@ -47,20 +47,22 @@ class BidAssetsIn(BaseModel):
+ class BidTemplateExportIn(BaseModel):
+     persons: list[TemplatePersonPick] = []
+     contracts: list[TemplateContractPick] = []
+     project_no: str = ""      # 椤圭洰缂栧彿锛堢┖鍒欎笉鏇挎崲妯℃澘娈嬬暀缂栧彿锛?     project_name: str = ""    # 椤圭洰鍚嶇О瑕嗙洊锛堢┖鍒欑敤鏁版嵁搴撻」鐩悕锛?     doc_date: str = ""        # 鏂囨。鏃ユ湡 YYYY-MM-DD锛堢┖鍒欎笉鏇挎崲妯℃澘娈嬬暀鏃ユ湡锛?     tenderer: str = ""        # 鎷涙爣浜哄悕绉帮紙绌哄垯涓嶅～鍏?鎷涙爣浜猴細____"绌虹櫧锛?     bidder_name: str = ""     # 鎶曟爣浜哄悕绉帮紙绌哄垯涓嶅～鍏?鎶曟爣浜哄悕绉帮細____"绌虹櫧锛?     legal_rep_id: int | None = None   # 娉曞畾浠ｈ〃浜猴紙legal 璧勪骇 id锛?     agent_id: int | None = None       # 濮旀墭浠ｇ悊浜猴紙legal 璧勪骇 id锛?+    section_name: str = ""   # 鏍囨鍚嶇О锛堢┖鍒欎笉濉厖"鏍囨鍚嶇О锛歘___/锛堟爣娈靛悕绉帮級"鍗犱綅锛?+    section_no: str = ""     # 鏍囨缂栧彿锛堢┖鍒欎笉濉厖"鏍囨缂栧彿锛歘___"鍗犱綅锛? 
+ 
+ def _legal_person(db: Database, asset_id: int | None) -> dict | None:
+     """鎶?legal 璧勪骇瑙ｆ瀽鎴愭巿鏉冮〉濉厖鎵€闇€瀛楀吀锛坽name, 韬唤璇佸彿, 姝ｅ弽闈㈡壂鎻忎欢}锛夈€?""
+     if asset_id is None:
+         return None
+     a = db.get_asset(asset_id)
+     if not a or a.get("type") != "legal":
+         return None
+     fields = a.get("fields") or {}
+@@ -128,20 +130,28 @@ def export_bid_assets(project_id: int, background_tasks: BackgroundTasks,
+ @router.post("/projects/{project_id}/bid-assets/export-template")
+ def export_bid_template(project_id: int, body: BidTemplateExportIn,
+                         background_tasks: BackgroundTasks,
+                         db: Database = Depends(get_db)):
+     """妯℃澘寮忓晢鍔℃爣瀵煎嚭锛氶」鐩湁搴曠锛坆id_templates锛夎蛋缁戝畾椹卞姩鏂扮绾?     锛坒ill_draft + X-Fill-Report 澶达級锛屽惁鍒欏洖閫€鏃фā鏉胯矾寰?     锛坉ata/鍟嗗姟鏍囨ā鏉?docx + build_bid_docx_from_template锛岃涓轰笉鍙橈級銆?""
+     project = _get_project_or_404(db, project_id)
+     if not body.persons and not body.contracts:
+         raise HTTPException(422, "璇峰厛鍕鹃€変汉鍛樻垨涓氱哗")
++    # 鏍囨瀛楁闈炵┖鏃舵寔涔呭寲鍒?projects锛堜笅娆″鍑哄彲鍥炴樉锛?+    section_update = {}
++    if (body.section_name or "").strip():
++        section_update["section_name"] = body.section_name.strip()
++    if (body.section_no or "").strip():
++        section_update["section_no"] = body.section_no.strip()
++    if section_update:
++        db.update_project(project_id, **section_update)
+     effective_name = (body.project_name or "").strip() or project["name"]
+     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in effective_name)
+     dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_鍟嗗姟鏍?docx"
+     filename = quote(f"{effective_name}_鍟嗗姟鏍?docx")
+     headers = {"Content-Disposition": f"attachment; filename*=utf-8''{filename}"}
+ 
+     bt = db.get_project_bid_template(project_id)
+     if bt and Path(bt.get("file_path") or "").exists():
+         # 鏂扮绾匡細搴曠 + 鐢ㄦ埛纭 bindings 濉厖锛岄檮濉厖/鏍￠獙鎶ュ憡
+         bindings = bt.get("bindings") or {}
+@@ -151,21 +161,23 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
+             [c.model_dump() for c in body.contracts])
+         auth = {"legal_rep": _legal_person(db, body.legal_rep_id),
+                 "agent": _legal_person(db, body.agent_id),
+                 "doc_date": (body.doc_date or "").strip()}
+         report = fill_draft(bt["file_path"], str(dest), bindings, data,
+                             project_no=(body.project_no or "").strip(),
+                             project_name=effective_name,
+                             doc_date=(body.doc_date or "").strip(),
+                             tenderer=(body.tenderer or "").strip(),
+                             bidder_name=(body.bidder_name or "").strip(),
+-                            auth=auth)
++                            auth=auth,
++                            section_name=(body.section_name or "").strip(),
++                            section_no=(body.section_no or "").strip())
+         headers["X-Fill-Report"] = quote(
+             json.dumps(report, ensure_ascii=False))
+     else:
+         # 鏃ц矾寰勶細鍥哄畾妯℃澘濉厖锛堟棤搴曠鏃朵繚鎸佸師鏈夎涓猴級
+         template = config.BID_TEMPLATE_PATH
+         if not template.exists():
+             raise HTTPException(503, "鍟嗗姟鏍囨ā鏉挎湭閰嶇疆锛坉ata/鍟嗗姟鏍囨ā鏉?docx 缂哄け锛?)
+         data = bid_service.assemble_bid_template_data(
+             db,
+             [p.model_dump() for p in body.persons],
+diff --git a/backend/tests/test_api_bid.py b/backend/tests/test_api_bid.py
+index f68b473..07af92b 100644
+--- a/backend/tests/test_api_bid.py
++++ b/backend/tests/test_api_bid.py
+@@ -1,15 +1,17 @@
+ """鍟嗗姟鏍?API 娴嬭瘯锛堣璁℃枃妗?搂8 娴嬭瘯璁″垝 1-8锛夛細
+ 鍕鹃€?PUT鈫扜ET 寰€杩?/ 瑕嗙洊璇箟 / 鏍￠獙閿欒 / xlsx銆乨ocx 瀵煎嚭 /
+ 绌哄嬀閫夊鍑?422 / expiring-detail 鏄庣粏 / 璇佷功鏈夋晥鏈熻鍛婏紙expired銆乻oon锛夈€?""
+ from datetime import date, timedelta
+ from io import BytesIO
++from urllib.parse import unquote
++import json
+ 
+ import pytest
+ from docx import Document
+ from fastapi.testclient import TestClient
+ from openpyxl import load_workbook
+ 
+ from app.core.bid_exporter import PERSON_HEADERS
+ from app.db import Database
+ from app.deps import get_db
+ from app.main import app
+@@ -371,10 +373,73 @@ def test_cert_warning_soon_with_past_bid_date(client):
+         "persons": [{"asset_id": person_id, "role": ""}], "contracts": []})
+ 
+     data = client.get(_bid_url(pid)).json()
+     warnings = data["persons"][0]["cert_warnings"]
+     assert len(warnings) == 1
+     w = warnings[0]
+     assert w["level"] == "soon"
+     assert w["cert_name"] == "涓€绾у缓閫犲笀"
+     assert w["days_left"] == 15
+     assert "15" in w["message"]
++
++
++# ---------- 9. 鏍囨瀛楁锛圴1.2 Task 2锛?----------
++
++def test_projects_has_section_columns(client):
++    from app.db import Database
++    db = Database(); db.init_schema(); db.init_schema()   # 骞傜瓑
++    with db._connect() as conn:
++        cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
++    assert {"section_name", "section_no"} <= cols
++
++
++def _make_section_draft(client, db_path, pid, tmp_path):
++    """鐩存帴閫犲簳绋匡細鍚?鏍囨鍚嶇О锛歘___锛堟爣绛剧┖鐧斤級涓?锛堟爣娈靛悕绉帮級锛堟嫭鍙峰崰浣嶏級銆?""
++    doc = Document()
++    doc.add_paragraph("鏍囨鍚嶇О锛歘___")
++    doc.add_paragraph("锛堟爣娈靛悕绉帮級")
++    path = tmp_path / "draft.docx"
++    doc.save(str(path))
++    db = Database(db_path)
++    db.create_bid_template(pid, "搴曠", str(path))
++    return path
++
++
++def test_export_section_param_fills_label_and_bracket(client, db_path, tmp_path):
++    """瀵煎嚭 body 甯?section_name/section_no 鈫?搴曠鏍囩绌虹櫧涓庢嫭鍙峰崰浣嶈濉厖锛?+    section 瀛楁闈炵┖鏃舵寔涔呭寲鍒?projects銆?""
++    pid = _make_project(client)
++    _make_section_draft(client, db_path, pid, tmp_path)
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": [],
++        "section_name": "涓€鏍囨", "section_no": "A1"})
++    assert r.status_code == 200
++    out = Document(BytesIO(r.content))
++    texts = [p.text for p in out.paragraphs]
++    assert "鏍囨鍚嶇О锛氫竴鏍囨" in texts
++    assert "涓€鏍囨" in texts and "锛堟爣娈靛悕绉帮級" not in texts
++    # 鏍￠獙绔叡鐢ㄥ悓涓€濂楄鍒?鈫?涓嶈鎶?+    report = json.loads(unquote(r.headers["x-fill-report"]))
++    assert report["verify"]["ok"] is True
++    # 闈炵┖鏍囨鎸佷箙鍖栧埌 projects
++    row = Database(db_path).get_project(pid)
++    assert row["section_name"] == "涓€鏍囨"
++    assert row["section_no"] == "A1"
++
++
++def test_export_section_empty_skips_fill(client, db_path, tmp_path):
++    """section 涓虹┖ 鈫?涓嶅～鍏咃紝绌虹櫧鍗犱綅淇濇寔鍘熸牱锛宲rojects 涓嶅啓鏍囨銆?""
++    pid = _make_project(client)
++    _make_section_draft(client, db_path, pid, tmp_path)
++    person_id = _make_person(client, "寮犱笁")
++    r = client.post(_bid_url(pid, "/export-template"), json={
++        "persons": [{"asset_id": person_id, "is_lead": True}],
++        "contracts": []})
++    assert r.status_code == 200
++    out = Document(BytesIO(r.content))
++    texts = [p.text for p in out.paragraphs]
++    assert "鏍囨鍚嶇О锛歘___" in texts
++    assert "锛堟爣娈靛悕绉帮級" in texts
++    row = Database(db_path).get_project(pid)
++    assert row["section_name"] == "" and row["section_no"] == ""

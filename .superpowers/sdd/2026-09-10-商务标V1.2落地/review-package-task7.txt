@@ -1,0 +1,395 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 8d82400..0a8c9c2 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -7,21 +7,21 @@ data 缁撴瀯瑙?bid_service.assemble_bid_draft_data
+ section,sem}],"lead_perfs_text":str}锛夈€? """
+ import os
+ import re
+ from copy import deepcopy
+ from pathlib import Path
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
+-from docx.table import Table
++from docx.table import Table, _Cell
+ 
+ from app.core.bid_template_exporter import (
+     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
+     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
+     insert_image_adaptive, page_text_width_cm,
+ )
+ from app.core.bid_page_setup import apply_page_setup
+ from app.core.bid_verify import _is_section_break_para, verify_draft_fill
+ from app.core.word_exporter import insert_toc_field_at
+ 
+@@ -90,20 +90,112 @@ def _clone_table_after(anchor_table):
+     new = deepcopy(tbl)
+     sep = tbl.makeelement(qn("w:p"), {})
+     tbl.addnext(sep)
+     sep.addnext(new)
+     nxt = new.getnext()
+     if nxt is not None and nxt.tag == qn("w:tbl"):
+         new.addnext(new.makeelement(qn("w:p"), {}))
+     return Table(new, anchor_table._parent)
+ 
+ 
++def expand_table_matrix(table) -> list:
++    """鎶?vMerge/gridSpan 灞曞紑涓洪€昏緫缃戞牸锛歮atrix[r][c] = 璇ラ€昏緫鏍肩殑
++    origin w:tc 鍏冪礌寮曠敤锛堟í鍚戣法鍒楀悇鏍兼寚鍚戝悓涓€ tc锛涚旱鍚戠画琛屾牸鎸囧悜
++    restart tc锛夈€傜敤浜庡ぇ缃戞牸绠€鍘嗚〃鐨勯€昏緫鍧愭爣濉厖锛堜笉閲嶅缓琛級銆?""
++    matrix = []
++    col_origin = {}  # 缃戞牸鍒?鈫?鏈€杩?vMerge=restart 鐨?origin tc
++    for tr in table._tbl.tr_lst:
++        row = []
++        col = 0
++        for tc in tr.tc_lst:
++            span = 1
++            vmerge = None
++            tcPr = tc.tcPr
++            if tcPr is not None:
++                gs = tcPr.find(qn("w:gridSpan"))
++                if gs is not None:
++                    try:
++                        span = max(1, int(gs.get(qn("w:val")) or 1))
++                    except ValueError:
++                        span = 1
++                vm = tcPr.find(qn("w:vMerge"))
++                if vm is not None:
++                    vmerge = vm.get(qn("w:val")) or "continue"
++            for k in range(span):
++                if vmerge == "continue":
++                    row.append(col_origin.get(col + k, tc))
++                else:
++                    row.append(tc)
++                    if vmerge == "restart":
++                        col_origin[col + k] = tc
++                    else:
++                        col_origin.pop(col + k, None)
++            col += span
++        matrix.append(row)
++    return matrix
++
++
++def _fill_resume_grid_mesh(table, label_to_sem: dict, sem: dict,
++                           perfs_text: str) -> int:
++    """澶х綉鏍肩畝鍘嗚〃鐭╅樀濉厖锛圴1.2 7.2锛夛細鎸?expand_table_matrix 灞曞紑閫昏緫
++    缃戞牸锛宭abel 鏍硷紙瑙勮寖鍖栧懡涓?label_to_sem锛屾瘡涓?origin 鍙鐞嗕竴娆★級鈫?+    鍚岃鍙充晶棣栦釜涓嶅悓 origin 鏍硷紝鏃犲彸閭诲垯涓嬫柟琛屽悓鍒楅涓笉鍚?origin 鏍硷紱
++    璇箟閿?lead_perfs 鍐?perfs_text銆傝繑鍥炲啓鍏ユ牸鏁般€?""
++    matrix = expand_table_matrix(table)
++    written = 0
++    seen = []
++    for r, row in enumerate(matrix):
++        for c, tc in enumerate(row):
++            if any(tc is t for t in seen):
++                continue
++            seen.append(tc)
++            label = (_Cell(tc, table).text or "").strip().rstrip("锛?").strip()
++            sem_key = (label_to_sem or {}).get(label)
++            if not sem_key:
++                continue
++            target = None
++            for cc in range(c + 1, len(row)):
++                if row[cc] is not tc:
++                    target = row[cc]
++                    break
++            if target is None:
++                for rr in range(r + 1, len(matrix)):
++                    if c < len(matrix[rr]) and matrix[rr][c] is not tc:
++                        target = matrix[rr][c]
++                        break
++            if target is None:
++                continue
++            value = (perfs_text if sem_key == "lead_perfs"
++                     else (sem or {}).get(sem_key, ""))
++            _set_cell_text(_Cell(target, table), value or "")
++            written += 1
++    return written
++
++
++def _is_grid_resume(table) -> bool:
++    """澶х綉鏍肩畝鍘嗚〃鍒ゅ畾锛氬垪鏁?鈮?0 鎴栧悎骞舵牸瀵嗛泦锛坴Merge/gridSpan 鍚堣 鈮? 澶勶級銆?""
++    if len(table.columns) >= 10:
++        return True
++    merges = len(table._tbl.findall(f".//{qn('w:vMerge')}")) \
++        + len(table._tbl.findall(f".//{qn('w:gridSpan')}"))
++    return merges >= 3
++
++
++def _fill_resume_auto(table, label_to_sem: dict, sem: dict,
++                      perfs_text: str) -> tuple:
++    """绠€鍘嗚〃濉厖鍒嗘祦锛氬ぇ缃戞牸 鈫?鐭╅樀濉厖锛堜繚鐣欏師鍚堝苟缁撴瀯锛夛紱涓皬琛?鈫?+    鍘?_fill_resume_table銆傝繑鍥?(鍐欏叆鏍兼暟, 鏄惁缃戞牸妯″紡)銆?""
++    if _is_grid_resume(table):
++        return _fill_resume_grid_mesh(table, label_to_sem, sem, perfs_text), True
++    return _fill_resume_table(table, label_to_sem, sem, perfs_text), False
++
++
+ def _fill_resume_table(table, label_to_sem: dict, sem: dict,
+                        perfs_text: str) -> int:
+     """绠€鍘嗛敭鍊艰〃濉厖锛氶€愯閫愭牸锛岃鑼冨寲鏍兼枃鏈紙鍘婚灏剧┖鐧?+ 鍘诲熬閮?     "锛?鎴?:"锛夊懡涓?label_to_sem 鈫?鍐欏叾鍙充晶棣栦釜涓嶅悓 _tc 鐨勬牸瀛愶紙鏃犲彸鏍艰烦杩囷級锛?     璇箟閿负 lead_perfs 鏃跺啓 perfs_text锛堥殢浜轰紶鍏ワ級銆傝繑鍥炲啓鍏ユ牸鏁般€?""
+     written = 0
+     for row in table.rows:
+         cells = row.cells
+         seen_tcs = []
+         for j, cell in enumerate(cells):
+@@ -442,65 +534,76 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+             picked = _scope_contracts(contracts, persons,
+                                       binding.get("perf_scope") or "all")
+             rows = _fill_table_semantic(table, binding.get("columns") or {},
+                                         [c.get("sem") or {} for c in picked],
+                                         header_rows=binding.get("header_rows") or 1)
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": rows})
+         elif role == "lead_resume":
+             lead = next((p for p in persons if p.get("is_lead")), None)
+             written = 0
++            grid = False
+             if lead is not None:
+-                written = _fill_resume_table(
++                written, grid = _fill_resume_auto(
+                     table, binding.get("columns") or {},
+                     lead.get("sem") or {},
+                     str(lead.get("perfs_text")
+                         or data.get("lead_perfs_text") or ""))
+-            report["filled"].append(
+-                {"table_index": idx, "role": role, "rows": written})
++            entry = {"table_index": idx, "role": role, "rows": written}
++            if grid:
++                entry["mode"] = "grid"
++            report["filled"].append(entry)
+         elif role == "resume_each":
+             if binding.get("mode") == "per_person":
+                 # 涓€浜轰竴琛紙V1.2 7.4锛夛細绗?1 浠藉～鍘熸牱琛紝鍏朵綑鍏堝厠闅嗗啀濉紱
+                 # 鍏嬮殕鍏ㄩ儴鍩轰簬濉厖鍓嶇殑鏍疯〃锛岄€愮骇浠ラ摼灏句负 anchor锛堜换鎰忕浉閭?-                # 涓よ〃涔嬮棿蹇呮湁绌烘鍒嗛殧锛夛紝浜哄憳椤哄簭涓?picked 涓€鑷?+                # 涓よ〃涔嬮棿蹇呮湁绌烘鍒嗛殧锛夛紝浜哄憳椤哄簭涓?picked 涓€鑷达紱
++                # 澶х綉鏍兼瘡浠芥寜鐭╅樀濉厖锛圴1.2 7.2锛?                 picked = _scope_persons(persons,
+                                         binding.get("person_scope") or "all")
+                 targets = [table]
+                 anchor = table
+                 for _ in range(max(0, len(picked) - 1)):
+                     anchor = _clone_table_after(anchor)
+                     targets.append(anchor)
+                 total = 0
++                grid = False
+                 for t, p in zip(targets, picked):
+                     perfs = str(p.get("perfs_text") or (
+                         data.get("lead_perfs_text")
+                         if p.get("is_lead") else "") or "")
+-                    total += _fill_resume_table(
++                    w, grid = _fill_resume_auto(
+                         t, binding.get("columns") or {},
+                         p.get("sem") or {}, perfs)
++                    total += w
+                 if len(picked) > 1:
+                     table_insertions[idx] = len(picked) - 1
+-                report["filled"].append(
+-                    {"table_index": idx, "role": role, "rows": total,
+-                     "cloned": len(picked)})
++                entry = {"table_index": idx, "role": role, "rows": total,
++                         "cloned": len(picked)}
++                if grid:
++                    entry["mode"] = "grid"
++                report["filled"].append(entry)
+             else:
+                 # 鏈紑 per_person锛氱瓑鍚?lead_resume锛堝崟浠?lead 濉厖锛屾棫琛屼负锛?                 lead = next((p for p in persons if p.get("is_lead")), None)
+                 written = 0
++                grid = False
+                 if lead is not None:
+-                    written = _fill_resume_table(
++                    written, grid = _fill_resume_auto(
+                         table, binding.get("columns") or {},
+                         lead.get("sem") or {},
+                         str(lead.get("perfs_text")
+                             or data.get("lead_perfs_text") or ""))
+-                report["filled"].append(
+-                    {"table_index": idx, "role": role, "rows": written})
++                entry = {"table_index": idx, "role": role, "rows": written}
++                if grid:
++                    entry["mode"] = "grid"
++                report["filled"].append(entry)
+         elif role == "quote":
+             report["skipped"].append(
+                 {"table_index": idx, "role": role, "reason": "鎶ヤ环琛ㄩ渶鎵嬪伐濉啓"})
+         elif role == "image_slot":
+             image_slots.append((binding, table))
+ 
+     _fill_image_slots(doc, image_slots, persons, report)
+     swap_toc = bool((bindings or {}).get("swap_toc"))
+     if swap_toc:
+         _swap_toc(doc)
+diff --git a/backend/app/core/bid_table_classifier.py b/backend/app/core/bid_table_classifier.py
+index e9b35f0..3f16a95 100644
+--- a/backend/app/core/bid_table_classifier.py
++++ b/backend/app/core/bid_table_classifier.py
+@@ -33,22 +33,24 @@ bindings JSON schema锛堟湰妯″潡涓烘潈濞佸畾涔夛紝T7 瀵煎嚭涓?T9 瀛樺偍/鍥炴樉
+    棣栦釜鍏抽敭璇嶏紙鍏冪粍鍐?(瀛愪覆, 璇箟)锛夛紝鍏ㄤ笉涓暀绌猴紱confidence 楂橈紙鍛戒腑锛? 浣庛€? 2. 鍓?2 琛屼换涓€鍗曞厓鏍煎惈 QUOTE_KEYWORDS 浠讳竴鍏抽敭璇?鈫?quote銆? 3. 琛ㄥご琛?= 绗?0 琛岋紱鑻ョ 0 琛屾暣琛屽叧閿瘝鍛戒腑鏁?< 2 涓旇〃鏍艰鏁?鈮?2 鈫?    鐢?绗?0 琛?+ 绗?1 琛屽悓鍒楁枃鏈嫾鎺?閲嶈瘯锛堣法琛岃〃澶村厹搴曪級銆?    閫愬垪鍖归厤 PERSON_COL_KEYWORDS / PERF_COL_KEYWORDS锛氬瓙涓插尮閰嶏紙鍘荤┖鐧藉悗锛夛紝
+    闀垮叧閿瘝浼樺厛锛屾瘡鍒楀彧鍙栦竴涓涔夈€佹瘡璇箟鍙崰涓€鍒楋紙鍏堝尮閰嶆垚鍔熺殑璇箟閿佸畾璇ュ垪锛夈€?    娉ㄦ剰 label 璇箟閿唬琛?浜哄憳瀹夋帓/宀椾綅/鑱屽姟"鍒楋紙鑱屽姟鏍忥級锛宺ole 璇箟閿唬琛?    "鎷熸淳宀椾綅"鍒椻€斺€斾袱鑰呭叧閿瘝涓嶅彲娣锋穯锛坙abel 鍏抽敭璇嶄笉鍚?鎷熸淳/鏈矖浣?锛夈€? 4. person 鍛戒腑鏁?鈮?2 涓?鈮?perf 鍛戒腑鏁?鈫?person_roster锛涘惁鍒?perf 鍛戒腑鏁?鈮?2
+    鈫?perf_list銆俢onfidence锛氬懡涓?鈮?3 鈫?楂橈紝2 鈫?浣庛€?-5. 琛ㄦ牸 2~3 鍒椾笖绗?0 鍒楅€愯锛堟暟鎹鏂囨湰锛夊懡涓?RESUME_LABELS 鈮?3 涓笉鍚屾爣绛?-   鈫?lead_resume锛沜olumns = {鏍囩鍘熸枃: 璇箟閿畗锛堟湭鍏?RESUME_LABEL_TO_SEM
++5. 閿€肩畝鍘嗘牱琛紙绗?0 鍒楅€愯鍛戒腑 RESUME_LABELS 鈮? 涓笉鍚屾爣绛撅級锛氬惈
++   銆屾嫙鍦ㄦ湰椤圭洰浠昏亴/涓昏宸ヤ綔缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О銆嶄换涓€ 鈫?resume_each
++   锛?~5 鍒楁垨 鈮?0 鍒楀ぇ缃戞牸锛孷1.2 7.2/7.4锛夛紱鍚﹀垯 2~3 鍒楁垨澶х綉鏍?鈫?+   lead_resume锛沜olumns = {鏍囩鍘熸枃: 璇箟閿畗锛堟湭鍏?RESUME_LABEL_TO_SEM
+    鐨勬爣绛句笉杩?columns锛夈€俢onfidence 楂橈紙鈮?锛? 浣庛€? 6. 鍏朵綑 鈫?ignore锛坈onfidence 浣庯級銆? 
+ 鍚堝苟鍗曞厓鏍硷細row.cells 瀵规í鍚戝悎骞堕噸澶嶅悓涓€ _tc锛涢€愬垪璁板綍鎸?_tc 寮曠敤鍘婚噸
+ 锛堝悓涓€ _tc 鍙彇棣栨鍒椾綅锛夛紝淇濊瘉 columns 涓嬫爣涓虹綉鏍煎垪鍧愭爣绯伙紙涓庡悗缁? 濉厖鍐欏叆鍧愭爣涓€鑷达級銆? """
+ import re
+ 
+ from docx import Document
+@@ -301,43 +303,41 @@ def _classify_table(table, table_index: int, heading: str,
+         return item
+     if len(perf_map) >= 2:
+         if "seq" not in perf_map and set(person_map) == {"seq"}:
+             perf_map = {**perf_map, "seq": person_map["seq"]}
+         item["role"] = "perf_list"
+         item["columns"] = perf_map
+         item["confidence"] = "楂? if len(perf_map) >= 3 else "浣?
+         item["perf_scope"] = "lead" if "璐熻矗浜? in heading else "all"
+         return item
+ 
+-    # 瑙勫垯 4.6锛氶敭鍊兼牱琛ㄥ惈銆屼竴浜轰竴琛ㄣ€嶆爣璁?鈫?resume_each锛圴1.2 7.4锛?-    # 鎺掑湪 lead_resume 涔嬪墠锛?~5 鍒楋紝绠€鍘嗘爣绛惧懡涓?鈮? 涓?col0 鏂囨湰鍚?-    # 鎷熷湪鏈」鐩换鑱?涓昏宸ヤ綔缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О 浠讳竴锛?-    if 2 <= len(table.columns) <= 5:
++    # 瑙勫垯 4.6/5锛氶敭鍊肩畝鍘嗘牱琛紙2~5 鍒楋紱V1.2 7.2 璧峰ぇ缃戞牸 鈮?0 鍒楀悓鏍疯瘑鍒紝
++    # 4~9 鍒椾腑灏忚〃鍒嗙被涓嶅彉锛夈€傚惈銆屼竴浜轰竴琛ㄣ€嶆爣璁帮紙鎷熷湪鏈」鐩换鑱?涓昏宸ヤ綔
++    # 缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О 浠讳竴锛夆啋 resume_each锛涘惁鍒?鈮? 鍒楁垨澶х綉鏍?鈫?+    # lead_resume锛堟棫琛屼负锛夈€?+    ncols = len(table.columns)
++    if (2 <= ncols <= 5) or ncols >= 10:
+         hits, columns = _match_resume(table)
+         if len(hits) >= 3:
+             col0_text = "".join(
+                 _norm(p[0][1]) for p in
+                 (_dedup_col_texts(r) for r in table.rows) if p)
+             if any(m in col0_text for m in RESUME_EACH_MARKERS):
+                 item["role"] = "resume_each"
+                 item["columns"] = columns
+                 item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+                 return item
+-
+-    # 瑙勫垯 5锛?~3 鍒椾笖绗?0 鍒楅€愯鍛戒腑绠€鍘嗘爣绛?鈮?3 鈫?lead_resume
+-    if 2 <= len(table.columns) <= 3:
+-        hits, columns = _match_resume(table)
+-        if len(hits) >= 3:
+-            item["role"] = "lead_resume"
+-            item["columns"] = columns
+-            item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+-            return item
++            if ncols <= 3 or ncols >= 10:
++                item["role"] = "lead_resume"
++                item["columns"] = columns
++                item["confidence"] = "楂? if len(hits) >= 5 else "浣?
++                return item
+ 
+     # 瑙勫垯 6锛氭嬁涓嶅噯涓€寰?ignore
+     return item
+ 
+ 
+ def classify_tables(docx_path: str) -> list:
+     """鎵弿搴曠 docx 鍏ㄩ儴琛ㄦ牸锛屾寜琛ㄥご鍏抽敭璇嶇鍚嶄骇鍑虹粦瀹氬缓璁垪琛ㄣ€? 
+     姣忛」锛歿"table_index", "header", "role", "columns", "person_scope",
+     "perf_scope", "label_kind", "person", "confidence", "context_heading",
+diff --git a/backend/tests/test_bid_draft_export.py b/backend/tests/test_bid_draft_export.py
+index 25f5e98..e3f9b23 100644
+--- a/backend/tests/test_bid_draft_export.py
++++ b/backend/tests/test_bid_draft_export.py
+@@ -489,10 +489,108 @@ def test_two_row_header_no_data_rows(tmp_path):
+     data["persons"] = data["persons"][:1]
+     out = str(tmp_path / "out.docx")
+     fill_draft(draft, out, _two_row_header_bindings(), data)
+     table = Document(out).tables[0]
+     assert len(table.rows) == 3  # 2 琛ㄥご + 1 濉叆琛?     assert [c.text for c in table.rows[1].cells] == ["搴忓彿", "濮撳悕", "璇佸彿"]
+     assert [c.text for c in table.rows[2].cells] == ["1", "寮犱笁", "涓€绾ч€犱环甯?]
+     # 鍏嬮殕鑷〃澶寸殑 donor 宸插墧闄?vMerge
+     for cell in table.rows[2].cells:
+         assert cell._tc.tcPr.find(qn("w:vMerge")) is None
++
++
++# ---------- 13. 绠€鍘嗗ぇ缃戞牸鐭╅樀濉厖锛圴1.2 7.2锛孭3锛?----------
++
++from app.core.bid_draft_exporter import (
++    expand_table_matrix, _fill_resume_grid_mesh)
++
++
++def _grid_table(doc):
++    # 2x2 琛細鏍囩鏍煎湪 (0,0)锛屽€煎湪 (0,1)锛?1,0) 鏍囩锛屽€煎湪 (1,1)
++    t = doc.add_table(2, 2)
++    t.rows[0].cells[0].text = "濮撳悕"
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    return t
++
++
++def test_expand_table_matrix_identity_for_plain_grid():
++    doc = Document(); t = _grid_table(doc)
++    m = expand_table_matrix(t)
++    assert len(m) == 2 and len(m[0]) == 2
++    assert m[0][0] == m[0][0]  # origin 绋冲畾
++
++
++def test_grid_mesh_writes_right_and_below():
++    doc = Document(); t = _grid_table(doc)
++    written = _fill_resume_grid_mesh(
++        t, {"濮撳悕": "name", "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++        {"name": "寮犱笁"}, "鐢查」鐩紙2024锛?)
++    assert t.rows[0].cells[1].text == "寮犱笁"
++    assert t.rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert written == 2
++
++
++def test_grid_mesh_writes_below_when_no_right():
++    """鏍囩鏍煎悓琛屾棤鍙抽偦锛堝崟鍒楄锛夆啋 鍐欎笅鏂瑰悓鍒楅涓笉鍚?origin 鏍笺€?""
++    doc = Document(); t = doc.add_table(2, 1)
++    t.rows[0].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    written = _fill_resume_grid_mesh(
++        t, {"涓昏宸ヤ綔缁忓巻": "lead_perfs"}, {}, "鐢查」鐩紙2024锛?)
++    assert t.rows[1].cells[0].text == "鐢查」鐩紙2024锛?
++    assert written == 1
++
++
++def test_grid_span_label_writes_right_origin():
++    """妯悜鍚堝苟鏍囩鏍?gridSpan=2 鈫?鍙充晶棣栦釜涓嶅悓 origin 鐩爣鏍硷紱
++    鐭╅樀涓法鍒楀悇鏍兼寚鍚戝悓涓€ origin銆?""
++    doc = Document(); t = doc.add_table(1, 3)
++    t.cell(0, 0).merge(t.cell(0, 1))
++    t.cell(0, 0).text = "濮撳悕"
++    m = expand_table_matrix(t)
++    assert m[0][0] is m[0][1]
++    assert m[0][2] is not m[0][0]
++    written = _fill_resume_grid_mesh(t, {"濮撳悕": "name"}, {"name": "寮犱笁"}, "")
++    assert t.rows[0].cells[2].text == "寮犱笁"
++    assert written == 1
++
++
++def test_grid_mesh_vmerge_continuation_maps_to_origin():
++    """绾靛悜鍚堝苟锛坴Merge锛夛細缁鏍兼槧灏勫埌 restart origin锛沴abel 鍙鐞嗕竴娆★紝
++    鍊煎啓 origin 鍙充晶锛岀画琛屼笉鍐欍€?""
++    doc = Document(); t = doc.add_table(2, 2)
++    t.cell(0, 0).merge(t.cell(1, 0))
++    t.cell(0, 0).text = "濮撳悕"
++    m = expand_table_matrix(t)
++    assert m[1][0] is m[0][0]
++    written = _fill_resume_grid_mesh(t, {"濮撳悕": "name"}, {"name": "寮犱笁"}, "")
++    assert t.rows[0].cells[1].text == "寮犱笁"
++    assert t.rows[1].cells[1].text == ""
++    assert written == 1
++
++
++def test_fill_draft_lead_resume_large_grid_uses_mesh(tmp_path):
++    """绔埌绔細鈮?0 鍒楃畝鍘嗗ぇ缃戞牸缁戝畾 lead_resume 鈫?鐭╅樀濉厖锛堜笉閲嶅缓琛紝
++    filled 璁?mode="grid"锛夛紝鍚堝苟缁撴瀯淇濈暀銆?""
++    doc = Document()
++    t = doc.add_table(2, 10)
++    t.rows[0].cells[0].text = "濮撳悕"
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"
++    # 鍒堕€犲瘑闆嗗悎骞朵箣澶栫殑鏅€氬ぇ缃戞牸锛氬€肩洰鏍囨牸 = 鍚勬爣绛惧彸閭?+    draft = str(tmp_path / "draft.docx")
++    doc.save(draft)
++    out = str(tmp_path / "out.docx")
++    bindings = {"tables": [{"table_index": 0, "role": "lead_resume",
++                            "columns": {"濮撳悕": "name",
++                                        "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++                            "confirmed": True}],
++                "swap_toc": False}
++    data = {"persons": [{"name": "寮犱笁", "is_lead": True,
++                         "sem": {"name": "寮犱笁"},
++                         "perfs_text": "鐢查」鐩紙2024锛?, "fields": {}}],
++            "contracts": [], "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(draft, out, bindings, data)
++    table = Document(out).tables[0]
++    assert len(table.rows) == 2 and len(table.columns) == 10  # 鏈噸寤?+    assert table.rows[0].cells[1].text == "寮犱笁"
++    assert table.rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert report["filled"][0]["mode"] == "grid"
++    assert report["verify"]["ok"] is True

@@ -1,0 +1,234 @@
+﻿diff --git a/backend/app/routers/bid_draft.py b/backend/app/routers/bid_draft.py
+index 69188f4..2175fec 100644
+--- a/backend/app/routers/bid_draft.py
++++ b/backend/app/routers/bid_draft.py
+@@ -1,20 +1,23 @@
+-"""鍟嗗姟鏍囧簳绋?API锛氱珷鑺傚畾浣?/ 鐢熸垚锛堣鍒囷級/ 鎵嬪姩涓婁紶 / 棰勮鍥炴樉 / 缁戝畾纭銆?-璺敱灞傚彧鍋氬弬鏁版牎楠屼笌閿欒鐮佹槧灏勶紝涓氬姟缂栨帓鍦?BidDraftService銆?""
++"""鍟嗗姟鏍囧簳绋?API锛氱珷鑺傚畾浣?/ 鐢熸垚锛堣鍒囷級/ 鎵嬪姩涓婁紶 / 棰勮鍥炴樉 / 缁戝畾纭 /
++鍗犱綅绗﹂瑙堛€傝矾鐢卞眰鍙仛鍙傛暟鏍￠獙涓庨敊璇爜鏄犲皠锛屼笟鍔＄紪鎺掑湪 BidDraftService銆?""
+ import tempfile
+ from pathlib import Path
+ 
++from docx import Document
+ from fastapi import APIRouter, Depends, HTTPException, UploadFile
+ from pydantic import BaseModel
+ 
++from app import settings_store
+ from app.core.bid_draft import BidDraftError
+ from app.core.bid_table_classifier import ROLES
++from app.core.bid_template_exporter import scan_placeholders
+ from app.core.input_convert import InputConvertError
+ from app.db import Database
+ from app.deps import get_db
+ from app.services.bid_draft_service import BidDraftService
+ 
+ router = APIRouter()
+ 
+ 
+ class GenerateDraftIn(BaseModel):
+     start_heading: str = ""
+@@ -35,20 +38,31 @@ class TableBindingIn(BaseModel):
+     header_rows: int = 1   # 琛ㄥご琛屾暟锛堜袱琛岃〃澶?2锛屽～鍏呮椂淇濈暀骞朵互鍏跺悗棣栬涓?donor锛?     mode: str = ""         # "per_person"=涓€浜轰竴琛ㄦ暣琛ㄥ厠闅嗭紙resume_each锛夛紱绌?鍗曚唤濉厖
+     confirmed: bool = False
+ 
+ 
+ class BindingsIn(BaseModel):
+     tables: list[TableBindingIn] = []
+     swap_toc: bool = False
+ 
+ 
++class PlaceholderPreviewIn(BaseModel):
++    """鍗犱綅绗﹂瑙堝弬鏁帮紙鍏ㄥ彲閫夛紝榛樿绌衡€斺€旂┖鍊间笉鍙備笌瑙勫垯锛夈€?""
++    project_no: str = ""
++    project_name: str = ""
++    doc_date: str = ""
++    tenderer: str = ""
++    bidder_name: str = ""
++    section_name: str = ""
++    section_no: str = ""
++
++
+ def _project_or_404(db: Database, project_id: int) -> dict:
+     project = db.get_project(project_id)
+     if not project:
+         raise HTTPException(404, "椤圭洰涓嶅瓨鍦?)
+     return project
+ 
+ 
+ def _svc(db: Database) -> BidDraftService:
+     return BidDraftService(db.db_path)
+ 
+@@ -111,10 +125,26 @@ def save_bid_draft_bindings(project_id: int, body: BindingsIn,
+         if t.role not in ROLES:
+             raise HTTPException(422, f"闈炴硶琛ㄦ牸瑙掕壊锛歿t.role}")
+         if t.table_index < 0:
+             raise HTTPException(422, "table_index 蹇呴』 鈮?0")
+         if not 1 <= t.header_rows <= 4:
+             raise HTTPException(422, "header_rows 蹇呴』鍦?1..4 涔嬮棿")
+         if t.mode not in ("", "per_person"):
+             raise HTTPException(422, f"闈炴硶濉厖妯″紡锛歿t.mode}")
+     db.update_bid_template(row["id"], bindings=body.model_dump())
+     return {"ok": True}
++
++
++@router.post("/projects/{project_id}/bid-draft/placeholders")
++def preview_placeholders(project_id: int, body: PlaceholderPreviewIn = None,
++                         db: Database = Depends(get_db)):
++    """鍗犱綅绗﹂瑙堬紙V1.2锛夛細瀵瑰綋鍓嶅簳绋胯窇 scan_placeholders锛堣鍒欏敮涓€鏉ユ簮
++    鍦?core锛岃矾鐢变笉澶嶅埗锛夛紝鍚屼箟璇嶅彇鍏ㄥ眬璁剧疆銆傛棤搴曠 鈫?404銆?+    杩斿洖 {"matched":[{label,value,count,kind}], "suspicious":[{text}]}銆?""
++    _project_or_404(db, project_id)
++    row = db.get_project_bid_template(project_id)
++    if not row or not Path(row.get("file_path") or "").exists():
++        raise HTTPException(404, "灏氭棤搴曠锛岃鍏堢敓鎴愭垨涓婁紶搴曠")
++    doc = Document(row["file_path"])
++    params = body.model_dump() if body else {}
++    return scan_placeholders(
++        doc, params, synonyms=settings_store.get_placeholder_synonyms())
+diff --git a/backend/app/routers/settings.py b/backend/app/routers/settings.py
+index 4a5c99d..d47625d 100644
+--- a/backend/app/routers/settings.py
++++ b/backend/app/routers/settings.py
+@@ -1,17 +1,20 @@
+ from fastapi import APIRouter
+ from pydantic import BaseModel
+ 
+ from app.core.llm_parser import (
+     CODING_DEFAULT_MODEL, CODING_MODELS, _friendly_api_error, _make_client, is_coding_key,
+ )
+-from app.settings_store import get_api_key, get_model, load_settings, save_settings
++from app.settings_store import (
++    get_api_key, get_model, get_placeholder_synonyms, load_settings,
++    save_placeholder_synonyms, save_settings,
++)
+ 
+ router = APIRouter()
+ 
+ 
+ class SettingsIn(BaseModel):
+     api_key: str | None = None
+     model: str | None = None
+ 
+ 
+ @router.get("")
+@@ -23,20 +26,35 @@ def read_settings():
+ def write_settings(body: SettingsIn):
+     data = load_settings()
+     if body.api_key is not None:
+         data["api_key"] = body.api_key
+     if body.model is not None:
+         data["model"] = body.model
+     save_settings(data)
+     return {"ok": True}
+ 
+ 
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙V1.2 Task 8a锛?----------
++
++@router.get("/placeholder-synonyms")
++def read_placeholder_synonyms():
++    """璇诲彇鍗犱綅绗﹀悓涔夎瘝搴擄紙鍒悕鈫掕鑼冩爣绛撅紱榛樿搴?+ 宸插瓨瑕嗙洊椤癸級銆?""
++    return get_placeholder_synonyms()
++
++
++@router.put("/placeholder-synonyms")
++def write_placeholder_synonyms(body: dict[str, str]):
++    """淇濆瓨鍚屼箟璇嶈鐩栭」锛坽鍒悕: 瑙勮寖鏍囩}锛岀┖閿?绌哄€艰娓呮礂锛夛紝
++    杩斿洖瑙勮寖鍖栧悗鐨勮鐩栭」銆?""
++    return save_placeholder_synonyms(body)
++
++
+ @router.post("/test")
+ def test_connection(body: SettingsIn | None = None):
+     # 璇锋眰浣擄紙琛ㄥ崟褰撳墠鍊硷級浼樺厛锛屼负绌?缂虹渷鏃跺洖閫€鍒扮鐩樺凡淇濆瓨鍊?     api_key = (body.api_key if body else None) or get_api_key()
+     if not api_key:
+         return {"ok": False, "message": "鏈厤缃?API Key"}
+     model = (body.model if body else None) or get_model()
+     # 涓?parse_with_llm 涓€鑷达細缂栫▼璁㈤槄 Key 鍙兘璧扮紪绋嬫ā鍨?     if is_coding_key(api_key) and model not in CODING_MODELS:
+         model = CODING_DEFAULT_MODEL
+diff --git a/backend/tests/test_api_bid_draft.py b/backend/tests/test_api_bid_draft.py
+index 8a6f749..a11076f 100644
+--- a/backend/tests/test_api_bid_draft.py
++++ b/backend/tests/test_api_bid_draft.py
+@@ -306,20 +306,46 @@ def test_put_bindings_mode_validation_and_roundtrip(client, tmp_path):
+                          "swap_toc": False})
+     assert r.status_code == 200
+     g = client.get(f"/api/projects/{pid}/bid-draft").json()
+     assert g["tables"][0]["mode"] == "per_person"
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
+                    json={"tables": [{**base, "mode": "bogus"}],
+                          "swap_toc": False})
+     assert r.status_code == 422
+ 
+ 
++# ---------- 鍗犱綅绗﹂瑙堬紙V1.2 Task 8a锛?----------
++
++def test_placeholders_preview_no_draft_404(client):
++    pid = _make_project(client)
++    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders", json={})
++    assert r.status_code == 404
++
++
++def test_placeholders_preview_matched(client, tmp_path, db_path):
++    """搴曠鍚?鎷涙爣浜猴細____" 鈫?棰勮 matched 鍚?鎷涙爣浜?浼犲叆 tenderer銆?""
++    from app.db import Database
++    pid = _make_project(client)
++    doc = Document()
++    doc.add_paragraph("鎷涙爣浜猴細____")
++    p = tmp_path / "draft.docx"
++    doc.save(str(p))
++    Database(db_path).create_bid_template(pid, "搴曠", str(p))
++    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders",
++                    json={"tenderer": "鏌愪腑蹇?})
++    assert r.status_code == 200
++    data = r.json()
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in data["matched"])
++    assert "suspicious" in data
++
++
+ def test_put_bindings_roundtrip(client, tmp_path):
+     pid = _make_project(client)
+     _upload_tender(client, pid, tmp_path)
+     gen = _generate(client, pid)
+     sug = gen["tables"][0]
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "person_scope": "all",
+                     "perf_scope": "all", "label_kind": "", "person": "",
+                     "confirmed": True}],
+diff --git a/backend/tests/test_api_settings.py b/backend/tests/test_api_settings.py
+index 786913a..dbae65f 100644
+--- a/backend/tests/test_api_settings.py
++++ b/backend/tests/test_api_settings.py
+@@ -49,10 +49,32 @@ def test_test_connection_falls_back_to_disk_values(client, monkeypatch):
+     assert captured["api_key"] == "sk-disk-saved"
+ 
+ 
+ def test_test_connection_coding_key_model_fallback(client, monkeypatch):
+     # sk-kimi- 缂栫▼ Key + 闈炵紪绋嬫ā鍨?鈫?鍥為€€鍒?CODING_DEFAULT_MODEL
+     captured = {}
+     _patch_make_client(monkeypatch, captured)
+     r = client.post("/api/settings/test", json={"api_key": "sk-kimi-abc123", "model": "kimi-k3"})
+     assert r.status_code == 200 and r.json()["ok"] is True
+     assert captured["create"]["model"] == CODING_DEFAULT_MODEL
++
++
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙V1.2 Task 8a锛?----------
++
++def test_placeholder_synonyms_get_default(client):
++    """GET 榛樿搴擄細鍚?閲囪喘浜衡啋鎷涙爣浜?绛夊唴寤哄悓涔夎瘝銆?""
++    r = client.get("/api/settings/placeholder-synonyms")
++    assert r.status_code == 200
++    data = r.json()
++    assert data["閲囪喘浜?] == "鎷涙爣浜?
++    assert data["宸ョ▼椤圭洰鍚嶇О"] == "椤圭洰鍚嶇О"
++
++
++def test_placeholder_synonyms_put_roundtrip(client):
++    """PUT 鑷畾涔夎鐩栵紙绌洪敭/绌哄€艰娓呮礂锛夆啋 鍥炶涓€鑷翠笖榛樿搴撲粛鍦ㄣ€?""
++    r = client.put("/api/settings/placeholder-synonyms",
++                   json={"鐢叉柟": "鎷涙爣浜?, "  ": "鏌愭爣绛?})
++    assert r.status_code == 200
++    assert r.json() == {"鐢叉柟": "鎷涙爣浜?}
++    data = client.get("/api/settings/placeholder-synonyms").json()
++    assert data["鐢叉柟"] == "鎷涙爣浜?
++    assert data["閲囪喘浜?] == "鎷涙爣浜?   # 榛樿搴撲笉琚鐩栦涪澶?

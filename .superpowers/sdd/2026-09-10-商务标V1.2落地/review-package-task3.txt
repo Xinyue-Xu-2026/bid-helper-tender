@@ -1,0 +1,356 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 1ced3e6..67971f1 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -11,20 +11,21 @@ import re
+ from copy import deepcopy
+ from pathlib import Path
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
+ 
+ from app.core.bid_template_exporter import (
+     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
+     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
++    insert_image_adaptive, page_text_width_cm,
+ )
+ from app.core.bid_page_setup import apply_page_setup
+ from app.core.bid_verify import _is_section_break_para, verify_draft_fill
+ from app.core.word_exporter import insert_toc_field_at
+ 
+ 
+ def _clear_tr_text(tr) -> None:
+     """娓呯┖涓€琛岋紙deepcopy 鍑虹殑 tr锛夊叏閮ㄥ崟鍏冩牸鏂囨湰锛屼繚鐣欏崟鍏冩牸/娈佃惤灞炴€с€?""
+     for tc in tr.iter(qn("w:tc")):
+         for para in tc.findall(qn("w:p")):
+@@ -153,27 +154,25 @@ def _fill_image_slots(doc, slot_bindings, persons, report) -> None:
+             certs = [c for c in (fields.get("璇佷功") or [])
+                      if isinstance(c, dict)]
+             key = id(person)
+             k = cert_counters.get(key, 0)
+             cert_counters[key] = k + 1
+             image_path = (str(certs[k].get("鎵弿浠?) or "")
+                           if k < len(certs) else "")
+         else:
+             image_path = ""
+         _clear_table_images(table)
+-        ok = bool(image_path) and Path(image_path).exists()
+-        if ok:
+-            _insert_image_into_table(table, image_path)
+-        report["images"].append({
+-            "table_index": binding.get("table_index"),
+-            "person": str(person.get("name") or ""),
+-            "label_kind": kind, "ok": ok})
++        # 绛夋瘮鑷€傚簲鎻掑叆锛涘け璐ワ紙鏂囦欢缂哄け/鏍煎紡涓嶆敮鎸?鎻掑叆寮傚父锛夋樉寮忚鍏ユ姤鍛?+        _insert_image_into_table(
++            table, image_path, report=report,
++            table_index=binding.get("table_index"),
++            person=str(person.get("name") or ""), label_kind=kind)
+ 
+ 
+ def _swap_toc(doc) -> bool:
+     """棣栦釜杩炵画 toc 鏍峰紡娈佃惤缁?鈫?淇濈暀棣栨浣嶇疆銆佸垹闄ょ粍鍐呭叾浣欐锛?     鍦ㄩ娈?insert_toc_field_at锛涙棤 toc 娈?鈫?False銆?""
+     group = []
+     for para in doc.paragraphs:
+         if _is_toc_paragraph(para):
+             group.append(para)
+         elif group:
+@@ -235,26 +234,34 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
+                             str(p.get("韬唤璇佸弽闈㈡壂鎻忎欢") or "")]
+             return out
+         if not person:
+             return []
+         return [str(person.get("韬唤璇佹闈㈡壂鎻忎欢") or ""),
+                 str(person.get("韬唤璇佸弽闈㈡壂鎻忎欢") or "")]
+ 
+     def _append_images(para, person, dual) -> int:
+         inserted = 0
+         for pth in _img_paths(person, dual):
+-            if pth and Path(pth).exists():
+-                try:
+-                    para.add_run().add_picture(pth, width=_ID_CARD_WIDTH)
+-                    inserted += 1
+-                except Exception:
+-                    pass
++            if not pth:
++                continue
++            # 韬唤璇佹壂鎻忎欢锛氳嚜閫傚簲锛堥〉瀹戒负鍙敤瀹斤紝_ID_CARD_WIDTH 涓洪€€鍖栧搴︼級锛?+            # 澶辫触鏄惧紡璁板叆 report["images"]锛屼笉鍐嶉潤榛樺悶寮傚父
++            result = insert_image_adaptive(
++                para, pth, page_text_width_cm(doc),
++                fallback_w_cm=_ID_CARD_WIDTH.cm)
++            report["images"].append({
++                "table_index": None,
++                "person": str((person or {}).get("name") or ""),
++                "label_kind": "韬唤璇?, "ok": result["ok"],
++                "reason": result["reason"], "too_long": result["too_long"]})
++            if result["ok"]:
++                inserted += 1
+         return inserted
+ 
+     paras = [p for p in doc.paragraphs
+              if not _is_toc_paragraph(p) and not _is_section_break_para(p)]
+ 
+     def _filter_index(p) -> int:
+         return paras.index(p)
+ 
+     def _rewrite(para, text):
+         _rewrite_paragraph_text(para, text)
+diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index f10f45f..f2329d7 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -5,20 +5,21 @@
+ 缁存姢褰撳墠鎵€鍦ㄧ珷鑺傜姸鎬佹満锛? - H1 "涓夈€佷汉鍛橀厤澶囪〃" 鍐咃細棣栦釜琛ㄦ牸鈫掕〃A锛堜汉鍛樺畨鎺掞級锛?   H2 "2銆侀」鐩礋璐ｄ汉" 鍚庣殑 H3 "锛?锛夐」鐩礋璐ｄ汉涓氱哗" 鍐呯 1/2 寮犺〃鈫掕〃B/琛–锛堣礋璐ｄ汉涓氱哗锛夛紱
+   H2 "3銆侀」鐩粍浜哄憳" 鍚庣殑琛ㄢ啋琛―銆? - H1 "鍥涖€佺浉鍏充笟缁╀竴瑙堣〃" 鍐咃細H2 鍓嶇殑棣栬〃鈫掕〃E锛汬2 "1銆佲€? 鍚庣殑琛ㄢ啋琛‵锛汬2 "2銆佲€? 鍚庣殑琛ㄢ啋琛℅銆? 
+ 琛屾浛鎹細淇濈暀琛ㄥご琛岋紝deepcopy 棣栨暟鎹浣滀负鏍峰紡 donor 閫愭潯濉厖鍚庢彃鍏ワ紝
+ 鍒犻櫎鍏ㄩ儴鍘熸暟鎹锛堟棤璁板綍鏃跺嵆鍙墿琛ㄥご锛夈€? """
+ from copy import deepcopy
++from io import BytesIO
+ from pathlib import Path
+ import re
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
+ from docx.table import Table
+ from docx.text.paragraph import Paragraph
+ 
+ _HEADING_STYLES = {"Heading 1": 1, "Heading 2": 2, "Heading 3": 3,
+@@ -127,28 +128,154 @@ _CERT_IMAGE_KEYWORDS = ("娉ㄥ唽璇佷功", "鑱屼笟璧勬牸璇佷功", "璧勬牸璇佷功")
+ 
+ 
+ def _clear_table_images(table: Table) -> None:
+     """娓呴櫎鍗犱綅琛ㄦ暟鎹閲屽凡瀛樺湪鐨勫浘鐗囷紙妯℃澘鏄笂涓€娆℃姇鏍囧～杩囩殑鏂囨。锛屼細娈嬬暀鏃ф壂鎻忎欢锛夈€?""
+     for row in table.rows[1:]:
+         cell = row.cells[0]
+         for dr in list(cell._tc.iter(qn("w:drawing"))):
+             dr.getparent().remove(dr)
+ 
+ 
+-def _insert_image_into_table(table: Table, image_path: str) -> None:
+-    """寰€鍥剧墖鍗犱綅琛紙1鍒楋紝棣栬鏄爣绛炬枃瀛楋級鎻掑叆鍥剧墖銆傛棤鏂囦欢/璺緞鏃犳晥鍒欒烦杩囥€?""
++# ---------- 鍥剧墖绛夋瘮鑷€傚簲鎻掑叆锛圴1.2 妯″潡涓夛級 ----------
++
++def measure_image_cm(image_path: str):
++    """Pillow 璇诲浘鎸?96dpi 鎹㈢畻 (w_cm, h_cm, ratio=w/h)锛涙墦涓嶅紑/鏃?Pillow 杩斿洖 None銆?""
++    try:
++        from PIL import Image
++        with Image.open(str(image_path)) as im:
++            w, h = im.size
++    except Exception:
++        return None
++    if not w or not h:
++        return None
++    return (w / 96 * 2.54, h / 96 * 2.54, w / h)
++
++
++def fit_image_cm(image_path: str, avail_w_cm: float, avail_h_cm: float = 24.0,
++                 fallback_w_cm: float = 7.0) -> dict:
++    """绛夋瘮閫傞厤锛氬涓嶈秴杩?avail_w_cm銆侀珮涓嶈秴杩?avail_h_cm锛堣秴楂樺啀鍘嬪锛?+    鏍囪 too_long锛夛紱璇讳笉鍑哄昂瀵稿垯閫€鍖栧浐瀹氬搴︼紙degraded 璇存槑鍘熷洜锛夈€?""
++    m = measure_image_cm(image_path)
++    if m is None:
++        return {"width_cm": fallback_w_cm, "height_cm": 0,
++                "degraded": "鏃犳硶璇诲彇鍥剧墖灏哄锛岄€€鍖栦负鍥哄畾瀹藉害",
++                "too_long": False}
++    w0, h0, ratio = m
++    w = min(avail_w_cm, w0)
++    h = w / ratio
++    too_long = False
++    if h > avail_h_cm:
++        h = avail_h_cm
++        w = h * ratio
++        too_long = True
++    return {"width_cm": w, "height_cm": h, "degraded": "", "too_long": too_long}
++
++
++def insert_image_adaptive(container, image_path: str, avail_w_cm: float,
++                          avail_h_cm: float = 24.0,
++                          fallback_w_cm: float = 7.0) -> dict:
++    """鑷€傚簲鎻掑浘锛歝ontainer 涓?Paragraph 鎴?Cell锛?3000px 浣嶅浘鍏堥檷閲囨牱鍒?+    2000px 鍐呭啀鎻掑叆銆傝繑鍥?{"ok","reason","too_long","degraded"}锛?+    澶辫触鏄惧紡缁欏嚭 reason锛堜笉闈欓粯鍚炲紓甯革級銆?""
++    from docx.table import _Cell
++    if isinstance(container, _Cell):
++        para = (container.paragraphs[0] if container.paragraphs
++                else container.add_paragraph())
++    else:
++        para = container
+     if not image_path or not Path(image_path).exists():
+-        return
++        return {"ok": False, "reason": "鍥剧墖鏂囦欢涓嶅瓨鍦?,
++                "too_long": False, "degraded": ""}
++    fit = fit_image_cm(image_path, avail_w_cm, avail_h_cm, fallback_w_cm)
++    src = str(image_path)
++    if not fit["degraded"]:
++        try:
++            from PIL import Image
++            im = Image.open(str(image_path))
++            if max(im.size) > 3000:
++                im.thumbnail((2000, 2000))
++                buf = BytesIO()
++                im.save(buf, "PNG")
++                buf.seek(0)
++                src = buf
++        except Exception:
++            src = str(image_path)  # 闄嶉噰鏍峰け璐ヤ笉闃绘柇锛屾寜鍘熷浘鎻掑叆
++    try:
++        run = para.add_run()
++        if fit["height_cm"] > 0:
++            run.add_picture(src, width=Cm(fit["width_cm"]),
++                            height=Cm(fit["height_cm"]))
++        else:
++            run.add_picture(src, width=Cm(fit["width_cm"]))
++    except Exception as exc:
++        return {"ok": False, "reason": f"鎻掑叆澶辫触锛歿exc}",
++                "too_long": False, "degraded": fit["degraded"]}
++    return {"ok": True, "reason": "", "too_long": fit["too_long"],
++            "degraded": fit["degraded"]}
++
++
++def cell_available_width_cm(cell, default: float = 14.0) -> float:
++    """鍗曞厓鏍煎彲鐢ㄥ搴︼紙cm锛夛細浼樺厛鎵€鍦?w:tbl 鐨?tblGrid/gridCol 姹傚拰
++    锛坧ython-docx 瑙ｆ瀽涓?EMU锛?360000 鎹㈢畻锛夛紝鍥為€€ tcW(dxa 缂?567)锛?+    閮藉彇涓嶅埌鐢?default銆傚浘鐗囧崰浣嶈〃鍧囦负 1 鍒楋紝gridCol 姹傚拰鍗冲崟鍏冩牸瀹姐€?""
++    tc = cell._tc
++    tbl = tc.getparent()
++    while tbl is not None and tbl.tag != qn("w:tbl"):
++        tbl = tbl.getparent()
++    if tbl is not None:
++        grid = tbl.find(qn("w:tblGrid"))
++        if grid is not None:
++            total_emu = sum(int(gc.w) for gc in grid.findall(qn("w:gridCol"))
++                            if gc.w is not None)
++            if total_emu > 0:
++                return total_emu / 360000
++    tcPr = tc.tcPr
++    if tcPr is not None:
++        tcW = tcPr.find(qn("w:tcW"))
++        if tcW is not None:
++            w = tcW.get(qn("w:w"))
++            if w and w.lstrip("-").isdigit() and int(w) > 0:
++                return int(w) / 567.0
++    return default
++
++
++def page_text_width_cm(doc, default: float = 16.0) -> float:
++    """椤甸潰姝ｆ枃鍙敤瀹藉害锛坈m锛? 椤靛 - 宸﹀彸杈硅窛锛涘彇涓嶅埌鐢?default銆?""
++    try:
++        sec = doc.sections[0]
++        emu = sec.page_width - sec.left_margin - sec.right_margin
++        if emu and int(emu) > 0:
++            return int(emu) / 360000
++    except Exception:
++        return default
++    return default
++
++
++def _insert_image_into_table(table: Table, image_path: str,
++                             report: dict = None, table_index=None,
++                             person: str = "", label_kind: str = "") -> dict:
++    """寰€鍥剧墖鍗犱綅琛紙1鍒楋紝棣栬鏄爣绛炬枃瀛楋級鎻掑叆鍥剧墖锛堢瓑姣旇嚜閫傚簲锛氭寜鍗曞厓鏍?+    鍙敤瀹藉害涓庨〉闈㈠彲鐢ㄩ珮搴︾缉鏀撅紝>3000px 浣嶅浘鍏堥檷閲囨牱锛夈€?+    杩斿洖 {"ok","reason","too_long","degraded"}锛況eport 闈炵┖鏃舵寜
++    {"table_index","person","label_kind","ok","reason","too_long"}
++    璁板叆 report["images"]銆傛棤 report 鐨勬棫璋冪敤淇濇寔鍏煎銆?""
+     row = table.rows[1] if len(table.rows) > 1 else table.rows[0]
+     cell = row.cells[0]
+     para = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+-    para.add_run().add_picture(image_path, width=Cm(8))
++    result = insert_image_adaptive(
++        para, image_path, cell_available_width_cm(cell), fallback_w_cm=8.0)
++    if report is not None:
++        report.setdefault("images", []).append({
++            "table_index": table_index, "person": person,
++            "label_kind": label_kind, "ok": result["ok"],
++            "reason": result["reason"], "too_long": result["too_long"]})
++    return result
+ 
+ 
+ def _insert_person_images(doc, persons) -> None:
+     """鎸変汉鍛橀『搴忔妸鍥剧墖鎻掑叆銆屼笁銆佷汉鍛橀厤澶囪〃銆嶇殑鍗犱綅琛紙1鍒楋紝棣栬鍚爣绛炬枃瀛楋級銆?     persons 宸叉槸璐熻矗浜轰紭鍏堟帓搴忥細[{name, fields, is_lead}]銆?""
+     if not persons:
+         return
+     person_images = []
+     for p in persons:
+         f = p.get("fields") or {}
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 9347268..cae25ca 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -3,10 +3,11 @@ uvicorn[standard]>=0.29
+ PyMuPDF>=1.24
+ python-docx>=1.1
+ openpyxl>=3.1
+ openai>=1.30
+ python-multipart>=0.0.9
+ pytest>=8.0
+ httpx>=0.27
+ rapidocr_onnxruntime>=1.2
+ pywin32>=306; platform_system=="Windows"
+ pdf2docx>=0.5.8
++Pillow>=10
+diff --git a/backend/tests/test_bid_draft_export.py b/backend/tests/test_bid_draft_export.py
+index bc75bf4..25f5e98 100644
+--- a/backend/tests/test_bid_draft_export.py
++++ b/backend/tests/test_bid_draft_export.py
+@@ -200,21 +200,22 @@ def test_lead_resume_no_lead_writes_nothing(tmp_path):
+ def test_image_slot_insert(tmp_path):
+     png = tmp_path / "cert.png"
+     png.write_bytes(PNG_1X1)
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, _bindings(), _data(scan=str(png)))
+     table = Document(out).tables[3]
+     assert table._tbl.findall(f".//{qn('w:drawing')}")
+     img = report["images"][0]
+     assert img == {"table_index": 3, "person": "寮犱笁",
+-                   "label_kind": "娉ㄥ唽璇佷功", "ok": True}
++                   "label_kind": "娉ㄥ唽璇佷功", "ok": True,
++                   "reason": "", "too_long": False}
+ 
+ 
+ def test_image_slot_missing_file_no_throw(tmp_path):
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, _bindings(),
+                         _data(scan=str(tmp_path / "涓嶅瓨鍦?png")))
+     assert report["images"][0]["ok"] is False
+     assert not Document(out).tables[3]._tbl.findall(f".//{qn('w:drawing')}")
+ 
+diff --git a/backend/tests/test_bid_images.py b/backend/tests/test_bid_images.py
+new file mode 100644
+index 0000000..086c65b
+--- /dev/null
++++ b/backend/tests/test_bid_images.py
+@@ -0,0 +1,36 @@
++from PIL import Image
++from docx import Document
++from app.core.bid_template_exporter import (
++    fit_image_cm, insert_image_adaptive, cell_available_width_cm)
++
++def _png(path, w, h):
++    Image.new("RGB", (w, h), "white").save(path)
++
++def test_fit_image_limits_by_height(tmp_path):
++    p = tmp_path / "tall.png"; _png(p, 400, 4000)   # 10:1 绔栭暱
++    r = fit_image_cm(str(p), avail_w_cm=7.0, avail_h_cm=24.0)
++    assert r["height_cm"] <= 24.0 + 1e-6
++    assert r["width_cm"] < 7.0
++    assert r["too_long"] is True
++
++def test_fit_image_uses_cell_width_when_wide(tmp_path):
++    p = tmp_path / "wide.png"; _png(p, 2000, 1000)
++    r = fit_image_cm(str(p), avail_w_cm=7.0, avail_h_cm=24.0)
++    assert abs(r["width_cm"] - 7.0) < 1e-6
++    assert abs(r["height_cm"] - 3.5) < 0.01
++
++def test_insert_reports_missing_file(tmp_path):
++    doc = Document(); cell = doc.add_table(1, 1).rows[0].cells[0]
++    r = insert_image_adaptive(cell, str(tmp_path / "nope.png"), 6.0)
++    assert r["ok"] is False and "涓嶅瓨鍦? in r["reason"]
++
++def test_insert_reports_unsupported_format(tmp_path):
++    f = tmp_path / "x.emf"; f.write_bytes(b"not an image")
++    doc = Document(); cell = doc.add_table(1, 1).rows[0].cells[0]
++    r = insert_image_adaptive(cell, str(f), 6.0)
++    assert r["ok"] is False and r["reason"]
++
++def test_cell_width_from_tblgrid(tmp_path):
++    from docx.shared import Cm
++    doc = Document(); t = doc.add_table(1, 1); t.columns[0].width = Cm(6)
++    assert 5.5 < cell_available_width_cm(t.rows[0].cells[0]) < 6.5

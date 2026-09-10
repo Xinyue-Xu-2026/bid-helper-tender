@@ -1,0 +1,125 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index dffaecb..71e49cf 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -12,21 +12,21 @@ from copy import deepcopy
+ from pathlib import Path
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
+ from docx.table import Table, _Cell
+ 
+ from app.core.bid_template_exporter import (
+     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
+     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
+-    insert_image_adaptive, page_text_width_cm,
++    insert_image_adaptive, page_text_width_cm, scan_placeholders,
+ )
+ from app.core.bid_page_setup import apply_page_setup
+ from app.core.bid_verify import _is_section_break_para, verify_draft_fill
+ from app.core.word_exporter import insert_toc_field_at
+ 
+ 
+ def _clear_tr_text(tr) -> None:
+     """娓呯┖涓€琛岋紙deepcopy 鍑虹殑 tr锛夊叏閮ㄥ崟鍏冩牸鏂囨湰锛屼繚鐣欏崟鍏冩牸/娈佃惤灞炴€с€?""
+     for tc in tr.iter(qn("w:tc")):
+         for para in tc.findall(qn("w:p")):
+@@ -476,21 +476,33 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     if os.path.abspath(str(draft_path)) == os.path.abspath(str(dest_path)):
+         raise ValueError("dest 涓?draft 涓嶅緱鍚岃矾寰?)
+     doc = Document(draft_path)
+     # doc.tables锛氶《灞傝〃鏍笺€佹枃妗ｉ『搴忥紙python-docx 鎸?body 涓?w:tbl 椤哄簭鏀堕泦锛?     # 宸查獙璇佷笌鍧楅亶鍘嗕竴鑷达級锛屼笌 T5 table_index 鍚屽潗鏍囩郴銆?     tables = doc.tables
+     data = data or {}
+     persons = data.get("persons") or []
+     contracts = data.get("contracts") or []
+     report = {"filled": [], "images": [], "skipped": [], "verify": None,
+-              "page_setup": None, "authority_images": 0, "auth_bound": []}
++              "page_setup": None, "authority_images": 0, "auth_bound": [],
++              "placeholders": {"filled": [], "suspicious": []}}
++
++    # 鍗犱綅绗︽竻鍗曪紙V1.2 4.3 楠屾敹 7锛夛細鍦ㄤ换浣曟浛鎹箣鍓嶅搴曠鎵弿锛?+    # 瑙勫垯鍞竴鏉ユ簮 scan_placeholders锛堜笌棰勮绔偣/濉厖/鏍￠獙鍚屾簮锛?+    scan = scan_placeholders(
++        doc, {"project_no": project_no, "project_name": project_name,
++              "doc_date": doc_date, "tenderer": tenderer,
++              "bidder_name": bidder_name, "section_name": section_name,
++              "section_no": section_no},
++        synonyms=synonyms)
++    report["placeholders"] = {"filled": scan["matched"],
++                              "suspicious": scan["suspicious"]}
+ 
+     # 娈嬬暀鏂囨湰鏇挎崲椤诲湪濉厖涔嬪墠鎵ц锛氭浛鎹㈣鍒欙紙compute_text_subs锛夊熀浜?     # 濉厖鍓嶇殑搴曠璁＄畻锛屼笌 verify_draft_fill 鐨勫簳绋夸晶鍚屾簮鈥斺€斿惁鍒?stale 鍊?     # 浠呭瓨鍦ㄤ簬缁戝畾琛ㄦ暟鎹崟鍏冩牸鏃讹紝濉厖瑕嗗啓鍚庤鍒欏彂鐜颁笉鍒版棫鍊硷紝
+     # 灏侀潰/姝ｆ枃娈嬬暀涓嶈鏇挎崲涓?verify 璇姤銆傚～鍏呮暣浣撹鍐欐暟鎹崟鍏冩牸锛?     # 鎻愬墠鏇挎崲涓嶆敼鍙樹骇鐗╁唴瀹广€?     _replace_stale_text(doc, project_no=project_no,
+                         project_name=project_name, doc_date=doc_date,
+                         tenderer=tenderer, bidder_name=bidder_name,
+                         section_name=section_name, section_no=section_no,
+diff --git a/backend/tests/test_bid_draft_export.py b/backend/tests/test_bid_draft_export.py
+index e3f9b23..43db5e0 100644
+--- a/backend/tests/test_bid_draft_export.py
++++ b/backend/tests/test_bid_draft_export.py
+@@ -368,21 +368,21 @@ def test_report_structure_and_quote_skip(tmp_path):
+          "person_scope": "", "perf_scope": "", "label_kind": "",
+          "person": "", "confirmed": True})
+     bindings["tables"].append(
+         {"table_index": 99, "role": "person_roster", "columns": {},
+          "person_scope": "all", "perf_scope": "", "label_kind": "",
+          "person": "", "confirmed": True})
+     draft = _build_draft(tmp_path / "draft.docx")
+     out = str(tmp_path / "out.docx")
+     report = fill_draft(draft, out, bindings, _data())
+     assert set(report) == {"filled", "images", "skipped", "verify", "page_setup",
+-                           "authority_images", "auth_bound"}
++                           "authority_images", "auth_bound", "placeholders"}
+     reasons = {(s.get("table_index"), s.get("reason"))
+                for s in report["skipped"]}
+     assert (4, "鎶ヤ环琛ㄩ渶鎵嬪伐濉啓") in reasons
+     assert (99, "琛ㄤ笉瀛樺湪锛屽彲鑳藉簳绋垮凡閲嶆柊鐢熸垚") in reasons
+     # quote 琛ㄦ湭琚～鍏呮敼鍔?     assert Document(out).tables[4].cell(0, 0).text == PROMISE_TEXT
+     verify = report["verify"]
+     assert verify["ok"] is True
+     assert verify["issues"] == []
+     assert verify["checked_paragraphs"] == 3   # 3 灏侀潰锛坱oc 娈垫亽璺宠繃锛?diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+index f6bb206..5e83963 100644
+--- a/backend/tests/test_bid_placeholders.py
++++ b/backend/tests/test_bid_placeholders.py
+@@ -130,10 +130,42 @@ def test_fill_draft_synonyms_fill_alias(tmp_path):
+                         tenderer="鏌愪腑蹇?, synonyms={"鐢叉柟": "鎷涙爣浜?})
+     texts = [p.text for p in Document(str(out)).paragraphs]
+     assert "鐢叉柟锛氭煇涓績" in texts
+     assert report["verify"]["ok"] is True
+ 
+     out2 = tmp_path / "o2.docx"
+     fill_draft(str(draft), str(out2), {"tables": [], "swap_toc": False}, {},
+                tenderer="鏌愪腑蹇?)
+     texts2 = [p.text for p in Document(str(out2)).paragraphs]
+     assert "鐢叉柟锛歘___" in texts2
++
++
++def test_fill_draft_report_includes_placeholders(tmp_path):
++    """瀵煎嚭鎶ュ憡绾冲叆鍗犱綅绗︽竻鍗曪紙V1.2 4.3 楠屾敹 7锛夛細filled=璇嗗埆灏嗗～锛?+    suspicious=鏈瘑鍒垚涓蹭笅鍒掔嚎锛屼笉闈欓粯銆?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("鎷涙爣浜猴細____")
++    doc.add_paragraph("______________________________")
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out), {"tables": [], "swap_toc": False},
++                        {}, tenderer="鏌愪腑蹇?)
++    ph = report["placeholders"]
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in ph["filled"])
++    assert ph["suspicious"], "鏈瘑鍒殑瀛ょ珛涓嬪垝绾垮簲鍒楀叆 suspicious"
++    assert report["verify"]["ok"] is True
++
++
++def test_fill_draft_report_placeholders_empty_keys(tmp_path):
++    """鏃犲崰浣嶇搴曠 鈫?filled/suspicious 鍧囦负绌哄垪琛紙閿亽瀛樺湪锛夈€?""
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    doc.add_paragraph("姝ｆ枃鏃犲崰浣嶇銆?)
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    report = fill_draft(str(draft), str(out),
++                        {"tables": [], "swap_toc": False}, {})
++    assert report["placeholders"] == {"filled": [], "suspicious": []}

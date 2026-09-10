@@ -1,0 +1,191 @@
+﻿diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index 710c7c0..e40396b 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -252,22 +252,22 @@ PLACEHOLDER_LABEL_KEYS = {
+ }
+ BRACKET_LABEL_KEYS = {
+     "椤圭洰鍚嶇О": "project_name", "宸ョ▼鍚嶇О": "project_name",
+     "宸ョ▼椤圭洰鍚嶇О": "project_name", "鎷涙爣浜哄悕绉?: "tenderer",
+     "鎷涙爣浜?: "tenderer", "閲囪喘浜?: "tenderer",
+     "鎶曟爣浜哄悕绉?: "bidder_name", "渚涘簲鍟嗗悕绉?: "bidder_name",
+     "鏍囨鍚嶇О": "section_name", "鏍囨缂栧彿": "section_no",
+     "鏍囨": "section_name", "鏃ユ湡": "doc_date",
+ }
+ _SECTION_COMBO_RE = re.compile(
+-    r"[锛?]\s*(?:椤圭洰鍚嶇О|宸ョ▼鍚嶇О|宸ョ▼椤圭洰鍚嶇О)\s*[锛?]\s*"
+-    r"[锛?]\s*鏍囨(?:鍚嶇О)?\s*[锛?]")
++    r"([锛?])\s*(?:椤圭洰鍚嶇О|宸ョ▼鍚嶇О|宸ョ▼椤圭洰鍚嶇О)\s*[锛?](\s*)"
++    r"([锛?])\s*鏍囨(?:鍚嶇О)?\s*[锛?]")
+ _UNRECOGNIZED_UNDERSCORE_RE = re.compile(r"_{4,}|锛縶4,}")
+ _DOC_DATE_BLANK_RE = re.compile(
+     r"(鏃s*鏈焅s*[锛?]?\s*)[_锛縗s]*骞碵_锛縗s]*鏈圼_锛縗s]*鏃?)
+ _PLACEHOLDER_ONLY_RE = re.compile(r"^[_锛縗s]+$")
+ 
+ 
+ def _effective_label_keys(synonyms):
+     keys = dict(PLACEHOLDER_LABEL_KEYS)
+     for alias, canonical in (synonyms or DEFAULT_PLACEHOLDER_SYNONYMS).items():
+         key = PLACEHOLDER_LABEL_KEYS.get(canonical)
+@@ -283,23 +283,31 @@ def _date_text(doc_date):
+ 
+ def _iter_cell_paragraphs(cell):
+     for para in cell.paragraphs:
+         yield para
+     for table in cell.tables:
+         for row in table.rows:
+             for sub in row.cells:
+                 yield from _iter_cell_paragraphs(sub)
+ 
+ 
++_MC_FALLBACK_TAG = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
++
++
+ def _iter_textbox_paragraphs(doc):
+-    """鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀斤紝涓嶉噸澶嶄骇鍑恒€?""
++    """鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀斤紝涓嶉噸澶嶄骇鍑恒€?+    Word 鍐欏嚭鐨勬枃鏈涓?mc:AlternateContent锛歮c:Choice锛圖rawingML锛?
++    mc:Fallback锛圴ML锛夊悇鍚竴浠界浉鍚?w:txbxContent锛岃烦杩?Fallback 鍐呯殑锛?+    閬垮厤鍚屼竴娈佃惤浜у嚭涓ゆ銆?""
+     for txbx in doc.element.body.iter(qn("w:txbxContent")):
++        if any(a.tag == _MC_FALLBACK_TAG for a in txbx.iterancestors()):
++            continue
+         for child in txbx.iterchildren():
+             if child.tag == qn("w:p"):
+                 yield Paragraph(child, doc)
+             elif child.tag == qn("w:tbl"):
+                 for row in Table(child, doc).rows:
+                     for cell in row.cells:
+                         yield from _iter_cell_paragraphs(cell)
+ 
+ 
+ def _iter_all_paragraphs(doc):
+@@ -393,25 +401,30 @@ def build_placeholder_rules(doc, *, project_no: str = "", project_name: str = ""
+         rules.append({"kind": "stale_name", "label": stale_name,
+                       "key": "project_name", "value": project_name,
+                       "pattern": re.compile(re.escape(stale_name)),
+                       "repl": project_name})
+     # 缁勫悎锛?椤圭洰鍚嶇О)(鏍囨鍚嶇О) 鈫?椤圭洰鍚?(鏍囨鍚?
+     if project_name and section_name:
+         hit = any(_SECTION_COMBO_RE.search(_para_text(p))
+                   for p in _iter_all_paragraphs(doc)
+                   if not _is_toc_paragraph(p))
+         if hit:
++            # 淇濈暀搴曠鍖归厤鍒扮殑鎷彿椋庢牸涓庝袱缁勯棿绌虹櫧
++            # 锛堝崐瑙掕緭鍏モ啋鍗婅锛屽叏瑙掕緭鍏モ啋鍏ㄨ锛?+            def _combo_repl(m, pn=project_name, sn=section_name):
++                close = "锛? if m.group(3) == "锛? else ")"
++                return f"{pn}{m.group(2)}{m.group(3)}{sn}{close}"
+             combo = f"{project_name} ({section_name})"
+             rules.append({"kind": "section_combo",
+                           "label": "(椤圭洰鍚嶇О)(鏍囨鍚嶇О)",
+                           "key": "project_name+section_name", "value": combo,
+-                          "pattern": _SECTION_COMBO_RE, "repl": combo})
++                          "pattern": _SECTION_COMBO_RE, "repl": _combo_repl})
+     # 鏍囩寮忕┖鐧藉崰浣嶏細鏍囩鍚庝粎绌虹櫧/涓嬪垝绾匡紙鎴栬灏撅級鏃跺～鍏?     label_keys = _effective_label_keys(synonyms)
+     for label in sorted(label_keys, key=len, reverse=True):
+         key = label_keys[label]
+         if key == "doc_date":
+             continue  # 鏃ユ湡鐢变笓鐢ㄦ棩鏈熻鍒欏鐞嗭紙鍚?____骞確_鏈坃_鏃?绌虹櫧鏍煎紡锛?         value = str(values.get(key) or "").strip()
+         if not value:
+             continue
+         pattern = re.compile(
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index d3b9730..72fbe83 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -57,21 +57,22 @@ def verify_draft_fill(draft_path: str, out_path: str,
+                       bound_table_indices: set, replace_params: dict,
+                       swapped_toc: bool = False,
+                       bound_paragraph_indices: set = None) -> dict:
+     """鏍￠獙浜х墿鐩稿搴曠鐨勬湭缁戝畾鍖哄煙鏄惁琚敼鍔ㄣ€? 
+     bound_table_indices锛氬凡纭缁戝畾锛堝厑璁稿～鍏呮敼鍔級鐨勯《灞傝〃涓嬫爣闆嗗悎锛?     杩欎簺琛ㄦ暣浣撹烦杩囨瘮瀵癸紙鍏跺唴閮ㄦ钀芥湰灏变笉鍙備笌姝ｆ枃娈垫瘮瀵癸級銆?     bound_paragraph_indices锛氭巿鏉冮〉绛夌粡鐢ㄦ埛纭鍏佽姝ｆ枃濉厖鏀瑰姩鐨勬钀?     涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗﹁繃婊ゅ悗鐨勬钀藉簭鍒楀潗鏍囩郴锛屼笌姣斿寰幆涓€鑷达級锛?     杩欎簺娈佃惤鏁翠綋璺宠繃姣斿銆傞粯璁ょ┖闆嗐€?-    replace_params锛歿"project_no","project_name","doc_date"}锛屼笌瀵煎嚭鏃朵竴鑷达紱
++    replace_params锛歿"project_no","project_name","doc_date","tenderer",
++    "bidder_name","section_name","section_no","synonyms"}锛屼笌瀵煎嚭鏃朵竴鑷达紱
+     绌?鏌愰敭绌?鈫?compute_text_subs 鐩稿簲鏃犺鍒欙紝濂楃敤鏃犲銆?     toc 鏍峰紡娈佃惤涓や晶鎭掕烦杩囷紙瀵煎嚭鐨?_replace_stale_text 浠庝笉瑙︾ toc 娈碉級锛?     swapped_toc=True 鏃朵骇鐗?toc 娈靛凡鏁寸粍鎹负 TOC 鍩燂紝鍚屾牱鐢辫璺宠繃瑕嗙洊銆?     杩斿洖 {"ok": bool, "issues": [str], "checked_paragraphs": int,
+     "checked_tables": int}銆?     """
+     draft = Document(draft_path)
+     out = Document(out_path)
+     params = replace_params or {}
+     subs = compute_text_subs(
+diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+index 4f465b6..f03e375 100644
+--- a/backend/tests/test_bid_placeholders.py
++++ b/backend/tests/test_bid_placeholders.py
+@@ -37,36 +37,80 @@ def test_bracket_half_and_full_width_filled():
+         doc, project_name="P", tenderer="T", bidder_name="B",
+         section_name="S")
+     full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
+     for r in rules:
+         full = r["pattern"].sub(r["repl"], full)
+     assert "P (S)" in full
+     assert "T" in full and "B" in full
+     assert "锛? not in full and "(椤圭洰鍚嶇О)" not in full
+ 
+ 
++def test_section_combo_keeps_full_width_brackets():
++    """鍏ㄨ缁勫悎鍗犱綅锛堥」鐩悕绉帮級锛堟爣娈靛悕绉帮級鈫?淇濈暀鍏ㄨ鎷彿椋庢牸銆?""
++    doc = _doc_with(["锛堥」鐩悕绉帮級锛堟爣娈靛悕绉帮級"])
++    rules = build_placeholder_rules(doc, project_name="P", section_name="S")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "P锛圫锛? in full
++    assert "锛堥」鐩悕绉帮級" not in full
++
++
+ def test_textbox_paragraphs_are_traversed_and_no_dup():
+     doc = Document()
+     p = doc.add_paragraph()
+     run = p.add_run()
+     # 鏋勯€犱竴涓惈 w:txbxContent 鐨勬瀬绠€ drawing
+     xml = (
+         '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+         '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+         '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData '
+         'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+         '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+         '<wps:txbx><w:txbxContent><w:p><w:r><w:t>鎷涙爣浜猴細____</w:t></w:r></w:p>'
+         '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline>'
+         '</w:drawing></w:r></w:p>')
+     from lxml import etree
+     p._p.addnext(etree.fromstring(xml))
+     texts = [t.text for t in _iter_textbox_paragraphs(doc)]
+     assert texts.count("鎷涙爣浜猴細____") == 1
+ 
+ 
++def test_textbox_alternate_content_fallback_not_duplicated():
++    """Word 鐪熷疄鍐欐硶鐨勬枃鏈锛歮c:AlternateContent 涓?mc:Choice锛圖rawingML锛?+    涓?mc:Fallback锛圴ML锛夊悇鍚竴浠界浉鍚?w:txbxContent 鈥斺€?鍙簲浜у嚭涓€娆°€?""
++    doc = Document()
++    p = doc.add_paragraph()
++    run = p.add_run()
++    inner = ('<w:p><w:r><w:t>鎷涙爣浜猴細____</w:t></w:r></w:p>')
++    xml = (
++        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
++        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
++        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
++        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
++        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
++        'xmlns:v="urn:schemas-microsoft-com:vml">'
++        '<w:r><mc:AlternateContent>'
++        '<mc:Choice Requires="wps">'
++        '<w:drawing><wp:inline><a:graphic><a:graphicData '
++        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:wsp><wps:txbx><w:txbxContent>' + inner +
++        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>'
++        '</wp:inline></w:drawing>'
++        '</mc:Choice>'
++        '<mc:Fallback>'
++        '<w:pict><v:shape><v:textbox><w:txbxContent>' + inner +
++        '</w:txbxContent></v:textbox></v:shape></w:pict>'
++        '</mc:Fallback>'
++        '</mc:AlternateContent></w:r></w:p>')
++    from lxml import etree
++    p._p.addnext(etree.fromstring(xml))
++    texts = [t.text for t in _iter_textbox_paragraphs(doc)]
++    assert texts.count("鎷涙爣浜猴細____") == 1
++
++
+ def test_scan_placeholders_reports_match_and_suspicious():
+     doc = _doc_with(["鎷涙爣浜猴細____", "______________________________"])
+     res = scan_placeholders(doc, {"tenderer": "鏌愪腑蹇?})
+     assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
+                for m in res["matched"])
+     assert res["suspicious"], "瀛ょ珛涓嬪垝绾垮簲鍒楀叆鍙枒娓呭崟"

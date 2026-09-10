@@ -1,0 +1,805 @@
+﻿diff --git a/backend/app/core/bid_draft_exporter.py b/backend/app/core/bid_draft_exporter.py
+index 67971f1..2d75167 100644
+--- a/backend/app/core/bid_draft_exporter.py
++++ b/backend/app/core/bid_draft_exporter.py
+@@ -7,20 +7,21 @@ data 缁撴瀯瑙?bid_service.assemble_bid_draft_data
+ section,sem}],"lead_perfs_text":str}锛夈€? """
+ import os
+ import re
+ from copy import deepcopy
+ from pathlib import Path
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.shared import Cm
++from docx.table import Table
+ 
+ from app.core.bid_template_exporter import (
+     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
+     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
+     insert_image_adaptive, page_text_width_cm,
+ )
+ from app.core.bid_page_setup import apply_page_setup
+ from app.core.bid_verify import _is_section_break_para, verify_draft_fill
+ from app.core.word_exporter import insert_toc_field_at
+ 
+@@ -72,46 +73,57 @@ def _fill_table_semantic(table, columns: dict, sem_rows: list,
+             tc = cell._tc
+             if any(tc is t for t in seen_tcs):
+                 continue
+             seen_tcs.append(tc)
+             sem = col_to_sem.get(j)
+             _set_cell_text(cell, sem_row.get(sem, "") if sem else "")
+         written += 1
+     return written
+ 
+ 
++def _clone_table_after(table):
++    """XML 绾?deepcopy 鏁磋〃骞舵彃鍒拌琛ㄤ箣鍚庯紙鍚庨殢绌烘钀藉垎闅旓級锛屽畬鏁翠繚鐣?+    琛屽垪鏁?鍚堝苟鍗曞厓鏍?琛岄珮/鏍峰紡锛堜竴浜轰竴琛ㄥ厠闅嗙敤锛岀粷涓嶉噸寤虹粨鏋勶級銆?""
++    tbl = table._tbl
++    new = deepcopy(tbl)
++    sep = tbl.makeelement(qn("w:p"), {})
++    tbl.addnext(sep)
++    tbl.addnext(new)
++    return Table(new, table._parent)
++
++
+ def _fill_resume_table(table, label_to_sem: dict, sem: dict,
+-                       lead_perfs_text: str) -> int:
++                       perfs_text: str) -> int:
+     """绠€鍘嗛敭鍊艰〃濉厖锛氶€愯閫愭牸锛岃鑼冨寲鏍兼枃鏈紙鍘婚灏剧┖鐧?+ 鍘诲熬閮?     "锛?鎴?:"锛夊懡涓?label_to_sem 鈫?鍐欏叾鍙充晶棣栦釜涓嶅悓 _tc 鐨勬牸瀛愶紙鏃犲彸鏍艰烦杩囷級锛?-    璇箟閿负 lead_perfs 鏃跺啓 lead_perfs_text銆傝繑鍥炲啓鍏ユ牸鏁般€?""
++    璇箟閿负 lead_perfs 鏃跺啓 perfs_text锛堥殢浜轰紶鍏ワ級銆傝繑鍥炲啓鍏ユ牸鏁般€?""
+     written = 0
+     for row in table.rows:
+         cells = row.cells
+         seen_tcs = []
+         for j, cell in enumerate(cells):
+             tc = cell._tc
+             if any(tc is t for t in seen_tcs):
+                 continue
+             seen_tcs.append(tc)
+             label = (cell.text or "").strip().rstrip("锛?").strip()
+             sem_key = (label_to_sem or {}).get(label)
+             if not sem_key:
+                 continue
+             target = None
+             for nxt in cells[j + 1:]:
+                 if nxt._tc is not tc:
+                     target = nxt
+                     break
+             if target is None:
+                 continue
+-            value = (lead_perfs_text if sem_key == "lead_perfs"
++            value = (perfs_text if sem_key == "lead_perfs"
+                      else (sem or {}).get(sem_key, ""))
+             _set_cell_text(target, value or "")
+             written += 1
+     return written
+ 
+ 
+ def _fill_image_slots(doc, slot_bindings, persons, report) -> None:
+     """閫愬浘鐗囧崰浣嶈〃鎻掑浘銆俿lot_bindings: [(binding, table)]銆?     person "lead" 鈫?璐熻矗浜猴紱"member:N" 鈫?绗?N 涓潪璐熻矗浜猴紙0 璧凤紝
+     瓒婄晫 鈫?report["skipped"] 璁?reason="浜哄憳涓嶈冻"锛夛紱缂虹渷鎸夎礋璐ｄ汉銆?@@ -207,21 +219,22 @@ def _date_zh(doc_date: str) -> str:
+ 
+ 
+ def _auth_signature_block(doc, bound, report, auth) -> None:
+     """鎺堟潈椤垫鏂囧～鍏咃細澶勭悊銆屾硶瀹氫唬琛ㄤ汉锛堝崟浣嶈礋璐ｄ汉锛夎韩浠借瘉鏄庛€嶄笌
+     銆屾巿鏉冨鎵樹功銆嶄袱椤电殑姝ｆ枃鍗犱綅涓庣鍚嶅尯銆傚彧鍛戒腑鏂囨湰鐗瑰緛鏄庣‘鐨勬钀斤細
+     - 锛堝鍚嶏級/锛堟姇鏍囦汉鍚嶇О锛夋嫭鍙峰崰浣嶏紙濮撳悕鎸夊簭=娉曚汉銆佷唬鐞嗕汉锛夛紱
+     - 銆岃韩浠借瘉鍙凤細銆嶈锛堢揣璺熷湪 娉曚汉/浠ｇ悊浜虹鍚嶈涔嬪悗锛夆啋 濉搴旇瘉浠跺彿锛?     - 鐩栧叕绔犺鍚庣殑銆屽勾鏈堟棩銆嶈 鈫?濉姇鏍囨枃浠舵棩鏈燂紱
+     - 銆岄檮锛氣€﹁韩浠借瘉鈥︾數瀛愭壂鎻忎欢銆嶆鏈拷鍔犺韩浠借瘉姝ｅ弽闈㈠浘鐗囥€?     鍏朵綑娈佃惤锛堟壙璇哄嚱绛夛級涓€寰嬩笉鍔ㄣ€傛敼鍔ㄦ璁板叆 bound锛坴erify 鍚屽潗鏍囩郴
+-    娈典笅鏍囷級锛屽浘鐗囪拷鍔犱笉璁℃枃鏈晠涓嶉渶 bound銆?""
++    娈典笅鏍囷細toc/鍒嗚妭绗?绌烘杩囨护鍚庣殑銆岄潪绌烘銆嶅簭鍒楋級锛屽浘鐗囪拷鍔犱笉璁℃枃鏈?+    鏁呬笉闇€ bound銆?""
+     legal = auth.get("legal_rep") or {}
+     agent = auth.get("agent") or {}
+     legal_name = str(legal.get("name") or "").strip()
+     agent_name = str(agent.get("name") or "").strip()
+     legal_id = str(legal.get("韬唤璇佸彿") or "").strip()
+     agent_id = str(agent.get("韬唤璇佸彿") or "").strip()
+     bidder = str(auth.get("bidder_name") or "").strip()
+     date_text = _date_zh(auth.get("doc_date") or "")
+ 
+     def _img_paths(person, dual):
+@@ -250,22 +263,25 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
+                 fallback_w_cm=_ID_CARD_WIDTH.cm)
+             report["images"].append({
+                 "table_index": None,
+                 "person": str((person or {}).get("name") or ""),
+                 "label_kind": "韬唤璇?, "ok": result["ok"],
+                 "reason": result["reason"], "too_long": result["too_long"]})
+             if result["ok"]:
+                 inserted += 1
+         return inserted
+ 
++    # 涓?verify 娈佃惤姣斿鍚屽潗鏍囩郴锛歵oc/鍒嗚妭绗?绌烘杩囨护鍚庣殑銆岄潪绌烘銆嶅簭鍒?+    # 锛堢┖娈典笉鎼哄甫鍐呭锛涘厠闅嗚〃鍒嗛殧绌烘绛夌粨鏋勬彃鍏ヤ笉褰卞搷鏈潗鏍囩郴锛?     paras = [p for p in doc.paragraphs
+-             if not _is_toc_paragraph(p) and not _is_section_break_para(p)]
++             if not _is_toc_paragraph(p) and not _is_section_break_para(p)
++             and _para_text(p)]
+ 
+     def _filter_index(p) -> int:
+         return paras.index(p)
+ 
+     def _rewrite(para, text):
+         _rewrite_paragraph_text(para, text)
+         bound.add(_filter_index(para))
+ 
+     sig_role = None        # 'legal'/'agent'锛氭渶杩戠鍚嶈锛堝叾鍚庝竴琛岃韩浠借瘉鍙峰綊灞烇級
+     prev_is_sig_ctx = False  # 涓婁竴娈垫槸鐩栧叕绔?绛惧悕涓婁笅鏂囷紙鍏跺悗骞存湀鏃ュ綊灞烇級
+@@ -382,35 +398,38 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     # 鎺堟潈椤垫鏂囧～鍏咃細鏀瑰姩鐨勬槸鏅€氭鏂囨锛岄』鎶婅鏀规鍔犲叆 verify 鐨?     # bound锛坧aragraph 涓嬫爣锛宼oc/鍒嗚妭绗﹁繃婊ゅ潗鏍囩郴锛夐伩鍏嶈鎶?     auth_bound = set()
+     if auth:
+         auth = {**auth, "bidder_name": bidder_name}
+         _auth_signature_block(doc, auth_bound, report, auth)
+         report["auth_bound"] = sorted(auth_bound)
+ 
+     image_slots = []
+     bound_indices = set()
++    table_insertions = {}   # {搴曠琛ㄤ笅鏍? 鎻掑叆鍏嬮殕鏁皚锛坮esume_each 涓€浜轰竴琛紝
++                            # 濉厖绔笌鏍￠獙绔叡鐢ㄥ悓涓€鐧昏锛?     for binding in (bindings or {}).get("tables") or []:
+         if not binding.get("confirmed"):
+             continue
+         role = binding.get("role") or "ignore"
+         if role == "ignore":
+             continue
+         idx = binding.get("table_index")
+         if not isinstance(idx, int) or not 0 <= idx < len(tables):
+             report["skipped"].append({
+                 "table_index": idx, "role": role,
+                 "reason": "琛ㄤ笉瀛樺湪锛屽彲鑳藉簳绋垮凡閲嶆柊鐢熸垚"})
+             continue
+         # 浠?fill 瀹為檯浼氭敼鍔ㄧ殑琛ㄨ眮鍏嶉槻绡℃敼鏍￠獙锛泀uote锛堟墜宸ュ～鍐欙級涓庢湭鐭?         # 瑙掕壊涓嶆敼鍔?鈫?涓嶈眮鍏嶏紝鏈粦瀹氳〃鍚岀瓑鍙楁牎楠屼繚鎶?-        if role in ("person_roster", "perf_list", "lead_resume", "image_slot"):
++        if role in ("person_roster", "perf_list", "lead_resume",
++                    "resume_each", "image_slot"):
+             bound_indices.add(idx)
+         table = tables[idx]
+         if role == "person_roster":
+             picked = _scope_persons(persons, binding.get("person_scope") or "all")
+             rows = _fill_table_semantic(table, binding.get("columns") or {},
+                                         [p.get("sem") or {} for p in picked],
+                                         header_rows=binding.get("header_rows") or 1)
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": rows})
+         elif role == "perf_list":
+@@ -421,23 +440,58 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+                                         header_rows=binding.get("header_rows") or 1)
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": rows})
+         elif role == "lead_resume":
+             lead = next((p for p in persons if p.get("is_lead")), None)
+             written = 0
+             if lead is not None:
+                 written = _fill_resume_table(
+                     table, binding.get("columns") or {},
+                     lead.get("sem") or {},
+-                    str(data.get("lead_perfs_text") or ""))
++                    str(lead.get("perfs_text")
++                        or data.get("lead_perfs_text") or ""))
+             report["filled"].append(
+                 {"table_index": idx, "role": role, "rows": written})
++        elif role == "resume_each":
++            if binding.get("mode") == "per_person":
++                # 涓€浜轰竴琛紙V1.2 7.4锛夛細绗?1 浠藉～鍘熸牱琛紝鍏朵綑鍏堝厠闅嗗啀濉紱
++                # 鍏嬮殕鍏ㄩ儴鍩轰簬濉厖鍓嶇殑鏍疯〃锛岄摼寮?addnext 淇濇寔浜哄憳椤哄簭
++                picked = _scope_persons(persons,
++                                        binding.get("person_scope") or "all")
++                targets = [table]
++                for _ in range(max(0, len(picked) - 1)):
++                    targets.append(_clone_table_after(targets[-1]))
++                total = 0
++                for t, p in zip(targets, picked):
++                    perfs = str(p.get("perfs_text") or (
++                        data.get("lead_perfs_text")
++                        if p.get("is_lead") else "") or "")
++                    total += _fill_resume_table(
++                        t, binding.get("columns") or {},
++                        p.get("sem") or {}, perfs)
++                if len(picked) > 1:
++                    table_insertions[idx] = len(picked) - 1
++                report["filled"].append(
++                    {"table_index": idx, "role": role, "rows": total,
++                     "cloned": len(picked)})
++            else:
++                # 鏈紑 per_person锛氱瓑鍚?lead_resume锛堝崟浠?lead 濉厖锛屾棫琛屼负锛?+                lead = next((p for p in persons if p.get("is_lead")), None)
++                written = 0
++                if lead is not None:
++                    written = _fill_resume_table(
++                        table, binding.get("columns") or {},
++                        lead.get("sem") or {},
++                        str(lead.get("perfs_text")
++                            or data.get("lead_perfs_text") or ""))
++                report["filled"].append(
++                    {"table_index": idx, "role": role, "rows": written})
+         elif role == "quote":
+             report["skipped"].append(
+                 {"table_index": idx, "role": role, "reason": "鎶ヤ环琛ㄩ渶鎵嬪伐濉啓"})
+         elif role == "image_slot":
+             image_slots.append((binding, table))
+ 
+     _fill_image_slots(doc, image_slots, persons, report)
+     swap_toc = bool((bindings or {}).get("swap_toc"))
+     if swap_toc:
+         _swap_toc(doc)
+@@ -446,12 +500,13 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
+     report["page_setup"] = apply_page_setup(str(dest_path))
+     report["verify"] = verify_draft_fill(
+         str(draft_path), str(dest_path),
+         bound_table_indices=bound_indices,
+         replace_params={"project_no": project_no, "project_name": project_name,
+                         "doc_date": doc_date, "tenderer": tenderer,
+                         "bidder_name": bidder_name,
+                         "section_name": section_name,
+                         "section_no": section_no},
+         swapped_toc=swap_toc,
+-        bound_paragraph_indices=auth_bound)
++        bound_paragraph_indices=auth_bound,
++        table_insertions=table_insertions)
+     return report
+diff --git a/backend/app/core/bid_table_classifier.py b/backend/app/core/bid_table_classifier.py
+index 5ec39d1..e9b35f0 100644
+--- a/backend/app/core/bid_table_classifier.py
++++ b/backend/app/core/bid_table_classifier.py
+@@ -12,21 +12,21 @@ bindings JSON schema锛堟湰妯″潡涓烘潈濞佸畾涔夛紝T7 瀵煎嚭涓?T9 瀛樺偍/鍥炴樉
+       "person_scope": "all",
+       "perf_scope": "all",
+       "label_kind": "",
+       "person": "",
+       "confirmed": false
+     }
+   ],
+   "swap_toc": false
+ }
+ ```
+-- role 鈭?person_roster | lead_resume | perf_list | quote | image_slot | ignore
++- role 鈭?person_roster | lead_resume | resume_each | perf_list | quote | image_slot | ignore
+ - columns锛氭暟鎹〃 = {璇箟閿? 鍒椾笅鏍噠锛沴ead_resume = {鏍囩鏂囨湰: 璇箟閿畗锛堥敭鍊艰〃锛? - person_scope 鈭?all | lead | members锛堜粎 person_roster锛夛紱
+   perf_scope 鈭?all | lead | section1 | section2锛堜粎 perf_list锛? - image_slot 涓撶敤锛歭abel_kind 鈭?鑱岀О璇佷功 | 绀句繚 | 韬唤璇?| 娉ㄥ唽璇佷功锛?   person = "lead" 鎴?"member:N"锛堥潪璐熻矗浜哄簭鍙凤紝0 璧凤級
+ - confirmed锛氱敤鎴风‘璁ょ疆 true锛涘鍑哄彧濉厖 confirmed=true 涓?role鈮爄gnore 鐨勮〃
+   锛堟湰妯″潡浜у嚭鐨勫缓璁?confirmed 鎭?false锛? 
+ 鍒嗙被瑙勫垯锛堟寜搴忓垽瀹氾紝鍏堜腑鍏堝緱锛夛細
+ 1. 琛ㄦ牸浠?1 鍒?鈫?image_slot锛沴abel_kind 鎸夐琛屾枃鏈懡涓?IMAGE_LABEL_KINDS
+@@ -51,21 +51,22 @@ bindings JSON schema锛堟湰妯″潡涓烘潈濞佸畾涔夛紝T7 瀵煎嚭涓?T9 瀛樺偍/鍥炴樉
+ """
+ import re
+ 
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.table import Table
+ from docx.text.paragraph import Paragraph
+ 
+ from app.core.template_outline import para_heading_level
+ 
+-ROLES = ("person_roster", "lead_resume", "perf_list", "quote", "image_slot", "ignore")
++ROLES = ("person_roster", "lead_resume", "resume_each", "perf_list", "quote",
++         "image_slot", "ignore")
+ 
+ PERSON_COL_KEYWORDS = {
+     "seq": ("搴忓彿",), "label": ("浜哄憳瀹夋帓", "宀椾綅", "鑱屽姟"),
+     "name": ("濮撳悕",), "gender": ("鎬у埆",), "age": ("骞撮緞",),
+     "education": ("瀛﹀巻",), "title": ("鑱岀О",),
+     "work_years": ("涓撲笟宸ヤ綔骞撮檺", "宸ヤ綔骞撮檺", "浠庝笟骞撮檺"),
+     "certs": ("鎵т笟璧勬牸", "娉ㄥ唽璧勬牸", "璧勬牸璇佷功", "璧勬牸"),
+     "role": ("鎷熸淳宀椾綅", "鎷熶换鑱屽姟", "鏈」鐩矖浣?, "鏈」鐩换鑱?, "鏈」鐩亴鍔?),
+ }
+ PERF_COL_KEYWORDS = {
+@@ -76,20 +77,22 @@ PERF_COL_KEYWORDS = {
+     "service_type": ("鏈嶅姟绫诲瀷",), "content": ("涓昏鍐呭", "鏈嶅姟鍐呭"),
+     "proof_page": ("璇佹槑鏉愭枡", "椤电爜"),
+ }
+ QUOTE_KEYWORDS = ("鎶ヤ环", "璐圭巼", "鎶樻墸")
+ RESUME_LABELS = ("濮撳悕", "鎬у埆", "骞撮緞", "瀛﹀巻", "鑱岀О", "鎵т笟璧勬牸",
+                  "韬唤璇佸彿", "宸ヤ綔缁忓巻", "宸插畬椤圭洰", "绫讳技涓氱哗")
+ RESUME_LABEL_TO_SEM = {"濮撳悕": "name", "鎬у埆": "gender", "骞撮緞": "age",
+                        "瀛﹀巻": "education", "鑱岀О": "title", "鎵т笟璧勬牸": "certs",
+                        "韬唤璇佸彿": "id_no", "宸插畬椤圭洰": "lead_perfs",
+                        "绫讳技涓氱哗": "lead_perfs"}
++# 銆屼竴浜轰竴琛ㄣ€嶉敭鍊兼牱琛ㄧ壒寰佹爣璁帮紙V1.2 7.4锛夛細鍛戒腑浠讳竴 鈫?resume_each锛堟暣琛ㄥ厠闅嗭級
++RESUME_EACH_MARKERS = ("鎷熷湪鏈」鐩换鑱?, "涓昏宸ヤ綔缁忓巻", "鎵т笟璧勬牸璇佷功鍚嶇О")
+ IMAGE_LABEL_KINDS = (("绀句繚", "绀句繚"), ("韬唤璇?, "韬唤璇?),
+                      ("鑱岀О璇佷功", "鑱岀О璇佷功"), ("娉ㄥ唽璇佷功", "娉ㄥ唽璇佷功"),
+                      ("璧勬牸璇佷功", "娉ㄥ唽璇佷功"), ("鎵т笟璧勬牸", "娉ㄥ唽璇佷功"))
+ 
+ _WS_RE = re.compile(r"\s+")
+ _DATA_HINT_RE = re.compile(r"\d")
+ 
+ 
+ def _norm(s: str) -> str:
+     """鍘诲叏閮ㄧ┖鐧姐€?""
+@@ -227,20 +230,21 @@ def _classify_table(table, table_index: int, heading: str,
+     item = {
+         "table_index": table_index,
+         "header": _header_cells(table),
+         "role": "ignore",
+         "columns": {},
+         "person_scope": "",
+         "perf_scope": "",
+         "label_kind": "",
+         "person": "",
+         "header_rows": 1,
++        "mode": "",
+         "confidence": "浣?,
+         "context_heading": heading,
+         "confirmed": False,
+     }
+     rows = table.rows
+     if not rows:
+         return item
+ 
+     # 瑙勫垯 1锛氫粎 1 鍒?鈫?image_slot
+     if len(table.columns) == 1:
+@@ -297,20 +301,35 @@ def _classify_table(table, table_index: int, heading: str,
+         return item
+     if len(perf_map) >= 2:
+         if "seq" not in perf_map and set(person_map) == {"seq"}:
+             perf_map = {**perf_map, "seq": person_map["seq"]}
+         item["role"] = "perf_list"
+         item["columns"] = perf_map
+         item["confidence"] = "楂? if len(perf_map) >= 3 else "浣?
+         item["perf_scope"] = "lead" if "璐熻矗浜? in heading else "all"
+         return item
+ 
++    # 瑙勫垯 4.6锛氶敭鍊兼牱琛ㄥ惈銆屼竴浜轰竴琛ㄣ€嶆爣璁?鈫?resume_each锛圴1.2 7.4锛?+    # 鎺掑湪 lead_resume 涔嬪墠锛?~5 鍒楋紝绠€鍘嗘爣绛惧懡涓?鈮? 涓?col0 鏂囨湰鍚?+    # 鎷熷湪鏈」鐩换鑱?涓昏宸ヤ綔缁忓巻/鎵т笟璧勬牸璇佷功鍚嶇О 浠讳竴锛?+    if 2 <= len(table.columns) <= 5:
++        hits, columns = _match_resume(table)
++        if len(hits) >= 3:
++            col0_text = "".join(
++                _norm(p[0][1]) for p in
++                (_dedup_col_texts(r) for r in table.rows) if p)
++            if any(m in col0_text for m in RESUME_EACH_MARKERS):
++                item["role"] = "resume_each"
++                item["columns"] = columns
++                item["confidence"] = "楂? if len(hits) >= 5 else "浣?
++                return item
++
+     # 瑙勫垯 5锛?~3 鍒椾笖绗?0 鍒楅€愯鍛戒腑绠€鍘嗘爣绛?鈮?3 鈫?lead_resume
+     if 2 <= len(table.columns) <= 3:
+         hits, columns = _match_resume(table)
+         if len(hits) >= 3:
+             item["role"] = "lead_resume"
+             item["columns"] = columns
+             item["confidence"] = "楂? if len(hits) >= 5 else "浣?
+             return item
+ 
+     # 瑙勫垯 6锛氭嬁涓嶅噯涓€寰?ignore
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index 72fbe83..ba675b6 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -49,28 +49,32 @@ def _textbox_texts(doc, subs=None) -> list:
+         t = _para_text(p)
+         if subs and not _is_toc_paragraph(p):
+             t = _apply_subs(t, subs)
+         out.append(t)
+     return out
+ 
+ 
+ def verify_draft_fill(draft_path: str, out_path: str,
+                       bound_table_indices: set, replace_params: dict,
+                       swapped_toc: bool = False,
+-                      bound_paragraph_indices: set = None) -> dict:
++                      bound_paragraph_indices: set = None,
++                      table_insertions: dict = None) -> dict:
+     """鏍￠獙浜х墿鐩稿搴曠鐨勬湭缁戝畾鍖哄煙鏄惁琚敼鍔ㄣ€? 
+     bound_table_indices锛氬凡纭缁戝畾锛堝厑璁稿～鍏呮敼鍔級鐨勯《灞傝〃涓嬫爣闆嗗悎锛?     杩欎簺琛ㄦ暣浣撹烦杩囨瘮瀵癸紙鍏跺唴閮ㄦ钀芥湰灏变笉鍙備笌姝ｆ枃娈垫瘮瀵癸級銆?     bound_paragraph_indices锛氭巿鏉冮〉绛夌粡鐢ㄦ埛纭鍏佽姝ｆ枃濉厖鏀瑰姩鐨勬钀?-    涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗﹁繃婊ゅ悗鐨勬钀藉簭鍒楀潗鏍囩郴锛屼笌姣斿寰幆涓€鑷达級锛?+    涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗?绌烘杩囨护鍚庣殑娈佃惤搴忓垪鍧愭爣绯伙紝涓庢瘮瀵瑰惊鐜竴鑷达級锛?     杩欎簺娈佃惤鏁翠綋璺宠繃姣斿銆傞粯璁ょ┖闆嗐€?+    table_insertions锛歿搴曠琛ㄤ笅鏍? 鍏跺悗鎻掑叆鐨勫厠闅嗚〃鏁皚锛坮esume_each
++    涓€浜轰竴琛ㄦ暣琛ㄥ厠闅嗭紝V1.2 7.4锛夛紱鍏嬮殕琛ㄦ棤搴曠瀵瑰簲锛岃鍏ヤ骇鐗╄〃鏁伴噺
++    绛夊紡涓斾笉鍙備笌姣斿锛屽簳绋胯〃鎸変笅鏍囦綅绉绘槧灏勫埌浜х墿琛ㄣ€傞粯璁ょ┖銆?     replace_params锛歿"project_no","project_name","doc_date","tenderer",
+     "bidder_name","section_name","section_no","synonyms"}锛屼笌瀵煎嚭鏃朵竴鑷达紱
+     绌?鏌愰敭绌?鈫?compute_text_subs 鐩稿簲鏃犺鍒欙紝濂楃敤鏃犲銆?     toc 鏍峰紡娈佃惤涓や晶鎭掕烦杩囷紙瀵煎嚭鐨?_replace_stale_text 浠庝笉瑙︾ toc 娈碉級锛?     swapped_toc=True 鏃朵骇鐗?toc 娈靛凡鏁寸粍鎹负 TOC 鍩燂紝鍚屾牱鐢辫璺宠繃瑕嗙洊銆?     杩斿洖 {"ok": bool, "issues": [str], "checked_paragraphs": int,
+     "checked_tables": int}銆?     """
+     draft = Document(draft_path)
+     out = Document(out_path)
+@@ -97,40 +101,55 @@ def verify_draft_fill(draft_path: str, out_path: str,
+ 
+     d_paras, d_tables = _split(draft)
+     o_paras, o_tables = _split(out)
+ 
+     issues = []
+     checked_paragraphs = 0
+     checked_tables = 0
+     bound = set(bound_table_indices or set())
+     bound_paras = set(bound_paragraph_indices or set())
+ 
+-    # 椤跺眰琛ㄦ暟閲忥細bound 涔嬪鐨勬湭缁戝畾琛ㄦ暟蹇呴』涓€鑷达紙鎬绘暟涓€鑷村嵆绛変环锛?-    if len(d_tables) != len(o_tables):
++    # 椤跺眰琛ㄦ暟閲忥細bound 涔嬪鐨勬湭缁戝畾琛ㄦ暟蹇呴』涓€鑷达紱resume_each 鍏嬮殕琛?+    # 锛坱able_insertions锛夋棤搴曠瀵瑰簲锛岃鍏ヤ骇鐗╂暟閲忕瓑寮忎笖涓嶅弬涓庢瘮瀵?+    insertions = {int(k): int(v) for k, v in (table_insertions or {}).items()}
++    total_added = sum(insertions.values())
++    if len(o_tables) != len(d_tables) + total_added:
+         issues.append(
+-            f"椤跺眰琛ㄦ牸鏁伴噺涓嶄竴鑷达細搴曠 {len(d_tables)} 寮狅紝浜х墿 {len(o_tables)} 寮?)
+-    for i, (d_tab, o_tab) in enumerate(zip(d_tables, o_tables)):
++            f"椤跺眰琛ㄦ牸鏁伴噺涓嶄竴鑷达細搴曠 {len(d_tables)} 寮狅紝"
++            f"浜х墿 {len(o_tables)} 寮狅紙鍚櫥璁板厠闅?{total_added} 寮狅級")
++    # 搴曠琛ㄤ笅鏍?鈫?浜х墿琛ㄤ笅鏍囷紙鍏嬮殕鎻掑叆浣垮叾鍚庤〃鏁翠綋浣嶇Щ锛?+    draft_to_out, shift = {}, 0
++    for i in range(len(d_tables)):
++        draft_to_out[i] = i + shift
++        shift += insertions.get(i, 0)
++    for i, d_tab in enumerate(d_tables):
+         if i in bound:
+             continue
++        oi = draft_to_out[i]
++        if oi >= len(o_tables):
++            continue  # 鏁伴噺涓嶄竴鑷村凡鎶ワ紝璺宠繃闃茶秺鐣?+        o_tab = o_tables[oi]
+         checked_tables += 1
+         # 搴曠渚у鐢ㄤ笌瀵煎嚭鐩稿悓鐨勬浛鎹㈣鍒欙紙_replace_stale_text 浼氭敼鍐?         # 鏈粦瀹氳〃鍗曞厓鏍煎唴鐨勬畫鐣欑紪鍙?鍚嶇О/鏃ユ湡锛夛紝浜х墿渚у師鏍锋瘮瀵?         if _table_texts(d_tab, subs) != _table_texts(o_tab):
+             issues.append(f"琛ㄦ牸[{i}] 鏈粦瀹氫絾鍐呭琚敼鍔?)
+ 
+     # 娈佃惤锛歵oc 鏍峰紡娈典袱渚ф亽璺宠繃锛坃replace_stale_text 浠庝笉瑙︾ toc 娈碉紱
+     # swapped_toc 鏃朵骇鐗?toc 娈垫暣缁勬崲涓?TOC 鍩燂紝鍚屾牱琚烦杩囪鐩栵級锛?-    # 鍒嗚妭绗︽钀斤紙P2 鎷嗚妭鎻掑叆锛夊悓鏍疯烦杩?+    # 鍒嗚妭绗︽钀斤紙P2 鎷嗚妭鎻掑叆锛夊悓鏍疯烦杩囷紱绌烘锛堟棤鏂囨湰锛変笉鎼哄甫鍐呭銆?+    # 涓や晶鎭掕烦杩団€斺€斿厠闅嗚〃鍒嗛殧绌烘锛坮esume_each 涓€浜轰竴琛ㄦ彃鍏ワ級绛夌粨鏋勬€?+    # 鍙樺寲涓嶈涓哄唴瀹规敼鍔紝bound_paragraph_indices 鍧愭爣绯诲悓涓恒€岄潪绌烘銆?     d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
+-               and not _is_section_break_para(p)]
++               and not _is_section_break_para(p) and _para_text(p)]
+     o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
+-               and not _is_section_break_para(p)]
++               and not _is_section_break_para(p) and _para_text(p)]
+     if len(d_paras) != len(o_paras):
+         issues.append(
+             f"娈佃惤鏁伴噺涓嶄竴鑷达細搴曠 {len(d_paras)} 娈碉紝浜х墿 {len(o_paras)} 娈?)
+     for i, (d_para, o_para) in enumerate(zip(d_paras, o_paras)):
+         if i in bound_paras:
+             continue
+         checked_paragraphs += 1
+         expected = _apply_subs(_para_text(d_para), subs)
+         if expected != _para_text(o_para):
+             snippet = _para_text(d_para)[:30]
+diff --git a/backend/app/routers/bid_draft.py b/backend/app/routers/bid_draft.py
+index fc6bde0..69188f4 100644
+--- a/backend/app/routers/bid_draft.py
++++ b/backend/app/routers/bid_draft.py
+@@ -26,20 +26,21 @@ class GenerateDraftIn(BaseModel):
+ 
+ class TableBindingIn(BaseModel):
+     table_index: int
+     role: str
+     columns: dict = {}
+     person_scope: str = "all"
+     perf_scope: str = "all"
+     label_kind: str = ""
+     person: str = ""
+     header_rows: int = 1   # 琛ㄥご琛屾暟锛堜袱琛岃〃澶?2锛屽～鍏呮椂淇濈暀骞朵互鍏跺悗棣栬涓?donor锛?+    mode: str = ""         # "per_person"=涓€浜轰竴琛ㄦ暣琛ㄥ厠闅嗭紙resume_each锛夛紱绌?鍗曚唤濉厖
+     confirmed: bool = False
+ 
+ 
+ class BindingsIn(BaseModel):
+     tables: list[TableBindingIn] = []
+     swap_toc: bool = False
+ 
+ 
+ def _project_or_404(db: Database, project_id: int) -> dict:
+     project = db.get_project(project_id)
+@@ -106,12 +107,14 @@ def save_bid_draft_bindings(project_id: int, body: BindingsIn,
+     row = db.get_project_bid_template(project_id)
+     if not row:
+         raise HTTPException(422, "灏氭棤搴曠锛岃鍏堢敓鎴愭垨涓婁紶搴曠")
+     for t in body.tables:
+         if t.role not in ROLES:
+             raise HTTPException(422, f"闈炴硶琛ㄦ牸瑙掕壊锛歿t.role}")
+         if t.table_index < 0:
+             raise HTTPException(422, "table_index 蹇呴』 鈮?0")
+         if not 1 <= t.header_rows <= 4:
+             raise HTTPException(422, "header_rows 蹇呴』鍦?1..4 涔嬮棿")
++        if t.mode not in ("", "per_person"):
++            raise HTTPException(422, f"闈炴硶濉厖妯″紡锛歿t.mode}")
+     db.update_bid_template(row["id"], bindings=body.model_dump())
+     return {"ok": True}
+diff --git a/backend/app/services/bid_draft_service.py b/backend/app/services/bid_draft_service.py
+index fca022e..28be8b2 100644
+--- a/backend/app/services/bid_draft_service.py
++++ b/backend/app/services/bid_draft_service.py
+@@ -16,21 +16,21 @@ from app.core.bid_draft import (
+ )
+ from app.core.bid_table_classifier import classify_tables
+ from app.core.bid_template_exporter import _is_toc_paragraph
+ from app.core.input_convert import ensure_docx
+ from app.db import Database
+ 
+ # 鍏ュ簱 bindings 鐨勮〃椤逛粎淇濈暀 schema 瀛楁锛圱ableBindingIn 瀵归綈锛夛紱
+ # header/confidence/context_heading 绛夊睍绀哄瓧娈电敱 preview 瀹炴椂鍒嗙被渚涚粰
+ _BINDING_KEYS = ("table_index", "role", "columns", "person_scope",
+                  "perf_scope", "label_kind", "person", "header_rows",
+-                 "confirmed")
++                 "mode", "confirmed")
+ 
+ _TOC_WARNING = "搴曠鍚洰褰曢〉锛屽鍑哄悗璇峰湪 Word 涓洿鏂伴〉鐮侊紙F9锛?
+ 
+ 
+ def _normalize_binding(item: dict) -> dict:
+     """鍒嗙被寤鸿椤?鈫?bindings schema 瀛楁锛坈onfirmed 鎭?false锛夈€?""
+     return {k: item.get(k) for k in _BINDING_KEYS}
+ 
+ 
+ class BidDraftService:
+diff --git a/backend/app/services/bid_service.py b/backend/app/services/bid_service.py
+index b4677b8..03e8271 100644
+--- a/backend/app/services/bid_service.py
++++ b/backend/app/services/bid_service.py
+@@ -392,33 +392,48 @@ def contract_semantics(c: dict, seq: int) -> dict:
+ 
+ def _perf_year(fields: dict) -> str:
+     """涓氱哗骞翠唤锛氫紭鍏?fields["骞翠唤"]锛屽惁鍒欏彇 绛捐鏃ユ湡 鍓?4 浣嶆暟瀛椼€?""
+     year = str((fields or {}).get("骞翠唤") or "").strip()
+     if year:
+         return year
+     sign = str((fields or {}).get("绛捐鏃ユ湡") or "").strip()
+     return sign[:4] if len(sign) >= 4 and sign[:4].isdigit() else ""
+ 
+ 
++def _perf_lines_for(name: str, contracts: list) -> list:
++    """鏌愪汉鍚嶄笅鍖归厤涓氱哗閫愯 "椤圭洰鍚嶇О锛堝勾浠斤級"
++    锛堝尮閰嶈鍒欙細fields["椤圭洰璐熻矗浜?]==濮撳悕锛涘勾浠藉彇 fields["骞翠唤"]锛?+    缂虹渷鍥為€€绛捐鏃ユ湡鍓?4 浣嶏級銆?""
++    lines = []
++    for c in contracts or []:
++        fields = c.get("fields") or {}
++        if str(fields.get("椤圭洰璐熻矗浜?) or "").strip() == (name or "").strip():
++            year = _perf_year(fields)
++            lines.append(f"{c['name']}锛坽year}锛? if year
++                         else str(c.get("name") or ""))
++    return lines
++
++
+ def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
+                             contract_picks: list) -> dict:
+     """搴曠椹卞姩瀵煎嚭鐨勫垪璇箟鏁版嵁缁勮銆傜鍚嶅畾绋匡細(db, project_id, person_picks,
+     contract_picks)鈥斺€斿繀椤绘帴鏀?project_id 浠ヤ究鏌?db.get_project_assets(project_id)
+     宸蹭繚瀛樺嬀閫夎ˉ鍏ㄤ汉鍛?role锛沺icks 娌跨敤 export-template 杞借嵎褰㈡€?     锛坧ersons: {asset_id, is_lead, certs?}锛沜ontracts: {asset_id, section}锛夈€?-    杩斿洖 {"persons": [{"name","fields","is_lead","role","sem"}],
++    杩斿洖 {"persons": [{"name","fields","is_lead","role","sem","perfs_text"}],
+            "contracts": [{"name","fields","section","sem"}],
+            "lead_perfs_text": str}銆?     persons 璐熻矗浜轰紭鍏堢ǔ瀹氭帓搴忥紙鍚?assemble_bid_template_data锛夛紱sem 涓?     person_semantics/contract_semantics 浜у嚭鐨勫垪璇箟琛屻€?-    lead_perfs_text = 璐熻矗浜哄悕涓嬪尮閰嶄笟缁╅€愯 "椤圭洰鍚嶇О锛堝勾浠斤級"锛圽n 杩炴帴锛?-    鍖归厤瑙勫垯鍚?assemble_bid_template_data锛歠ields["椤圭洰璐熻矗浜?]==璐熻矗浜哄鍚嶏級锛?+    perfs_text = 璇ヤ汉鍚嶄笅鍖归厤涓氱哗閫愯 "椤圭洰鍚嶇О锛堝勾浠斤級"锛圽n 杩炴帴锛?+    鍖归厤瑙勫垯鍚?assemble_bid_template_data锛歠ields["椤圭洰璐熻矗浜?]==鏈汉濮撳悕锛?+    V1.2 7.4 涓€浜轰竴琛ㄧ敤锛夛紱lead_perfs_text = 璐熻矗浜虹殑 perfs_text锛堟棫閿吋瀹癸級锛?     鏃犺礋璐ｄ汉鎴栨棤鍖归厤 鈫?""銆?""
+     saved_roles = {
+         row["asset_id"]: row.get("role") or ""
+         for row in db.get_project_assets(project_id, asset_type="person")
+     }
+ 
+     persons = []
+     for pick in person_picks or []:
+         asset = db.get_asset(pick.get("asset_id"))
+         if asset and asset.get("type") == "person":
+@@ -440,20 +455,19 @@ def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
+     for pick in contract_picks or []:
+         asset = db.get_asset(pick.get("asset_id"))
+         if asset and asset.get("type") == "contract":
+             contracts.append({"name": asset["name"],
+                               "fields": asset.get("fields") or {},
+                               "section": pick.get("section")})
+     for i, c in enumerate(contracts, 1):
+         c["sem"] = contract_semantics(c, i)
+ 
+     lead = next((p for p in persons if p["is_lead"]), None)
+-    lead_lines = []
+-    if lead is not None:
+-        for c in contracts:
+-            if str(c["fields"].get("椤圭洰璐熻矗浜?) or "").strip() == lead["name"]:
+-                year = _perf_year(c["fields"])
+-                lead_lines.append(
+-                    f"{c['name']}锛坽year}锛? if year else c["name"])
++    # V1.2 7.4锛氭瘡浜轰骇鍑?perfs_text锛堟湰浜哄悕涓嬩笟缁╂枃鏈紝涓€浜轰竴琛ㄧ敤锛夛紱
++    # lead_perfs_text = 璐熻矗浜虹殑 perfs_text锛堟棫閿吋瀹癸級
++    for p in persons:
++        p["perfs_text"] = "\n".join(_perf_lines_for(p["name"], contracts))
++    lead_lines = _perf_lines_for(lead["name"], contracts) \
++        if lead is not None else []
+ 
+     return {"persons": persons, "contracts": contracts,
+             "lead_perfs_text": "\n".join(lead_lines)}
+diff --git a/backend/tests/test_api_bid_draft.py b/backend/tests/test_api_bid_draft.py
+index 92f52d7..8a6f749 100644
+--- a/backend/tests/test_api_bid_draft.py
++++ b/backend/tests/test_api_bid_draft.py
+@@ -286,20 +286,40 @@ def test_put_bindings_header_rows_three_accepted(client, tmp_path):
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "header_rows": 3,
+                     "confirmed": True}],
+         "swap_toc": False})
+     assert r.status_code == 200
+     g = client.get(f"/api/projects/{pid}/bid-draft").json()
+     assert g["tables"][0]["header_rows"] == 3
+ 
+ 
++def test_put_bindings_mode_validation_and_roundtrip(client, tmp_path):
++    """mode锛圴1.2 涓€浜轰竴琛級锛?per_person"/"" 鎺ュ彈涓斿洖鏄撅紱闈炴硶鍊?鈫?422銆?""
++    pid = _make_project(client)
++    _upload_tender(client, pid, tmp_path)
++    gen = _generate(client, pid)
++    sug = gen["tables"][0]
++    base = {"table_index": sug["table_index"], "role": sug["role"],
++            "columns": sug["columns"], "confirmed": True}
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
++                   json={"tables": [{**base, "mode": "per_person"}],
++                         "swap_toc": False})
++    assert r.status_code == 200
++    g = client.get(f"/api/projects/{pid}/bid-draft").json()
++    assert g["tables"][0]["mode"] == "per_person"
++    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
++                   json={"tables": [{**base, "mode": "bogus"}],
++                         "swap_toc": False})
++    assert r.status_code == 422
++
++
+ def test_put_bindings_roundtrip(client, tmp_path):
+     pid = _make_project(client)
+     _upload_tender(client, pid, tmp_path)
+     gen = _generate(client, pid)
+     sug = gen["tables"][0]
+     r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+         "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                     "columns": sug["columns"], "person_scope": "all",
+                     "perf_scope": "all", "label_kind": "", "person": "",
+                     "confirmed": True}],
+diff --git a/backend/tests/test_bid_draft_service.py b/backend/tests/test_bid_draft_service.py
+index 438a1a3..841c51d 100644
+--- a/backend/tests/test_bid_draft_service.py
++++ b/backend/tests/test_bid_draft_service.py
+@@ -210,10 +210,34 @@ def test_assemble_bid_draft_data_lead_without_matching_perf(db):
+     assert data["lead_perfs_text"] == ""
+ 
+ 
+ def test_assemble_bid_draft_data_role_missing_when_not_saved(db):
+     """鍕鹃€夋湭淇濆瓨杩囨椂 role 鍥炶惤涓虹┖涓诧紝涓嶆姏閿欍€?""
+     pid, zhang, _, _, _, _ = _seed(db)
+     data = assemble_bid_draft_data(
+         db, pid, person_picks=[{"asset_id": zhang, "is_lead": True}],
+         contract_picks=[])
+     assert data["persons"][0]["role"] == ""
++
++
++def test_assemble_bid_draft_data_perfs_text_per_person(db):
++    """V1.2 7.4锛氭瘡涓?person 浜у嚭 perfs_text锛堟湰浜哄悕涓嬩笟缁?+    "椤圭洰鍚嶇О锛堝勾浠斤級" 鎹㈣杩炴帴锛涙棤鍖归厤 鈫?""锛夛紱lead_perfs_text 淇濈暀鍏煎銆?""
++    pid, zhang, li, ca, cb, cc = _seed(db)
++    db.replace_project_assets(
++        pid,
++        [{"asset_id": zhang, "role": "椤圭洰缁忕悊", "is_lead": True},
++         {"asset_id": li, "role": "缁勫憳"}],
++        [{"asset_id": ca, "section": 1}, {"asset_id": cb, "section": 1},
++         {"asset_id": cc, "section": 2}])
++    data = assemble_bid_draft_data(
++        db, pid,
++        person_picks=[{"asset_id": li, "is_lead": False},
++                      {"asset_id": zhang, "is_lead": True}],
++        contract_picks=[{"asset_id": ca, "section": 1},
++                        {"asset_id": cb, "section": 1},
++                        {"asset_id": cc, "section": 2}])
++    persons = data["persons"]
++    assert persons[0]["perfs_text"] == "椤圭洰A锛?024锛塡n椤圭洰C锛?022锛?  # 寮犱笁
++    assert persons[1]["perfs_text"] == ""                            # 鏉庡洓鏃犱笟缁?+    # 鏃ч敭鍏煎锛歭ead_perfs_text = 璐熻矗浜虹殑 perfs_text
++    assert data["lead_perfs_text"] == persons[0]["perfs_text"]
+diff --git a/backend/tests/test_bid_resume_clone.py b/backend/tests/test_bid_resume_clone.py
+new file mode 100644
+index 0000000..5300e27
+--- /dev/null
++++ b/backend/tests/test_bid_resume_clone.py
+@@ -0,0 +1,145 @@
++"""绠€鍘嗚〃銆屼竴浜轰竴琛ㄣ€嶆暣琛ㄥ厠闅嗘祴璇曪紙V1.2 7.4锛夛細閫?N 浜?鈫?鏍疯〃 + N-1 浠?+XML 绾у厠闅嗭紙缁撴瀯鍘熸牱锛氳鍒楁暟/鍚堝苟/琛岄珮淇濈暀锛夛紝閫愪汉濉厖锛涘厠闅嗚〃鐧昏杩?+verify锛坱able_insertions锛変笉璇姤锛涙棤 mode=per_person 淇濇寔鏃ц涓恒€?+鍙﹀惈 7.3 donor 鍏嬮殕琛?vMerge 鍓旈櫎鍥炲綊銆?""
++from docx import Document
++from docx.oxml.ns import qn
++from docx.shared import Cm
++
++from app.core.bid_draft_exporter import fill_draft
++
++
++def _sample_resume_table(doc):
++    t = doc.add_table(2, 2)
++    t.rows[0].cells[0].text = "濮撳悕"; t.rows[0].cells[1].text = ""
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"; t.rows[1].cells[1].text = ""
++    return t
++
++
++def _persons():
++    return [
++        {"name": "寮犱笁", "is_lead": True, "role": "椤圭洰缁忕悊",
++         "sem": {"name": "寮犱笁"}, "perfs_text": "鐢查」鐩紙2024锛?, "fields": {}},
++        {"name": "鏉庡洓", "is_lead": False, "role": "閫犱环鍛?,
++         "sem": {"name": "鏉庡洓"}, "perfs_text": "涔欓」鐩紙2023锛?, "fields": {}},
++    ]
++
++
++def _bindings(mode="per_person"):
++    return {"tables": [{"table_index": 0, "role": "resume_each",
++                        "columns": {"濮撳悕": "name", "涓昏宸ヤ綔缁忓巻": "lead_perfs"},
++                        "mode": mode, "confirmed": True}],
++            "swap_toc": False}
++
++
++def test_per_person_clone_count_and_structure(tmp_path):
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(), data,
++                        project_no="", project_name="", doc_date="")
++    out = Document(str(dst))
++    assert len(out.tables) == 2                       # 鏍疯〃 + 1 鍏嬮殕
++    assert out.tables[0].rows[0].cells[1].text == "寮犱笁"
++    assert out.tables[1].rows[0].cells[1].text == "鏉庡洓"
++    # 閫愪汉 perfs_text锛歭ead_perfs 璇箟閿啓鏈汉涓氱哗鏂囨湰
++    assert out.tables[0].rows[1].cells[1].text == "鐢查」鐩紙2024锛?
++    assert out.tables[1].rows[1].cells[1].text == "涔欓」鐩紙2023锛?
++    assert report["verify"]["ok"] is True             # 鍏嬮殕宸茬櫥璁帮紝涓嶈鎶?+    assert report["filled"][0]["cloned"] == 2
++
++
++def test_clone_preserves_row_col_merge_and_height(tmp_path):
++    """deepcopy 鍏嬮殕淇濈暀缁撴瀯锛氳鍒楁暟銆佹í鍚戝悎骞讹紙鍚?_tc锛夈€佽楂樸€?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    t = doc.add_table(3, 2)
++    t.rows[0].cells[0].text = "濮撳悕"; t.rows[0].cells[1].text = ""
++    t.rows[1].cells[0].text = "涓昏宸ヤ綔缁忓巻"; t.rows[1].cells[1].text = ""
++    t.rows[2].cells[0].text = "鑱岀О"; t.rows[2].cells[1].text = ""
++    t.rows[0].cells[0].merge(t.rows[0].cells[1])   # 妯悜鍚堝苟棣栬
++    t.rows[1].height = Cm(1.5)
++    doc.save(src)
++    persons = _persons() + [
++        {"name": "鐜嬩簲", "is_lead": False, "role": "缁勫憳",
++         "sem": {"name": "鐜嬩簲"}, "perfs_text": "", "fields": {}}]
++    data = {"persons": persons, "contracts": [], "lead_perfs_text": ""}
++    report = fill_draft(str(src), str(dst), _bindings(), data)
++    # 琛岄珮浠ュ簳绋胯嚜韬殑钀界洏鍊间负鍑嗭紙Cm鈫抰wips 鏈夊彇鏁达級锛屽厠闅嗛』涓庡叾瀹屽叏涓€鑷?+    draft_height = Document(str(src)).tables[0].rows[1].height
++    assert draft_height is not None
++    out = Document(str(dst))
++    assert len(out.tables) == 3
++    for tb in out.tables:
++        assert len(tb.rows) == 3 and len(tb.columns) == 2
++        # 棣栬妯悜鍚堝苟淇濈暀锛氫袱鏍煎悓 _tc
++        assert tb.rows[0].cells[0]._tc is tb.rows[0].cells[1]._tc
++        # 琛岄珮淇濈暀锛堜笌搴曠鍚屽€硷級
++        assert tb.rows[1].height == draft_height
++    assert report["verify"]["ok"] is True
++
++
++def test_resume_each_without_mode_keeps_single_lead(tmp_path):
++    """鏃?mode=per_person锛歳esume_each 閫€鍖栦负鏃?lead_resume 琛屼负
++    锛堜粎璐熻矗浜哄崟浠藉～鍏咃紝涓嶅厠闅嗭級銆?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document(); _sample_resume_table(doc); doc.save(src)
++    data = {"persons": _persons(), "contracts": [],
++            "lead_perfs_text": "鐢查」鐩紙2024锛?}
++    report = fill_draft(str(src), str(dst), _bindings(mode=""), data)
++    out = Document(str(dst))
++    assert len(out.tables) == 1
++    assert out.tables[0].rows[0].cells[1].text == "寮犱笁"
++    assert "cloned" not in report["filled"][0]
++    assert report["verify"]["ok"] is True
++
++
++def test_classifier_resume_each_vs_lead_resume(tmp_path):
++    """鍒嗙被鍣細閿€兼牱琛ㄥ惈銆屼富瑕佸伐浣滅粡鍘嗐€嶇瓑涓€浜轰竴琛ㄦ爣璁?鈫?resume_each锛?+    涓嶅惈鏍囪鐨勬棫鏍疯〃浠?鈫?lead_resume锛堝悜鍚庡吋瀹癸級銆?""
++    from app.core.bid_table_classifier import classify_tables
++    doc2 = Document()
++    t = doc2.add_table(4, 2)
++    for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "涓昏宸ヤ綔缁忓巻"]):
++        t.rows[r].cells[0].text = label
++    path2 = tmp_path / "d2.docx"; doc2.save(path2)
++    items2 = classify_tables(str(path2))
++    assert items2[0]["role"] == "resume_each"
++    # 鏃犳爣璁伴敭鍊艰〃 鈫?lead_resume锛堟棫琛屼负涓嶅洖褰掞級
++    doc3 = Document()
++    t3 = doc3.add_table(4, 2)
++    for r, label in enumerate(["濮撳悕", "鎬у埆", "鑱岀О", "瀛﹀巻"]):
++        t3.rows[r].cells[0].text = label
++    path3 = tmp_path / "d3.docx"; doc3.save(path3)
++    assert classify_tables(str(path3))[0]["role"] == "lead_resume"
++
++
++def test_fill_strips_vmerge_from_donor(tmp_path):
++    """7.3 鍥炲綊锛歞onor 鏁版嵁琛屽惈 vMerge 鍏冪礌鏃讹紝鍏嬮殕鍐欏嚭鐨勬暟鎹涓嶅緱鎼哄甫
++    vMerge锛堝惁鍒欎細寤剁画/寮€鍚旱鍚戝悎骞跺尯锛岀牬鍧忕粨鏋勶級銆?""
++    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
++    doc = Document()
++    t = doc.add_table(3, 2)
++    t.cell(0, 0).text = "濮撳悕"; t.cell(0, 1).text = "鑱岀О"
++    t.cell(1, 0).text = "鏃у悕"; t.cell(1, 1).text = "鏃ц亴绉?
++    t.cell(2, 0).text = "鏃у悕2"; t.cell(2, 1).text = "鏃ц亴绉?"
++    tc_pr = t.rows[1].cells[0]._tc.get_or_add_tcPr()
++    tc_pr.append(tc_pr.makeelement(qn("w:vMerge"), {}))
++    doc.save(src)
++    bindings = {"tables": [{"table_index": 0, "role": "person_roster",
++                            "columns": {"name": 0, "title": 1},
++                            "person_scope": "all", "confirmed": True}],
++                "swap_toc": False}
++    data = {"persons": [
++        {"name": "寮犱笁", "is_lead": True,
++         "sem": {"name": "寮犱笁", "title": "楂樼骇宸ョ▼甯?}, "fields": {}},
++        {"name": "鏉庡洓", "is_lead": False,
++         "sem": {"name": "鏉庡洓", "title": "宸ョ▼甯?}, "fields": {}}],
++        "contracts": []}
++    fill_draft(str(src), str(dst), bindings, data)
++    out_tbl = Document(str(dst)).tables[0]
++    assert not out_tbl._tbl.findall(f".//{qn('w:vMerge')}")
++    rows = [[c.text for c in r.cells] for r in out_tbl.rows]
++    assert rows[1] == ["寮犱笁", "楂樼骇宸ョ▼甯?]
++    assert rows[2] == ["鏉庡洓", "宸ョ▼甯?]

@@ -1,0 +1,480 @@
+﻿diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index 9db9c9b..710c7c0 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -229,37 +229,95 @@ _PROJECT_NO_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+鍙?)
+ _PROJECT_NAME_LABEL_RE = re.compile(r"椤筡s*鐩甛s*鍚峔s*绉癨s*[锛?]\s*(\S+)")
+ _DOC_DATE_RE = re.compile(
+     r"(鏃s*鏈焅s*[锛?]\s*)\d{4}\s*骞碶s*\d{1,2}\s*鏈圽s*\d{1,2}\s*鏃?)
+ _MEMBER_HEADING_RE = re.compile(r"^锛圽d+锛夐」鐩粍鍏朵粬浜哄憳-")
+ # 鏍囩寮忕┖鐧藉崰浣嶏紙P3锛夛細浠呭綋鏍囩鍚庢槸绌虹櫧/涓嬪垝绾垮崰浣嶏紙鎴栬灏撅級鏃跺～鍏咃紝
+ # 宸插惈鐪熷疄鍊肩殑琛岋紙濡?鎷涙爣浜猴細鏌愭煇涓績"锛変笉鍔? _TENDERER_LABEL_RE = re.compile(r"(鎷涙爣浜篬锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
+ _BIDDER_LABEL_RE = re.compile(r"(鎶曟爣浜哄悕绉癧锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
+ 
+ 
++# ---------- 閫氱敤鍗犱綅绗﹁鍒欐牳蹇冿紙V1.2锛?----------
++# 鍗曚竴浜嬪疄婧愶細濉厖绔紙_replace_stale_text/compute_text_subs锛変笌鏍￠獙绔?+# 锛坆id_verify锛夊叡鐢?build_placeholder_rules 浜у嚭鐨勮鍒欏垪琛ㄣ€?+
++DEFAULT_PLACEHOLDER_SYNONYMS = {
++    "宸ョ▼椤圭洰鍚嶇О": "椤圭洰鍚嶇О", "宸ョ▼鍚嶇О": "椤圭洰鍚嶇О",
++    "閲囪喘浜?: "鎷涙爣浜?, "渚涘簲鍟嗗悕绉?: "鎶曟爣浜哄悕绉?,
++}
++PLACEHOLDER_LABEL_KEYS = {
++    "椤圭洰鍚嶇О": "project_name", "鎷涙爣浜?: "tenderer",
++    "鎶曟爣浜哄悕绉?: "bidder_name", "椤圭洰缂栧彿": "project_no",
++    "鎷涙爣缂栧彿": "project_no", "鏍囨鍚嶇О": "section_name",
++    "鏍囨缂栧彿": "section_no", "鏃ユ湡": "doc_date",
++}
++BRACKET_LABEL_KEYS = {
++    "椤圭洰鍚嶇О": "project_name", "宸ョ▼鍚嶇О": "project_name",
++    "宸ョ▼椤圭洰鍚嶇О": "project_name", "鎷涙爣浜哄悕绉?: "tenderer",
++    "鎷涙爣浜?: "tenderer", "閲囪喘浜?: "tenderer",
++    "鎶曟爣浜哄悕绉?: "bidder_name", "渚涘簲鍟嗗悕绉?: "bidder_name",
++    "鏍囨鍚嶇О": "section_name", "鏍囨缂栧彿": "section_no",
++    "鏍囨": "section_name", "鏃ユ湡": "doc_date",
++}
++_SECTION_COMBO_RE = re.compile(
++    r"[锛?]\s*(?:椤圭洰鍚嶇О|宸ョ▼鍚嶇О|宸ョ▼椤圭洰鍚嶇О)\s*[锛?]\s*"
++    r"[锛?]\s*鏍囨(?:鍚嶇О)?\s*[锛?]")
++_UNRECOGNIZED_UNDERSCORE_RE = re.compile(r"_{4,}|锛縶4,}")
++_DOC_DATE_BLANK_RE = re.compile(
++    r"(鏃s*鏈焅s*[锛?]?\s*)[_锛縗s]*骞碵_锛縗s]*鏈圼_锛縗s]*鏃?)
++_PLACEHOLDER_ONLY_RE = re.compile(r"^[_锛縗s]+$")
++
++
++def _effective_label_keys(synonyms):
++    keys = dict(PLACEHOLDER_LABEL_KEYS)
++    for alias, canonical in (synonyms or DEFAULT_PLACEHOLDER_SYNONYMS).items():
++        key = PLACEHOLDER_LABEL_KEYS.get(canonical)
++        if key and alias not in keys:
++            keys[alias] = key
++    return keys
++
++
++def _date_text(doc_date):
++    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", (doc_date or "").strip())
++    return f"{int(m.group(1))}骞磠int(m.group(2))}鏈坽int(m.group(3))}鏃? if m else ""
++
++
+ def _iter_cell_paragraphs(cell):
+     for para in cell.paragraphs:
+         yield para
+     for table in cell.tables:
+         for row in table.rows:
+             for sub in row.cells:
+                 yield from _iter_cell_paragraphs(sub)
+ 
+ 
++def _iter_textbox_paragraphs(doc):
++    """鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀斤紝涓嶉噸澶嶄骇鍑恒€?""
++    for txbx in doc.element.body.iter(qn("w:txbxContent")):
++        for child in txbx.iterchildren():
++            if child.tag == qn("w:p"):
++                yield Paragraph(child, doc)
++            elif child.tag == qn("w:tbl"):
++                for row in Table(child, doc).rows:
++                    for cell in row.cells:
++                        yield from _iter_cell_paragraphs(cell)
++
++
+ def _iter_all_paragraphs(doc):
+-    """姝ｆ枃娈佃惤 + 鎵€鏈夎〃鏍硷紙鍚祵濂楋級鍗曞厓鏍煎唴娈佃惤銆?""
++    """姝ｆ枃娈佃惤 + 鎵€鏈夎〃鏍硷紙鍚祵濂楋級鍗曞厓鏍煎唴娈佃惤 + 鏂囨湰妗嗗唴娈佃惤銆?""
+     for para in doc.paragraphs:
+         yield para
+     for table in doc.tables:
+         for row in table.rows:
+             for cell in row.cells:
+                 yield from _iter_cell_paragraphs(cell)
++    yield from _iter_textbox_paragraphs(doc)
+ 
+ 
+ def _is_toc_paragraph(para: Paragraph) -> bool:
+     style = para.style
+     name = (style.name if style is not None else "") or ""
+     return name.lower().startswith("toc")
+ 
+ 
+ def _para_text(para: Paragraph) -> str:
+     return "".join(r.text for r in para.runs)
+@@ -302,48 +360,144 @@ def _discover_stale_values(doc) -> tuple:
+                 stale_no = m.group(0)
+         if not stale_name:
+             m = _PROJECT_NAME_LABEL_RE.search(text)
+             if m:
+                 stale_name = m.group(1)
+         if stale_no and stale_name:
+             break
+     return stale_no, stale_name
+ 
+ 
+-def compute_text_subs(doc, project_no: str = "", project_name: str = "",
+-                      doc_date: str = "", tenderer: str = "",
+-                      bidder_name: str = "") -> list:
+-    """璁＄畻娈嬬暀鏂囨湰鏇挎崲瑙勫垯 [(pattern, repl)]锛堝惈 stale 缂栧彿/鍚嶇О杩愯鏃跺彂鐜帮級銆?-    _replace_stale_text 璋冩湰鍑芥暟鍐嶉€愭搴旂敤锛涘鍑轰笌闃茬鏀规牎楠岋紙bid_verify锛?-    鍏辩敤鍚屼竴濂楄鍒欙紝淇濊瘉"瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?-    tenderer/bidder_name 闈炵┖鏃惰拷鍔犳爣绛惧紡绌虹櫧鍗犱綅濉厖瑙勫垯
+-    锛堟嫑鏍囦汉锛歘___ / 鎶曟爣浜哄悕绉帮細____锛夈€?""
+-    subs = []
++def build_placeholder_rules(doc, *, project_no: str = "", project_name: str = "",
++                            doc_date: str = "", tenderer: str = "",
++                            bidder_name: str = "", section_name: str = "",
++                            section_no: str = "", synonyms=None) -> list:
++    """鐢熸垚鍗犱綅绗︽浛鎹㈣鍒欏垪琛紝姣忛」 {"kind","label","key","value","pattern","repl"}銆?+    椤哄簭锛歴tale 鈫?缁勫悎 鈫?鏍囩锛堥暱搴﹂檷搴忥級鈫?鎷彿锛堥暱搴﹂檷搴忥級鈫?鏃ユ湡銆?+    濉厖绔笌鏍￠獙绔叡鐢ㄦ湰鍑芥暟锛屼繚璇?瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?""
++    values = {
++        "project_no": project_no, "project_name": project_name,
++        "doc_date": doc_date, "tenderer": tenderer,
++        "bidder_name": bidder_name, "section_name": section_name,
++        "section_no": section_no,
++    }
++    rules = []
++    # stale锛氭ā鏉挎畫鐣欑殑涓婃鎶曟爣缂栧彿/鍚嶇О锛堢┖鐧藉崰浣嶄笉绠?stale锛?     stale_no, stale_name = _discover_stale_values(doc)
+     if project_no and stale_no:
+         new_no = project_no if project_no.endswith("鍙?) else f"{project_no}鍙?
+-        subs.append((re.compile(re.escape(stale_no)), new_no))
+-    if project_name and stale_name and project_name != stale_name:
+-        subs.append((re.compile(re.escape(stale_name)), project_name))
+-    if doc_date:
+-        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", doc_date)
+-        if m:
+-            y, mo, d = (int(g) for g in m.groups())
+-            date_text = f"{y}骞磠mo}鏈坽d}鏃?
+-            subs.append((_DOC_DATE_RE, lambda match: match.group(1) + date_text))
+-    if tenderer:
+-        subs.append((_TENDERER_LABEL_RE,
+-                     lambda match: match.group(1) + tenderer))
+-    if bidder_name:
+-        subs.append((_BIDDER_LABEL_RE,
+-                     lambda match: match.group(1) + bidder_name))
+-    return subs
++        rules.append({"kind": "stale_no", "label": stale_no, "key": "project_no",
++                      "value": new_no, "pattern": re.compile(re.escape(stale_no)),
++                      "repl": new_no})
++    if (project_name and stale_name and project_name != stale_name
++            and not _PLACEHOLDER_ONLY_RE.match(stale_name)):
++        rules.append({"kind": "stale_name", "label": stale_name,
++                      "key": "project_name", "value": project_name,
++                      "pattern": re.compile(re.escape(stale_name)),
++                      "repl": project_name})
++    # 缁勫悎锛?椤圭洰鍚嶇О)(鏍囨鍚嶇О) 鈫?椤圭洰鍚?(鏍囨鍚?
++    if project_name and section_name:
++        hit = any(_SECTION_COMBO_RE.search(_para_text(p))
++                  for p in _iter_all_paragraphs(doc)
++                  if not _is_toc_paragraph(p))
++        if hit:
++            combo = f"{project_name} ({section_name})"
++            rules.append({"kind": "section_combo",
++                          "label": "(椤圭洰鍚嶇О)(鏍囨鍚嶇О)",
++                          "key": "project_name+section_name", "value": combo,
++                          "pattern": _SECTION_COMBO_RE, "repl": combo})
++    # 鏍囩寮忕┖鐧藉崰浣嶏細鏍囩鍚庝粎绌虹櫧/涓嬪垝绾匡紙鎴栬灏撅級鏃跺～鍏?+    label_keys = _effective_label_keys(synonyms)
++    for label in sorted(label_keys, key=len, reverse=True):
++        key = label_keys[label]
++        if key == "doc_date":
++            continue  # 鏃ユ湡鐢变笓鐢ㄦ棩鏈熻鍒欏鐞嗭紙鍚?____骞確_鏈坃_鏃?绌虹櫧鏍煎紡锛?+        value = str(values.get(key) or "").strip()
++        if not value:
++            continue
++        pattern = re.compile(
++            rf"({re.escape(label)}\s*[锛?])(?=[\s_銆€锛縘|$)[\s_銆€锛縘*")
++        rules.append({"kind": "label", "label": label, "key": key,
++                      "value": value, "pattern": pattern,
++                      "repl": (lambda m, l=label, v=value: m.group(1) + v)})
++    # 鎷彿寮忓崰浣嶏細(椤圭洰鍚嶇О)/锛堟嫑鏍囦汉鍚嶇О锛夌瓑
++    for label in sorted(BRACKET_LABEL_KEYS, key=len, reverse=True):
++        key = BRACKET_LABEL_KEYS[label]
++        value = str(values.get(key) or "").strip()
++        if not value:
++            continue
++        if key == "doc_date":
++            value = _date_text(doc_date)
++            if not value:
++                continue
++        pattern = re.compile(
++            rf"[锛?銆怽[]\s*{re.escape(label)}\s*[锛?銆慭]]")
++        rules.append({"kind": "bracket", "label": label, "key": key,
++                      "value": value, "pattern": pattern, "repl": value})
++    # 鏃ユ湡锛氬甫鏁板瓧鐨勬棫鏃ユ湡涓庣┖鐧芥棩鏈熷崰浣?+    date_text = _date_text(doc_date)
++    if date_text:
++        rules.append({"kind": "date", "label": "鏃ユ湡", "key": "doc_date",
++                      "value": date_text, "pattern": _DOC_DATE_RE,
++                      "repl": (lambda m, v=date_text: m.group(1) + v)})
++        rules.append({"kind": "date_blank", "label": "鏃ユ湡", "key": "doc_date",
++                      "value": date_text, "pattern": _DOC_DATE_BLANK_RE,
++                      "repl": (lambda m, v=date_text: m.group(1) + v)})
++    return rules
++
++
++def compute_text_subs(doc, project_no: str = "", project_name: str = "",
++                      doc_date: str = "", tenderer: str = "",
++                      bidder_name: str = "", section_name: str = "",
++                      section_no: str = "", synonyms=None) -> list:
++    """璁＄畻娈嬬暀鏂囨湰鏇挎崲瑙勫垯 [(pattern, repl)]锛? build_placeholder_rules 鐨?+    (pattern, repl) 鎶曞奖锛夈€傚鍑轰笌闃茬鏀规牎楠岋紙bid_verify锛夊叡鐢ㄥ悓涓€濂楄鍒欙紝
++    淇濊瘉"瀵煎嚭鏀逛簡浠€涔?涓?鏍￠獙璞佸厤浠€涔?涓€鑷淬€?""
++    return [(r["pattern"], r["repl"]) for r in build_placeholder_rules(
++        doc, project_no=project_no, project_name=project_name,
++        doc_date=doc_date, tenderer=tenderer, bidder_name=bidder_name,
++        section_name=section_name, section_no=section_no, synonyms=synonyms)]
++
++
++def scan_placeholders(doc, params: dict, synonyms=None) -> dict:
++    """鎵弿搴曠鍗犱綅绗﹀懡涓儏鍐碉細
++    杩斿洖 {"matched": [{"label","value","count","kind"}],
++          "suspicious": [{"text"}]}锛堟湭琚换浣曡鍒欏懡涓殑鎴愪覆涓嬪垝绾挎钀斤級銆?""
++    params = params or {}
++    if synonyms is None:
++        synonyms = params.get("synonyms")
++    rules = build_placeholder_rules(
++        doc,
++        project_no=str(params.get("project_no") or ""),
++        project_name=str(params.get("project_name") or ""),
++        doc_date=str(params.get("doc_date") or ""),
++        tenderer=str(params.get("tenderer") or ""),
++        bidder_name=str(params.get("bidder_name") or ""),
++        section_name=str(params.get("section_name") or ""),
++        section_no=str(params.get("section_no") or ""),
++        synonyms=synonyms)
++    texts = [_para_text(p) for p in _iter_all_paragraphs(doc)
++             if not _is_toc_paragraph(p)]
++    matched = []
++    for r in rules:
++        count = sum(len(r["pattern"].findall(t)) for t in texts)
++        if count:
++            matched.append({"label": r["label"], "value": r["value"],
++                            "count": count, "kind": r["kind"]})
++    suspicious = []
++    for t in texts:
++        if not t.strip():
++            continue
++        if (_UNRECOGNIZED_UNDERSCORE_RE.search(t)
++                and not any(r["pattern"].search(t) for r in rules)):
++            suspicious.append({"text": t})
++    return {"matched": matched, "suspicious": suspicious}
+ 
+ 
+ def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
+                         doc_date: str = "", tenderer: str = "",
+                         bidder_name: str = "") -> None:
+     """鏇挎崲妯℃澘涓畫鐣欑殑涓婃鎶曟爣鏂囨湰锛氳鍒欑敱 compute_text_subs 缁熶竴璁＄畻锛?     姝ゅ浠呴€愭锛堝惈琛ㄦ牸鍗曞厓鏍硷紝璺宠繃 toc 娈碉級搴旂敤銆俻roject_no/doc_date 涓虹┖
+     鍒欒烦杩囧搴旀浛鎹紝project_name 涓虹┖鍒欎笉鏇挎崲锛泃enderer/bidder_name 涓虹┖
+     鍒欎笉濉厖瀵瑰簲鏍囩绌虹櫧銆?""
+     subs = compute_text_subs(doc, project_no, project_name, doc_date,
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index 4a27344..d3b9730 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -1,21 +1,21 @@
+ """搴曠濉厖闃茬鏀规牎楠岋細浜х墿 vs 搴曠閫愬潡瀵规瘮鈥斺€? 鏈粦瀹氳〃鏍硷紙鍚祵濂楋級鎵€鏈夊崟鍏冩牸鏂囨湰鍦ㄥ鐢ㄤ笌瀵煎嚭鐩稿悓鐨勭紪鍙?鍚嶇О/鏃ユ湡
+ 鏇挎崲瑙勫垯鍚庡繀椤婚€愪竴鐩哥瓑锛涙鏂囨钀芥枃鏈悓鏍峰瑙勫垯鍚庢瘮瀵广€? 鍛戒腑宸紓鍗充笉寰椾慨鏀瑰唴瀹硅鏀瑰姩銆?""
+ from docx import Document
+ from docx.oxml.ns import qn
+ from docx.text.paragraph import Paragraph
+ 
+ from app.core.bid_template_exporter import (
+-    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs, _para_text,
+-    compute_text_subs,
++    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs,
++    _iter_textbox_paragraphs, _para_text, compute_text_subs,
+ )
+ 
+ 
+ def _is_section_break_para(para) -> bool:
+     """鍒嗚妭绗︽钀斤紙pPr 鍐呭惈 sectPr锛屾棤姝ｆ枃鍐呭锛夆€斺€旈〉闈㈣缃紙P2锛夋媶鑺?     浼氬湪浜х墿涓彃鍏ユ绫绘钀斤紝灞炴牸寮忓彉鍖栬€岄潪鍐呭鏀瑰姩锛屾瘮瀵规椂璺宠繃銆?""
+     pPr = para._p.find(qn("w:pPr"))
+     return pPr is not None and pPr.find(qn("w:sectPr")) is not None
+ 
+ 
+@@ -34,20 +34,32 @@ def _table_texts(table, subs=None) -> list:
+     for row in table.rows:
+         for cell in row.cells:
+             for para in _iter_cell_paragraphs(cell):
+                 text = _para_text(para)
+                 if subs and not _is_toc_paragraph(para):
+                     text = _apply_subs(text, subs)
+                 texts.append(text)
+     return texts
+ 
+ 
++def _textbox_texts(doc, subs=None) -> list:
++    """鏀堕泦鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀芥枃鏈紱subs 闈炵┖鏃堕€愭濂楃敤鏇挎崲瑙勫垯
++    锛坱oc 鏍峰紡娈甸櫎澶栵紝涓庡鍑轰晶 _replace_stale_text 瀵圭О锛夈€?""
++    out = []
++    for p in _iter_textbox_paragraphs(doc):
++        t = _para_text(p)
++        if subs and not _is_toc_paragraph(p):
++            t = _apply_subs(t, subs)
++        out.append(t)
++    return out
++
++
+ def verify_draft_fill(draft_path: str, out_path: str,
+                       bound_table_indices: set, replace_params: dict,
+                       swapped_toc: bool = False,
+                       bound_paragraph_indices: set = None) -> dict:
+     """鏍￠獙浜х墿鐩稿搴曠鐨勬湭缁戝畾鍖哄煙鏄惁琚敼鍔ㄣ€? 
+     bound_table_indices锛氬凡纭缁戝畾锛堝厑璁稿～鍏呮敼鍔級鐨勯《灞傝〃涓嬫爣闆嗗悎锛?     杩欎簺琛ㄦ暣浣撹烦杩囨瘮瀵癸紙鍏跺唴閮ㄦ钀芥湰灏变笉鍙備笌姝ｆ枃娈垫瘮瀵癸級銆?     bound_paragraph_indices锛氭巿鏉冮〉绛夌粡鐢ㄦ埛纭鍏佽姝ｆ枃濉厖鏀瑰姩鐨勬钀?     涓嬫爣闆嗗悎锛坱oc/鍒嗚妭绗﹁繃婊ゅ悗鐨勬钀藉簭鍒楀潗鏍囩郴锛屼笌姣斿寰幆涓€鑷达級锛?@@ -61,21 +73,24 @@ def verify_draft_fill(draft_path: str, out_path: str,
+     """
+     draft = Document(draft_path)
+     out = Document(out_path)
+     params = replace_params or {}
+     subs = compute_text_subs(
+         draft,
+         project_no=str(params.get("project_no") or ""),
+         project_name=str(params.get("project_name") or ""),
+         doc_date=str(params.get("doc_date") or ""),
+         tenderer=str(params.get("tenderer") or ""),
+-        bidder_name=str(params.get("bidder_name") or ""))
++        bidder_name=str(params.get("bidder_name") or ""),
++        section_name=str(params.get("section_name") or ""),
++        section_no=str(params.get("section_no") or ""),
++        synonyms=params.get("synonyms"))
+ 
+     def _split(doc):
+         paras, tables = [], []
+         for block in _iter_block_items(doc):
+             if isinstance(block, Paragraph):
+                 paras.append(block)
+             else:
+                 tables.append(block)
+         return paras, tables
+ 
+@@ -113,13 +128,25 @@ def verify_draft_fill(draft_path: str, out_path: str,
+             f"娈佃惤鏁伴噺涓嶄竴鑷达細搴曠 {len(d_paras)} 娈碉紝浜х墿 {len(o_paras)} 娈?)
+     for i, (d_para, o_para) in enumerate(zip(d_paras, o_paras)):
+         if i in bound_paras:
+             continue
+         checked_paragraphs += 1
+         expected = _apply_subs(_para_text(d_para), subs)
+         if expected != _para_text(o_para):
+             snippet = _para_text(d_para)[:30]
+             issues.append(f'娈佃惤[{i}] "{snippet}" 鍐呭琚敼鍔?)
+ 
++    # 鏂囨湰妗嗭細搴曠渚у鐢ㄥ悓涓€濂楁浛鎹㈣鍒欏悗涓庝骇鐗╅€愭姣斿
++    d_txbx = _textbox_texts(draft, subs)
++    o_txbx = _textbox_texts(out)
++    if d_txbx != o_txbx:
++        if len(d_txbx) != len(o_txbx):
++            issues.append(
++                f"鏂囨湰妗嗗唴瀹硅鏀瑰姩锛氬簳绋?{len(d_txbx)} 娈碉紝浜х墿 {len(o_txbx)} 娈?)
++        else:
++            for i, (d_t, o_t) in enumerate(zip(d_txbx, o_txbx)):
++                if d_t != o_t:
++                    issues.append(f"鏂囨湰妗嗘钀絒{i}] 鍐呭琚敼鍔?)
++
+     return {"ok": not issues, "issues": issues,
+             "checked_paragraphs": checked_paragraphs,
+             "checked_tables": checked_tables}
+diff --git a/backend/app/settings_store.py b/backend/app/settings_store.py
+index c78b0b4..b5fa771 100644
+--- a/backend/app/settings_store.py
++++ b/backend/app/settings_store.py
+@@ -137,10 +137,37 @@ def save_field_config(cfg: dict) -> dict:
+         normalized["contract_subtypes"] = {
+             st: _normalize_field_list(raw_sub.get(st)) for st in CONTRACT_SUBTYPES}
+     else:
+         # 鏈彁浜?contract_subtypes 鏃朵繚鐣欏凡瀛樺€硷紝閬垮厤 PUT 鏃х粨鏋勯厤缃椂涓㈠け
+         prev = (all_settings.get("field_config") or {}).get("contract_subtypes")
+         if prev:
+             normalized["contract_subtypes"] = prev
+     all_settings["field_config"] = normalized
+     save_settings(all_settings)
+     return normalized
++
++
++# ---------- 鍗犱綅绗﹀悓涔夎瘝搴擄紙璁剧疆 API 鍦ㄥ悗缁换鍔℃帴鍏ワ級 ----------
++
++from app.core.bid_template_exporter import DEFAULT_PLACEHOLDER_SYNONYMS
++
++
++def get_placeholder_synonyms() -> dict:
++    """璇诲彇鍗犱綅绗﹀悓涔夎瘝锛堝埆鍚嶁啋瑙勮寖鏍囩锛夛紝鏈繚瀛樼殑椤瑰洖閫€榛樿搴撱€?""
++    raw = load_settings().get("placeholder_synonyms") or {}
++    base = dict(DEFAULT_PLACEHOLDER_SYNONYMS)
++    for alias, canonical in raw.items():
++        alias, canonical = str(alias).strip(), str(canonical).strip()
++        if alias and canonical:
++            base[alias] = canonical
++    return base
++
++
++def save_placeholder_synonyms(m: dict) -> dict:
++    """淇濆瓨鍗犱綅绗﹀悓涔夎瘝瑕嗙洊椤癸紙瀛?settings 鐨?placeholder_synonyms 閿級锛?+    杩斿洖娓呮礂鍚庣殑 dict銆?""
++    clean = {str(k).strip(): str(v).strip()
++             for k, v in (m or {}).items() if str(k).strip() and str(v).strip()}
++    s = load_settings()
++    s["placeholder_synonyms"] = clean
++    save_settings(s)
++    return clean
+diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+new file mode 100644
+index 0000000..4f465b6
+--- /dev/null
++++ b/backend/tests/test_bid_placeholders.py
+@@ -0,0 +1,72 @@
++import re
++from docx import Document
++from docx.shared import Cm
++
++from app.core.bid_template_exporter import (
++    DEFAULT_PLACEHOLDER_SYNONYMS, _iter_all_paragraphs,
++    _iter_textbox_paragraphs, build_placeholder_rules, scan_placeholders,
++)
++
++
++def _doc_with(paras):
++    doc = Document()
++    for p in paras:
++        doc.add_paragraph(p)
++    return doc
++
++
++def test_label_blank_fills_expanded_labels():
++    doc = _doc_with(["椤圭洰鍚嶇О锛歘___", "閲囪喘浜猴細____", "鏍囨鍚嶇О锛歘___",
++                     "鏍囨缂栧彿锛?, "鏃ユ湡锛歘___骞確_鏈坃_鏃?])
++    rules = build_placeholder_rules(
++        doc, project_name="閲屼笅娌抽」鐩?, tenderer="鏌愪腑蹇?,
++        section_name="涓€鏍囨", section_no="A1", doc_date="2026-09-10")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "椤圭洰鍚嶇О锛氶噷涓嬫渤椤圭洰" in full
++    assert "閲囪喘浜猴細鏌愪腑蹇? in full          # 鍚屼箟璇?閲囪喘浜衡啋鎷涙爣浜?+    assert "鏍囨鍚嶇О锛氫竴鏍囨" in full
++    assert "鏍囨缂栧彿锛欰1" in full
++    assert "鏃ユ湡锛?026骞?鏈?0鏃? in full
++
++
++def test_bracket_half_and_full_width_filled():
++    doc = _doc_with(["(椤圭洰鍚嶇О) (鏍囨鍚嶇О)", "锛堟嫑鏍囦汉鍚嶇О锛夛紙鎶曟爣浜哄悕绉帮級"])
++    rules = build_placeholder_rules(
++        doc, project_name="P", tenderer="T", bidder_name="B",
++        section_name="S")
++    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
++    for r in rules:
++        full = r["pattern"].sub(r["repl"], full)
++    assert "P (S)" in full
++    assert "T" in full and "B" in full
++    assert "锛? not in full and "(椤圭洰鍚嶇О)" not in full
++
++
++def test_textbox_paragraphs_are_traversed_and_no_dup():
++    doc = Document()
++    p = doc.add_paragraph()
++    run = p.add_run()
++    # 鏋勯€犱竴涓惈 w:txbxContent 鐨勬瀬绠€ drawing
++    xml = (
++        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
++        '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
++        '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData '
++        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:txbx><w:txbxContent><w:p><w:r><w:t>鎷涙爣浜猴細____</w:t></w:r></w:p>'
++        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline>'
++        '</w:drawing></w:r></w:p>')
++    from lxml import etree
++    p._p.addnext(etree.fromstring(xml))
++    texts = [t.text for t in _iter_textbox_paragraphs(doc)]
++    assert texts.count("鎷涙爣浜猴細____") == 1
++
++
++def test_scan_placeholders_reports_match_and_suspicious():
++    doc = _doc_with(["鎷涙爣浜猴細____", "______________________________"])
++    res = scan_placeholders(doc, {"tenderer": "鏌愪腑蹇?})
++    assert any(m["label"] == "鎷涙爣浜? and m["value"] == "鏌愪腑蹇?
++               for m in res["matched"])
++    assert res["suspicious"], "瀛ょ珛涓嬪垝绾垮簲鍒楀叆鍙枒娓呭崟"

@@ -1,0 +1,203 @@
+﻿diff --git a/backend/app/core/bid_template_exporter.py b/backend/app/core/bid_template_exporter.py
+index f2329d7..41896dd 100644
+--- a/backend/app/core/bid_template_exporter.py
++++ b/backend/app/core/bid_template_exporter.py
+@@ -85,29 +85,49 @@ def _locate_tables(doc) -> dict:
+             elif section == 4:
+                 if sub4 == 0:
+                     roles.setdefault("e", block)
+                 elif sub4 == 1:
+                     roles.setdefault("f", block)
+                 elif sub4 == 2:
+                     roles.setdefault("g", block)
+     return roles
+ 
+ 
++_NON_TEXT_TAGS = (qn("w:drawing"), qn("w:pict"))
++
++
++def _el_has_nontext(el) -> bool:
++    """鍏冪礌瀛愭爲鏄惁鍚浘鐗?鏂囨湰妗嗙瓑闈炴枃鏈粯鍒跺唴瀹癸紙w:drawing / w:pict锛夈€?""
++    return any(next(el.iter(tag), None) is not None for tag in _NON_TEXT_TAGS)
++
++
++def _para_has_nontext(para) -> bool:
++    """娈佃惤鏄惁鍚浘鐗?鏂囨湰妗嗙瓑闈炴枃鏈粯鍒跺唴瀹广€?""
++    return _el_has_nontext(para._element)
++
++
+ def _set_cell_text(cell, text: str) -> None:
+-    """鍐欏崟鍏冩牸鏂囨湰锛圽n 杞蒋鎹㈣锛夛紝灏介噺淇濈暀棣栨/棣?run 鐨勬牸寮忋€?""
++    """鍐欏崟鍏冩牸鏂囨湰锛圽n 杞蒋鎹㈣锛夛紝灏介噺淇濈暀棣栨/棣?run 鐨勬牸寮忋€?+    鍒犻櫎棣栨涔嬪悗鐨勬钀芥椂璺宠繃鍚?w:drawing/w:pict 鐨勬钀解€斺€旇繖绫绘钀芥惡甯?+    鍥剧墖/鏂囨湰妗嗙瓑闈炴枃鏈唴瀹癸紝濉厖涓嶅緱姣佹帀瀹冧滑锛堝惁鍒欏浘鐗囦涪澶憋紝涓旀枃鏈
++    鏍￠獙涓庤〃鏍煎～鍏呬氦鍙夎鎶ワ級銆?""
+     lines = str(text if text is not None else "").split("\n")
+     para = cell.paragraphs[0]
+     for p in cell.paragraphs[1:]:
++        if _para_has_nontext(p):
++            continue
+         p._element.getparent().remove(p._element)
+     if para.runs:
+         run = para.runs[0]
+         for r in para.runs[1:]:
++            if _el_has_nontext(r._element):
++                continue
+             r._element.getparent().remove(r._element)
+     else:
+         run = para.add_run()
+     run.text = lines[0]
+     for line in lines[1:]:
+         run.add_break()
+         run.add_text(line)
+ 
+ 
+ def _fill_table(table: Table, rows_data: list) -> None:
+diff --git a/backend/app/core/bid_verify.py b/backend/app/core/bid_verify.py
+index 1081494..9ca1abd 100644
+--- a/backend/app/core/bid_verify.py
++++ b/backend/app/core/bid_verify.py
+@@ -35,24 +35,31 @@ def _table_texts(table, subs=None) -> list:
+         for cell in row.cells:
+             for para in _iter_cell_paragraphs(cell):
+                 text = _para_text(para)
+                 if subs and not _is_toc_paragraph(para):
+                     text = _apply_subs(text, subs)
+                 texts.append(text)
+     return texts
+ 
+ 
+ def _textbox_texts(doc, subs=None) -> list:
+-    """鏀堕泦鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀芥枃鏈紱subs 闈炵┖鏃堕€愭濂楃敤鏇挎崲瑙勫垯
+-    锛坱oc 鏍峰紡娈甸櫎澶栵紝涓庡鍑轰晶 _replace_stale_text 瀵圭О锛夈€?""
++    """鏀堕泦**琛ㄥ**鏂囨湰妗嗭紙鍚祵濂楋級鍐呮钀芥枃鏈紱subs 闈炵┖鏃堕€愭濂楃敤鏇挎崲
++    瑙勫垯锛坱oc 鏍峰紡娈甸櫎澶栵紝涓庡鍑轰晶 _replace_stale_text 瀵圭О锛夈€?+
++    浠呮瘮瀵硅〃澶栨枃鏈锛氭枃鏈浣嶄簬琛ㄦ牸鍗曞厓鏍煎唴鏃跺睘琛ㄦ牸/鍏嬮殕琛ㄥ唴瀹光€斺€旂粦瀹氳〃
++    鏈氨涓嶅弬涓庢枃鏈瘮瀵癸紝涓?resume_each 鏁磋〃鍏嬮殕浼氬鍒惰〃鍐呮枃鏈锛岃嫢鎸?+    鍏ㄦ枃閫愭姣斿浼氬洜鏁伴噺/鍐呭涓嶅绉拌€岃鎶ワ紙杩濆弽"闃茬鏀逛笉璇姤"锛夈€傚皝闈?+    鍗犱綅鏂囨湰妗嗭紙V1.2 4.2锛夊潎涓鸿〃澶栨钀斤紝涓嶅彈姝ゆ敹绐勫奖鍝嶃€?""
+     out = []
+     for p in _iter_textbox_paragraphs(doc):
++        if any(a.tag == qn("w:tbl") for a in p._p.iterancestors()):
++            continue
+         t = _para_text(p)
+         if subs and not _is_toc_paragraph(p):
+             t = _apply_subs(t, subs)
+         out.append(t)
+     return out
+ 
+ 
+ def verify_draft_fill(draft_path: str, out_path: str,
+                       bound_table_indices: set, replace_params: dict,
+                       swapped_toc: bool = False,
+diff --git a/backend/tests/test_bid_placeholders.py b/backend/tests/test_bid_placeholders.py
+index 5e83963..896bdec 100644
+--- a/backend/tests/test_bid_placeholders.py
++++ b/backend/tests/test_bid_placeholders.py
+@@ -1,12 +1,13 @@
+ import re
+ from docx import Document
++from docx.oxml.ns import qn
+ from docx.shared import Cm
+ 
+ from app.core.bid_template_exporter import (
+     DEFAULT_PLACEHOLDER_SYNONYMS, _iter_all_paragraphs,
+     _iter_textbox_paragraphs, build_placeholder_rules, scan_placeholders,
+ )
+ 
+ 
+ def _doc_with(paras):
+     doc = Document()
+@@ -162,10 +163,97 @@ def test_fill_draft_report_placeholders_empty_keys(tmp_path):
+     """鏃犲崰浣嶇搴曠 鈫?filled/suspicious 鍧囦负绌哄垪琛紙閿亽瀛樺湪锛夈€?""
+     from app.core.bid_draft_exporter import fill_draft
+     doc = Document()
+     doc.add_paragraph("姝ｆ枃鏃犲崰浣嶇銆?)
+     draft = tmp_path / "d.docx"
+     doc.save(str(draft))
+     out = tmp_path / "o.docx"
+     report = fill_draft(str(draft), str(out),
+                         {"tables": [], "swap_toc": False}, {})
+     assert report["placeholders"] == {"filled": [], "suspicious": []}
++
++
++def _drawing_run_xml(text):
++    return (
++        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
++        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
++        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
++        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<w:drawing><wp:inline><a:graphic><a:graphicData '
++        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
++        '<wps:wsp><wps:txbx><w:txbxContent>'
++        f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>'
++        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>'
++        '</wp:inline></w:drawing></w:r>')
++
++
++def test_set_cell_text_preserves_drawing_paragraph():
++    """缁堝淇锛氬啓鍗曞厓鏍兼枃鏈椂淇濈暀鍚?w:drawing/w:pict 鐨勬钀戒笌 run锛?+    涓嶅緱姣佹帀鍥剧墖/鏂囨湰妗嗐€?""
++    from lxml import etree
++    from app.core.bid_template_exporter import _set_cell_text
++    doc = Document()
++    t = doc.add_table(1, 1)
++    cell = t.rows[0].cells[0]
++    cell.text = "鏃у€?
++    p2 = cell.add_paragraph()
++    p2._p.append(etree.fromstring(_drawing_run_xml("鏂囨湰妗嗗唴瀹?)))
++    _set_cell_text(cell, "鏂板€?)
++    assert cell.paragraphs[0].text == "鏂板€?
++    assert len(cell.paragraphs) == 2, "鍚?drawing 鐨勬钀藉簲淇濈暀"
++    assert next(cell.paragraphs[1]._p.iter(qn("w:drawing")), None) is not None
++
++
++def test_set_cell_text_preserves_drawing_run_in_first_paragraph():
++    """棣栦釜娈佃惤鍐呯殑 drawing run 鍚屾牱涓嶅緱琚垹闄ゃ€?""
++    from lxml import etree
++    from app.core.bid_template_exporter import _set_cell_text
++    doc = Document()
++    cell = doc.add_table(1, 1).rows[0].cells[0]
++    cell.text = "鏃у€?
++    cell.paragraphs[0]._p.append(etree.fromstring(_drawing_run_xml("鏂囨湰妗嗗唴瀹?)))
++    _set_cell_text(cell, "鏂板€?)
++    assert cell.paragraphs[0].text == "鏂板€?
++    assert next(cell.paragraphs[0]._p.iter(qn("w:drawing")), None) is not None
++
++
++def test_textbox_texts_excludes_table_textboxes():
++    """缁堝淇锛氳〃鍐呮枃鏈锛堝睘琛ㄦ牸/鍏嬮殕琛ㄥ唴瀹癸級涓嶅弬涓庢枃鏈姣斿锛涜〃澶栨瘮瀵广€?""
++    from lxml import etree
++    from app.core.bid_verify import _textbox_texts
++    doc = Document()
++    body_p = doc.add_paragraph()
++    body_p._p.append(etree.fromstring(_drawing_run_xml("琛ㄥ鍗犱綅")))
++    t = doc.add_table(1, 1)
++    cell_p = t.rows[0].cells[0].paragraphs[0]
++    cell_p._p.append(etree.fromstring(_drawing_run_xml("琛ㄥ唴鏂囨湰")))
++    texts = _textbox_texts(doc)
++    assert "琛ㄥ鍗犱綅" in texts
++    assert "琛ㄥ唴鏂囨湰" not in texts
++
++
++def test_fill_cell_textbox_no_verify_false_positive(tmp_path):
++    """缁堝淇绔埌绔細鏁版嵁琛屽崟鍏冩牸鍚枃鏈鏃讹紝濉厖鍚?verify.ok 涓旀枃鏈淇濈暀銆?""
++    from lxml import etree
++    from app.core.bid_draft_exporter import fill_draft
++    doc = Document()
++    t = doc.add_table(2, 2)
++    t.rows[0].cells[0].text = "搴忓彿"
++    t.rows[0].cells[1].text = "濮撳悕"
++    t.rows[1].cells[0].text = "1"
++    name_cell = t.rows[1].cells[1]
++    name_cell.text = "鏃?
++    name_cell.paragraphs[0]._p.append(etree.fromstring(_drawing_run_xml("濮撳悕鍗犱綅")))
++    draft = tmp_path / "d.docx"
++    doc.save(str(draft))
++    out = tmp_path / "o.docx"
++    bindings = {"tables": [{"table_index": 0, "role": "person_roster",
++                            "columns": {"1": "name"}, "confirmed": True}],
++                "swap_toc": False}
++    persons = [{"name": "寮犱笁", "is_lead": True, "role": "椤圭洰缁忕悊",
++                "sem": {"name": "寮犱笁", "seq": "1"}, "fields": {}}]
++    report = fill_draft(str(draft), str(out), bindings,
++                        {"persons": persons, "contracts": [],
++                         "lead_perfs_text": ""})
++    assert report["verify"]["ok"] is True, report["verify"]["issues"]
++    out_cell = Document(str(out)).tables[0].rows[1].cells[1]
++    assert next(out_cell._tc.iter(qn("w:drawing")), None) is not None
