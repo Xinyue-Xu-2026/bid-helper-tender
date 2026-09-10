@@ -23,7 +23,7 @@ from app.db import Database
 # header/confidence/context_heading 等展示字段由 preview 实时分类供给
 _BINDING_KEYS = ("table_index", "role", "columns", "person_scope",
                  "perf_scope", "label_kind", "person", "header_rows",
-                 "confirmed")
+                 "mode", "confirmed")
 
 _TOC_WARNING = "底稿含目录页，导出后请在 Word 中更新页码（F9）"
 

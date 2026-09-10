@@ -293,6 +293,26 @@ def test_put_bindings_header_rows_three_accepted(client, tmp_path):
     assert g["tables"][0]["header_rows"] == 3
 
 
+def test_put_bindings_mode_validation_and_roundtrip(client, tmp_path):
+    """mode（V1.2 一人一表）："per_person"/"" 接受且回显；非法值 → 422。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    gen = _generate(client, pid)
+    sug = gen["tables"][0]
+    base = {"table_index": sug["table_index"], "role": sug["role"],
+            "columns": sug["columns"], "confirmed": True}
+    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
+                   json={"tables": [{**base, "mode": "per_person"}],
+                         "swap_toc": False})
+    assert r.status_code == 200
+    g = client.get(f"/api/projects/{pid}/bid-draft").json()
+    assert g["tables"][0]["mode"] == "per_person"
+    r = client.put(f"/api/projects/{pid}/bid-draft/bindings",
+                   json={"tables": [{**base, "mode": "bogus"}],
+                         "swap_toc": False})
+    assert r.status_code == 422
+
+
 def test_put_bindings_roundtrip(client, tmp_path):
     pid = _make_project(client)
     _upload_tender(client, pid, tmp_path)

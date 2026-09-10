@@ -19,7 +19,7 @@ bindings JSON schema（本模块为权威定义，T7 导出与 T9 存储/回显�
   "swap_toc": false
 }
 ```
-- role ∈ person_roster | lead_resume | perf_list | quote | image_slot | ignore
+- role ∈ person_roster | lead_resume | resume_each | perf_list | quote | image_slot | ignore
 - columns：数据表 = {语义键: 列下标}；lead_resume = {标签文本: 语义键}（键值表）
 - person_scope ∈ all | lead | members（仅 person_roster）；
   perf_scope ∈ all | lead | section1 | section2（仅 perf_list）
@@ -58,7 +58,8 @@ from docx.text.paragraph import Paragraph
 
 from app.core.template_outline import para_heading_level
 
-ROLES = ("person_roster", "lead_resume", "perf_list", "quote", "image_slot", "ignore")
+ROLES = ("person_roster", "lead_resume", "resume_each", "perf_list", "quote",
+         "image_slot", "ignore")
 
 PERSON_COL_KEYWORDS = {
     "seq": ("序号",), "label": ("人员安排", "岗位", "职务"),
@@ -83,6 +84,8 @@ RESUME_LABEL_TO_SEM = {"姓名": "name", "性别": "gender", "年龄": "age",
                        "学历": "education", "职称": "title", "执业资格": "certs",
                        "身份证号": "id_no", "已完项目": "lead_perfs",
                        "类似业绩": "lead_perfs"}
+# 「一人一表」键值样表特征标记（V1.2 7.4）：命中任一 → resume_each（整表克隆）
+RESUME_EACH_MARKERS = ("拟在本项目任职", "主要工作经历", "执业资格证书名称")
 IMAGE_LABEL_KINDS = (("社保", "社保"), ("身份证", "身份证"),
                      ("职称证书", "职称证书"), ("注册证书", "注册证书"),
                      ("资格证书", "注册证书"), ("执业资格", "注册证书"))
@@ -234,6 +237,7 @@ def _classify_table(table, table_index: int, heading: str,
         "label_kind": "",
         "person": "",
         "header_rows": 1,
+        "mode": "",
         "confidence": "低",
         "context_heading": heading,
         "confirmed": False,
@@ -303,6 +307,21 @@ def _classify_table(table, table_index: int, heading: str,
         item["confidence"] = "高" if len(perf_map) >= 3 else "低"
         item["perf_scope"] = "lead" if "负责人" in heading else "all"
         return item
+
+    # 规则 4.6：键值样表含「一人一表」标记 → resume_each（V1.2 7.4，
+    # 排在 lead_resume 之前；2~5 列，简历标签命中 ≥3 且 col0 文本含
+    # 拟在本项目任职/主要工作经历/执业资格证书名称 任一）
+    if 2 <= len(table.columns) <= 5:
+        hits, columns = _match_resume(table)
+        if len(hits) >= 3:
+            col0_text = "".join(
+                _norm(p[0][1]) for p in
+                (_dedup_col_texts(r) for r in table.rows) if p)
+            if any(m in col0_text for m in RESUME_EACH_MARKERS):
+                item["role"] = "resume_each"
+                item["columns"] = columns
+                item["confidence"] = "高" if len(hits) >= 5 else "低"
+                return item
 
     # 规则 5：2~3 列且第 0 列逐行命中简历标签 ≥ 3 → lead_resume
     if 2 <= len(table.columns) <= 3:

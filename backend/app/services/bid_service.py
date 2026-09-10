@@ -399,19 +399,34 @@ def _perf_year(fields: dict) -> str:
     return sign[:4] if len(sign) >= 4 and sign[:4].isdigit() else ""
 
 
+def _perf_lines_for(name: str, contracts: list) -> list:
+    """某人名下匹配业绩逐行 "项目名称（年份）"
+    （匹配规则：fields["项目负责人"]==姓名；年份取 fields["年份"]，
+    缺省回退签订日期前 4 位）。"""
+    lines = []
+    for c in contracts or []:
+        fields = c.get("fields") or {}
+        if str(fields.get("项目负责人") or "").strip() == (name or "").strip():
+            year = _perf_year(fields)
+            lines.append(f"{c['name']}（{year}）" if year
+                         else str(c.get("name") or ""))
+    return lines
+
+
 def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
                             contract_picks: list) -> dict:
     """底稿驱动导出的列语义数据组装。签名定稿：(db, project_id, person_picks,
     contract_picks)——必须接收 project_id 以便查 db.get_project_assets(project_id)
     已保存勾选补全人员 role；picks 沿用 export-template 载荷形态
     （persons: {asset_id, is_lead, certs?}；contracts: {asset_id, section}）。
-    返回 {"persons": [{"name","fields","is_lead","role","sem"}],
+    返回 {"persons": [{"name","fields","is_lead","role","sem","perfs_text"}],
            "contracts": [{"name","fields","section","sem"}],
            "lead_perfs_text": str}。
     persons 负责人优先稳定排序（同 assemble_bid_template_data）；sem 为
     person_semantics/contract_semantics 产出的列语义行。
-    lead_perfs_text = 负责人名下匹配业绩逐行 "项目名称（年份）"（\n 连接，
-    匹配规则同 assemble_bid_template_data：fields["项目负责人"]==负责人姓名）；
+    perfs_text = 该人名下匹配业绩逐行 "项目名称（年份）"（\n 连接，
+    匹配规则同 assemble_bid_template_data：fields["项目负责人"]==本人姓名，
+    V1.2 7.4 一人一表用）；lead_perfs_text = 负责人的 perfs_text（旧键兼容）；
     无负责人或无匹配 → ""。"""
     saved_roles = {
         row["asset_id"]: row.get("role") or ""
@@ -447,13 +462,12 @@ def assemble_bid_draft_data(db: Database, project_id: int, person_picks: list,
         c["sem"] = contract_semantics(c, i)
 
     lead = next((p for p in persons if p["is_lead"]), None)
-    lead_lines = []
-    if lead is not None:
-        for c in contracts:
-            if str(c["fields"].get("项目负责人") or "").strip() == lead["name"]:
-                year = _perf_year(c["fields"])
-                lead_lines.append(
-                    f"{c['name']}（{year}）" if year else c["name"])
+    # V1.2 7.4：每人产出 perfs_text（本人名下业绩文本，一人一表用）；
+    # lead_perfs_text = 负责人的 perfs_text（旧键兼容）
+    for p in persons:
+        p["perfs_text"] = "\n".join(_perf_lines_for(p["name"], contracts))
+    lead_lines = _perf_lines_for(lead["name"], contracts) \
+        if lead is not None else []
 
     return {"persons": persons, "contracts": contracts,
             "lead_perfs_text": "\n".join(lead_lines)}

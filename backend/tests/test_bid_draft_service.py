@@ -217,3 +217,27 @@ def test_assemble_bid_draft_data_role_missing_when_not_saved(db):
         db, pid, person_picks=[{"asset_id": zhang, "is_lead": True}],
         contract_picks=[])
     assert data["persons"][0]["role"] == ""
+
+
+def test_assemble_bid_draft_data_perfs_text_per_person(db):
+    """V1.2 7.4：每个 person 产出 perfs_text（本人名下业绩
+    "项目名称（年份）" 换行连接；无匹配 → ""）；lead_perfs_text 保留兼容。"""
+    pid, zhang, li, ca, cb, cc = _seed(db)
+    db.replace_project_assets(
+        pid,
+        [{"asset_id": zhang, "role": "项目经理", "is_lead": True},
+         {"asset_id": li, "role": "组员"}],
+        [{"asset_id": ca, "section": 1}, {"asset_id": cb, "section": 1},
+         {"asset_id": cc, "section": 2}])
+    data = assemble_bid_draft_data(
+        db, pid,
+        person_picks=[{"asset_id": li, "is_lead": False},
+                      {"asset_id": zhang, "is_lead": True}],
+        contract_picks=[{"asset_id": ca, "section": 1},
+                        {"asset_id": cb, "section": 1},
+                        {"asset_id": cc, "section": 2}])
+    persons = data["persons"]
+    assert persons[0]["perfs_text"] == "项目A（2024）\n项目C（2022）"  # 张三
+    assert persons[1]["perfs_text"] == ""                            # 李四无业绩
+    # 旧键兼容：lead_perfs_text = 负责人的 perfs_text
+    assert data["lead_perfs_text"] == persons[0]["perfs_text"]

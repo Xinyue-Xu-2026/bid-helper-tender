@@ -56,14 +56,18 @@ def _textbox_texts(doc, subs=None) -> list:
 def verify_draft_fill(draft_path: str, out_path: str,
                       bound_table_indices: set, replace_params: dict,
                       swapped_toc: bool = False,
-                      bound_paragraph_indices: set = None) -> dict:
+                      bound_paragraph_indices: set = None,
+                      table_insertions: dict = None) -> dict:
     """校验产物相对底稿的未绑定区域是否被改动。
 
     bound_table_indices：已确认绑定（允许填充改动）的顶层表下标集合，
     这些表整体跳过比对（其内部段落本就不参与正文段比对）。
     bound_paragraph_indices：授权页等经用户确认允许正文填充改动的段落
-    下标集合（toc/分节符过滤后的段落序列坐标系，与比对循环一致），
+    下标集合（toc/分节符/空段过滤后的段落序列坐标系，与比对循环一致），
     这些段落整体跳过比对。默认空集。
+    table_insertions：{底稿表下标: 其后插入的克隆表数}（resume_each
+    一人一表整表克隆，V1.2 7.4）；克隆表无底稿对应，计入产物表数量
+    等式且不参与比对，底稿表按下标位移映射到产物表。默认空。
     replace_params：{"project_no","project_name","doc_date","tenderer",
     "bidder_name","section_name","section_no","synonyms"}，与导出时一致；
     空/某键空 → compute_text_subs 相应无规则，套用无害。
@@ -104,13 +108,26 @@ def verify_draft_fill(draft_path: str, out_path: str,
     bound = set(bound_table_indices or set())
     bound_paras = set(bound_paragraph_indices or set())
 
-    # 顶层表数量：bound 之外的未绑定表数必须一致（总数一致即等价）
-    if len(d_tables) != len(o_tables):
+    # 顶层表数量：bound 之外的未绑定表数必须一致；resume_each 克隆表
+    # （table_insertions）无底稿对应，计入产物数量等式且不参与比对
+    insertions = {int(k): int(v) for k, v in (table_insertions or {}).items()}
+    total_added = sum(insertions.values())
+    if len(o_tables) != len(d_tables) + total_added:
         issues.append(
-            f"顶层表格数量不一致：底稿 {len(d_tables)} 张，产物 {len(o_tables)} 张")
-    for i, (d_tab, o_tab) in enumerate(zip(d_tables, o_tables)):
+            f"顶层表格数量不一致：底稿 {len(d_tables)} 张，"
+            f"产物 {len(o_tables)} 张（含登记克隆 {total_added} 张）")
+    # 底稿表下标 → 产物表下标（克隆插入使其后表整体位移）
+    draft_to_out, shift = {}, 0
+    for i in range(len(d_tables)):
+        draft_to_out[i] = i + shift
+        shift += insertions.get(i, 0)
+    for i, d_tab in enumerate(d_tables):
         if i in bound:
             continue
+        oi = draft_to_out[i]
+        if oi >= len(o_tables):
+            continue  # 数量不一致已报，跳过防越界
+        o_tab = o_tables[oi]
         checked_tables += 1
         # 底稿侧套用与导出相同的替换规则（_replace_stale_text 会改写
         # 未绑定表单元格内的残留编号/名称/日期），产物侧原样比对
@@ -119,11 +136,13 @@ def verify_draft_fill(draft_path: str, out_path: str,
 
     # 段落：toc 样式段两侧恒跳过（_replace_stale_text 从不触碰 toc 段；
     # swapped_toc 时产物 toc 段整组换为 TOC 域，同样被跳过覆盖）；
-    # 分节符段落（P2 拆节插入）同样跳过
+    # 分节符段落（P2 拆节插入）同样跳过；空段（无文本）不携带内容、
+    # 两侧恒跳过——克隆表分隔空段（resume_each 一人一表插入）等结构性
+    # 变化不视为内容改动，bound_paragraph_indices 坐标系同为「非空段」
     d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
-               and not _is_section_break_para(p)]
+               and not _is_section_break_para(p) and _para_text(p)]
     o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
-               and not _is_section_break_para(p)]
+               and not _is_section_break_para(p) and _para_text(p)]
     if len(d_paras) != len(o_paras):
         issues.append(
             f"段落数量不一致：底稿 {len(d_paras)} 段，产物 {len(o_paras)} 段")

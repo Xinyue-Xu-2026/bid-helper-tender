@@ -14,6 +14,7 @@ from pathlib import Path
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm
+from docx.table import Table
 
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
@@ -79,11 +80,22 @@ def _fill_table_semantic(table, columns: dict, sem_rows: list,
     return written
 
 
+def _clone_table_after(table):
+    """XML 级 deepcopy 整表并插到该表之后（后随空段落分隔），完整保留
+    行列数/合并单元格/行高/样式（一人一表克隆用，绝不重建结构）。"""
+    tbl = table._tbl
+    new = deepcopy(tbl)
+    sep = tbl.makeelement(qn("w:p"), {})
+    tbl.addnext(sep)
+    tbl.addnext(new)
+    return Table(new, table._parent)
+
+
 def _fill_resume_table(table, label_to_sem: dict, sem: dict,
-                       lead_perfs_text: str) -> int:
+                       perfs_text: str) -> int:
     """简历键值表填充：逐行逐格，规范化格文本（去首尾空白 + 去尾部
     "："或":"）命中 label_to_sem → 写其右侧首个不同 _tc 的格子（无右格跳过）；
-    语义键为 lead_perfs 时写 lead_perfs_text。返回写入格数。"""
+    语义键为 lead_perfs 时写 perfs_text（随人传入）。返回写入格数。"""
     written = 0
     for row in table.rows:
         cells = row.cells
@@ -104,7 +116,7 @@ def _fill_resume_table(table, label_to_sem: dict, sem: dict,
                     break
             if target is None:
                 continue
-            value = (lead_perfs_text if sem_key == "lead_perfs"
+            value = (perfs_text if sem_key == "lead_perfs"
                      else (sem or {}).get(sem_key, ""))
             _set_cell_text(target, value or "")
             written += 1
@@ -214,7 +226,8 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
     - 盖公章行后的「年月日」行 → 填投标文件日期；
     - 「附：…身份证…电子扫描件」段末追加身份证正反面图片。
     其余段落（承诺函等）一律不动。改动段记入 bound（verify 同坐标系
-    段下标），图片追加不计文本故不需 bound。"""
+    段下标：toc/分节符/空段过滤后的「非空段」序列），图片追加不计文本
+    故不需 bound。"""
     legal = auth.get("legal_rep") or {}
     agent = auth.get("agent") or {}
     legal_name = str(legal.get("name") or "").strip()
@@ -257,8 +270,11 @@ def _auth_signature_block(doc, bound, report, auth) -> None:
                 inserted += 1
         return inserted
 
+    # 与 verify 段落比对同坐标系：toc/分节符/空段过滤后的「非空段」序列
+    # （空段不携带内容；克隆表分隔空段等结构插入不影响本坐标系）
     paras = [p for p in doc.paragraphs
-             if not _is_toc_paragraph(p) and not _is_section_break_para(p)]
+             if not _is_toc_paragraph(p) and not _is_section_break_para(p)
+             and _para_text(p)]
 
     def _filter_index(p) -> int:
         return paras.index(p)
@@ -389,6 +405,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
 
     image_slots = []
     bound_indices = set()
+    table_insertions = {}   # {底稿表下标: 插入克隆数}（resume_each 一人一表，
+                            # 填充端与校验端共用同一登记）
     for binding in (bindings or {}).get("tables") or []:
         if not binding.get("confirmed"):
             continue
@@ -403,7 +421,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
             continue
         # 仅 fill 实际会改动的表豁免防篡改校验；quote（手工填写）与未知
         # 角色不改动 → 不豁免，未绑定表同等受校验保护
-        if role in ("person_roster", "perf_list", "lead_resume", "image_slot"):
+        if role in ("person_roster", "perf_list", "lead_resume",
+                    "resume_each", "image_slot"):
             bound_indices.add(idx)
         table = tables[idx]
         if role == "person_roster":
@@ -428,9 +447,44 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                 written = _fill_resume_table(
                     table, binding.get("columns") or {},
                     lead.get("sem") or {},
-                    str(data.get("lead_perfs_text") or ""))
+                    str(lead.get("perfs_text")
+                        or data.get("lead_perfs_text") or ""))
             report["filled"].append(
                 {"table_index": idx, "role": role, "rows": written})
+        elif role == "resume_each":
+            if binding.get("mode") == "per_person":
+                # 一人一表（V1.2 7.4）：第 1 份填原样表，其余先克隆再填；
+                # 克隆全部基于填充前的样表，链式 addnext 保持人员顺序
+                picked = _scope_persons(persons,
+                                        binding.get("person_scope") or "all")
+                targets = [table]
+                for _ in range(max(0, len(picked) - 1)):
+                    targets.append(_clone_table_after(targets[-1]))
+                total = 0
+                for t, p in zip(targets, picked):
+                    perfs = str(p.get("perfs_text") or (
+                        data.get("lead_perfs_text")
+                        if p.get("is_lead") else "") or "")
+                    total += _fill_resume_table(
+                        t, binding.get("columns") or {},
+                        p.get("sem") or {}, perfs)
+                if len(picked) > 1:
+                    table_insertions[idx] = len(picked) - 1
+                report["filled"].append(
+                    {"table_index": idx, "role": role, "rows": total,
+                     "cloned": len(picked)})
+            else:
+                # 未开 per_person：等同 lead_resume（单份 lead 填充，旧行为）
+                lead = next((p for p in persons if p.get("is_lead")), None)
+                written = 0
+                if lead is not None:
+                    written = _fill_resume_table(
+                        table, binding.get("columns") or {},
+                        lead.get("sem") or {},
+                        str(lead.get("perfs_text")
+                            or data.get("lead_perfs_text") or ""))
+                report["filled"].append(
+                    {"table_index": idx, "role": role, "rows": written})
         elif role == "quote":
             report["skipped"].append(
                 {"table_index": idx, "role": role, "reason": "报价表需手工填写"})
@@ -453,5 +507,6 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                         "section_name": section_name,
                         "section_no": section_no},
         swapped_toc=swap_toc,
-        bound_paragraph_indices=auth_bound)
+        bound_paragraph_indices=auth_bound,
+        table_insertions=table_insertions)
     return report
