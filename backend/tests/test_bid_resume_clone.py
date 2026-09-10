@@ -115,6 +115,52 @@ def test_classifier_resume_each_vs_lead_resume(tmp_path):
     assert classify_tables(str(path3))[0]["role"] == "lead_resume"
 
 
+def test_no_adjacent_tables_after_clone(tmp_path):
+    """修复轮回归：克隆 3 人后产物 body 中任意相邻两兄弟不得都是 w:tbl
+    （相邻 w:tbl 会被 Word 合并渲染为一张表）。"""
+    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
+    doc = Document(); _sample_resume_table(doc); doc.save(src)
+    persons = _persons() + [
+        {"name": "王五", "is_lead": False, "role": "组员",
+         "sem": {"name": "王五"}, "perfs_text": "", "fields": {}}]
+    data = {"persons": persons, "contracts": [], "lead_perfs_text": ""}
+    fill_draft(str(src), str(dst), _bindings(), data)
+    out = Document(str(dst))
+    assert len(out.tables) == 3
+    tags = [ch.tag for ch in out.element.body.iterchildren()]
+    for a, b in zip(tags, tags[1:]):
+        assert not (a == qn("w:tbl") and b == qn("w:tbl")), \
+            "相邻 w:tbl 之间必须有 w:p 分隔"
+
+
+def test_clone_shift_mapping_sentinel_table(tmp_path):
+    """位移映射回归：底稿 [样表, 哨兵表]，克隆 2 人后产物哨兵表内容保留；
+    篡改哨兵表单元格 → verify.ok=False 且 issue 指向底稿下标表格[1]
+    （克隆点之后的底稿表经 draft_to_out 正确穿透）。"""
+    from app.core.bid_verify import verify_draft_fill
+    src = tmp_path / "draft.docx"; dst = tmp_path / "out.docx"
+    doc = Document()
+    _sample_resume_table(doc)
+    sentinel = doc.add_table(1, 1)
+    sentinel.cell(0, 0).text = "哨兵内容"
+    doc.save(src)
+    data = {"persons": _persons(), "contracts": [],
+            "lead_perfs_text": "甲项目（2024）"}
+    report = fill_draft(str(src), str(dst), _bindings(), data)
+    out = Document(str(dst))
+    assert len(out.tables) == 3                    # 样表 + 克隆 + 哨兵
+    assert out.tables[2].cell(0, 0).text == "哨兵内容"
+    assert report["verify"]["ok"] is True
+    # 篡改哨兵表 → verify 必须逮住并指向底稿下标 1
+    doc2 = Document(str(dst))
+    doc2.tables[2].cell(0, 0).text = "被篡改的哨兵"
+    doc2.save(str(dst))
+    result = verify_draft_fill(str(src), str(dst), {0}, {},
+                               table_insertions={0: 1})
+    assert result["ok"] is False
+    assert any("表格[1]" in issue for issue in result["issues"])
+
+
 def test_fill_strips_vmerge_from_donor(tmp_path):
     """7.3 回归：donor 数据行含 vMerge 元素时，克隆写出的数据行不得携带
     vMerge（否则会延续/开启纵向合并区，破坏结构）。"""

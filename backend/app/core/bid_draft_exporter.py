@@ -80,15 +80,21 @@ def _fill_table_semantic(table, columns: dict, sem_rows: list,
     return written
 
 
-def _clone_table_after(table):
-    """XML 级 deepcopy 整表并插到该表之后（后随空段落分隔），完整保留
-    行列数/合并单元格/行高/样式（一人一表克隆用，绝不重建结构）。"""
-    tbl = table._tbl
+def _clone_table_after(anchor_table):
+    """在 anchor_table 之后插入一个空段 + 克隆表，返回克隆 Table。
+    anchor_table 为当前链尾（首次=样表，后续=上一份克隆），保证结果
+    序列 T0, sep, C1, sep, C2, ...——任意两张相邻 w:tbl 之间都有空段
+    分隔（相邻 w:tbl 会被 Word 合并渲染为一张表）。克隆为 XML 级
+    deepcopy，完整保留行列数/合并单元格/行高/样式。"""
+    tbl = anchor_table._tbl
     new = deepcopy(tbl)
     sep = tbl.makeelement(qn("w:p"), {})
     tbl.addnext(sep)
-    tbl.addnext(new)
-    return Table(new, table._parent)
+    sep.addnext(new)
+    nxt = new.getnext()
+    if nxt is not None and nxt.tag == qn("w:tbl"):
+        new.addnext(new.makeelement(qn("w:p"), {}))
+    return Table(new, anchor_table._parent)
 
 
 def _fill_resume_table(table, label_to_sem: dict, sem: dict,
@@ -454,12 +460,15 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         elif role == "resume_each":
             if binding.get("mode") == "per_person":
                 # 一人一表（V1.2 7.4）：第 1 份填原样表，其余先克隆再填；
-                # 克隆全部基于填充前的样表，链式 addnext 保持人员顺序
+                # 克隆全部基于填充前的样表，逐级以链尾为 anchor（任意相邻
+                # 两表之间必有空段分隔），人员顺序与 picked 一致
                 picked = _scope_persons(persons,
                                         binding.get("person_scope") or "all")
                 targets = [table]
+                anchor = table
                 for _ in range(max(0, len(picked) - 1)):
-                    targets.append(_clone_table_after(targets[-1]))
+                    anchor = _clone_table_after(anchor)
+                    targets.append(anchor)
                 total = 0
                 for t, p in zip(targets, picked):
                     perfs = str(p.get("perfs_text") or (

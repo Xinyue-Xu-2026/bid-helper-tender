@@ -138,7 +138,9 @@ def verify_draft_fill(draft_path: str, out_path: str,
     # swapped_toc 时产物 toc 段整组换为 TOC 域，同样被跳过覆盖）；
     # 分节符段落（P2 拆节插入）同样跳过；空段（无文本）不携带内容、
     # 两侧恒跳过——克隆表分隔空段（resume_each 一人一表插入）等结构性
-    # 变化不视为内容改动，bound_paragraph_indices 坐标系同为「非空段」
+    # 变化不视为内容改动；注意仅含图片（无文本）的段落同属空段，
+    # 不参与段落比对（图片改动由表格/文本框维度覆盖不到，属已知豁免），
+    # bound_paragraph_indices 坐标系同为「非空段」
     d_paras = [p for p in d_paras if not _is_toc_paragraph(p)
                and not _is_section_break_para(p) and _para_text(p)]
     o_paras = [p for p in o_paras if not _is_toc_paragraph(p)
