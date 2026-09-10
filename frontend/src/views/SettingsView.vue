@@ -3,8 +3,8 @@ import { onMounted, ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import {
-  getFieldConfig, getImportSettings, getSettings, saveFieldConfig, saveImportSettings,
-  saveSettings, testSettings,
+  getFieldConfig, getImportSettings, getPlaceholderSynonyms, getSettings, saveFieldConfig,
+  saveImportSettings, savePlaceholderSynonyms, saveSettings, testSettings,
 } from '../api'
 
 const form = ref({ api_key: '', model: 'kimi-k3' })
@@ -14,6 +14,7 @@ onMounted(async () => {
   form.value = await getSettings()
   loadImportSettings()
   loadFieldConfig()
+  loadSynonyms()
 })
 
 async function save() {
@@ -92,6 +93,45 @@ async function saveImport() {
     ElMessage.error('保存失败：' + (e.response?.data?.detail || e.message))
   } finally {
     importSaving.value = false
+  }
+}
+
+// ---------- 占位符同义词（商务标底稿占位符：别名 → 规范标签，全量覆盖保存） ----------
+const SYNONYM_LABEL_OPTIONS = ['项目名称', '招标人', '投标人名称', '项目编号', '招标编号', '标段名称', '标段编号', '日期']
+
+const synonymRows = ref([])
+const synonymSaving = ref(false)
+
+async function loadSynonyms() {
+  try {
+    const r = await getPlaceholderSynonyms()
+    synonymRows.value = Object.entries(r || {}).map(([alias, label]) => ({ alias, label }))
+  } catch {
+    // 后端未就绪时留空，可从零开始配置
+  }
+}
+
+async function saveSynonyms() {
+  // 空别名行直接忽略；有别名但未选规范标签的行视为录入不完整，提示后中止
+  if (synonymRows.value.some(r => r.alias.trim() && !r.label)) {
+    ElMessage.warning('存在未选择规范标签的别名，请补全或删除后再保存')
+    return
+  }
+  synonymSaving.value = true
+  try {
+    const mapping = {}
+    for (const r of synonymRows.value) {
+      const alias = r.alias.trim()
+      if (alias && r.label) mapping[alias] = r.label
+    }
+    const r = await savePlaceholderSynonyms(mapping)
+    // 以服务端返回（规范化后）为准刷新
+    synonymRows.value = Object.entries(r || mapping).map(([alias, label]) => ({ alias, label }))
+    ElMessage.success('占位符同义词已保存')
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    synonymSaving.value = false
   }
 }
 
@@ -247,6 +287,38 @@ async function saveFields() {
         <el-button type="primary" :loading="importSaving" @click="saveImport">保存导入配置</el-button>
       </el-form-item>
     </el-form>
+  </el-card>
+
+  <el-card style="max-width: 720px; margin-bottom: 16px">
+    <template #header>占位符同义词</template>
+    <div class="mapping-tip" style="margin-bottom: 10px">
+      别名用于底稿中与规范标签不同的写法（如「采购人」视为「招标人」）；导出与校验共用同一同义词库。
+    </div>
+    <el-table :data="synonymRows" size="small">
+      <el-table-column label="别名">
+        <template #default="{ row }">
+          <el-input v-model="row.alias" size="small" placeholder="如：采购人" />
+        </template>
+      </el-table-column>
+      <el-table-column label="规范标签" width="180">
+        <template #default="{ row }">
+          <el-select v-model="row.label" size="small" placeholder="选择规范标签" style="width: 100%">
+            <el-option v-for="t in SYNONYM_LABEL_OPTIONS" :key="t" :label="t" :value="t" />
+          </el-select>
+        </template>
+      </el-table-column>
+      <el-table-column label="" width="70">
+        <template #default="{ $index }">
+          <el-button size="small" type="danger" link
+                     @click="synonymRows.splice($index, 1)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <el-button size="small" style="margin-top: 8px"
+               @click="synonymRows.push({ alias: '', label: '' })">添加一行</el-button>
+    <div style="margin-top: 16px">
+      <el-button type="primary" :loading="synonymSaving" @click="saveSynonyms">保存同义词</el-button>
+    </div>
   </el-card>
 
   <el-card style="max-width: 920px">
