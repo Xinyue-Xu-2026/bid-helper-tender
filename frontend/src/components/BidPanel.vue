@@ -641,7 +641,7 @@ async function onSaveBindings() {
         perf_scope: r.perf_scope,
         label_kind: r.label_kind,
         person: r.person,
-        header_rows: Number(r.header_rows) >= 1 ? Number(r.header_rows) : 1,
+        header_rows: Number(r.header_rows) >= 1 ? Math.min(4, Number(r.header_rows)) : 1,
         mode: r.role === 'resume_each' && r.mode === 'per_person' ? 'per_person' : '',
         confirmed: true,
       })),
@@ -1043,12 +1043,11 @@ onMounted(() => { load(); loadDraft() })
           <h4 style="margin: 12px 0 4px">图片</h4>
           <div v-for="(im, i) in fillReport.images" :key="i" style="font-size: 13px; margin: 2px 0">
             <template v-if="im.ok">#{{ im.table_index }} {{ im.person }} · {{ im.label_kind }}</template>
-            <template v-else>
-              <span style="color: #f56c6c; font-weight: 500">
-                #{{ im.table_index }} {{ im.person }} · {{ im.label_kind }} 插入失败：{{ im.reason || '未知原因' }}
-              </span>
-              <span v-if="im.too_long" style="color: #f56c6c">（扫描件过长，建议拆分）</span>
-            </template>
+            <span v-else style="color: #f56c6c; font-weight: 500">
+              #{{ im.table_index }} {{ im.person }} · {{ im.label_kind }} 插入失败：{{ im.reason || '未知原因' }}
+            </span>
+            <!-- 高度截顶提示：成功（too_long）与失败行都可能出现，故放在 ok 判断之外 -->
+            <span v-if="im.too_long" :style="`color: ${im.ok ? '#e6a23c' : '#f56c6c'}`">（扫描件过长，建议拆分）</span>
           </div>
         </template>
 
