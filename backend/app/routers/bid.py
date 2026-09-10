@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app import config
+from app import settings_store
 from app.core.bid_draft_exporter import fill_draft
 from app.core.bid_exporter import build_bid_docx, build_bid_xlsx
 from app.core.bid_template_exporter import build_bid_docx_from_template
@@ -170,7 +171,8 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
                             bidder_name=(body.bidder_name or "").strip(),
                             auth=auth,
                             section_name=(body.section_name or "").strip(),
-                            section_no=(body.section_no or "").strip())
+                            section_no=(body.section_no or "").strip(),
+                            synonyms=settings_store.get_placeholder_synonyms())
         headers["X-Fill-Report"] = quote(
             json.dumps(report, ensure_ascii=False))
     else:

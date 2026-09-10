@@ -114,3 +114,26 @@ def test_scan_placeholders_reports_match_and_suspicious():
     assert any(m["label"] == "招标人" and m["value"] == "某中心"
                for m in res["matched"])
     assert res["suspicious"], "孤立下划线应列入可疑清单"
+
+
+def test_fill_draft_synonyms_fill_alias(tmp_path):
+    """导出端接入同义词库（V1.2 4.5）：synonyms={"甲方":"招标人"} 时底稿
+    "甲方：____"被填充且 verify 同源不误报；不传 synonyms 时不填。"""
+    from app.core.bid_draft_exporter import fill_draft
+    doc = Document()
+    doc.add_paragraph("甲方：____")
+    draft = tmp_path / "d.docx"
+    doc.save(str(draft))
+    out = tmp_path / "o.docx"
+    report = fill_draft(str(draft), str(out),
+                        {"tables": [], "swap_toc": False}, {},
+                        tenderer="某中心", synonyms={"甲方": "招标人"})
+    texts = [p.text for p in Document(str(out)).paragraphs]
+    assert "甲方：某中心" in texts
+    assert report["verify"]["ok"] is True
+
+    out2 = tmp_path / "o2.docx"
+    fill_draft(str(draft), str(out2), {"tables": [], "swap_toc": False}, {},
+               tenderer="某中心")
+    texts2 = [p.text for p in Document(str(out2)).paragraphs]
+    assert "甲方：____" in texts2

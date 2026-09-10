@@ -443,3 +443,26 @@ def test_export_section_empty_skips_fill(client, db_path, tmp_path):
     assert "（标段名称）" in texts
     row = Database(db_path).get_project(pid)
     assert row["section_name"] == "" and row["section_no"] == ""
+
+
+def test_export_uses_placeholder_synonyms(client, db_path, tmp_path):
+    """PUT 同义词库（甲方→招标人）后导出：底稿"甲方：____"被填，
+    且 verify 同源不误报（V1.2 4.5 导出端接入同义词库）。"""
+    pid = _make_project(client)
+    doc = Document()
+    doc.add_paragraph("甲方：____")
+    p = tmp_path / "draft.docx"
+    doc.save(str(p))
+    Database(db_path).create_bid_template(pid, "底稿", str(p))
+    r = client.put("/api/settings/placeholder-synonyms",
+                   json={"甲方": "招标人"})
+    assert r.status_code == 200
+    person_id = _make_person(client, "张三")
+    r = client.post(_bid_url(pid, "/export-template"), json={
+        "persons": [{"asset_id": person_id, "is_lead": True}],
+        "contracts": [], "tenderer": "某中心"})
+    assert r.status_code == 200
+    texts = [p.text for p in Document(BytesIO(r.content)).paragraphs]
+    assert "甲方：某中心" in texts
+    report = json.loads(unquote(r.headers["x-fill-report"]))
+    assert report["verify"]["ok"] is True
