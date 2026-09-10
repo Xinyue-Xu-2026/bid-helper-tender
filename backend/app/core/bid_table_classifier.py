@@ -324,6 +324,9 @@ def _classify_table(table, table_index: int, heading: str,
             if any(m in col0_text for m in RESUME_EACH_MARKERS):
                 item["role"] = "resume_each"
                 item["columns"] = columns
+                # 一人一表默认整表克隆（V1.2 7.4：选 N 人 → N 张结构原样表；
+                # 用户仍可在确认绑定时改回 ""）
+                item["mode"] = "per_person"
                 item["confidence"] = "高" if len(hits) >= 5 else "低"
                 return item
             if ncols <= 3 or ncols >= 10:

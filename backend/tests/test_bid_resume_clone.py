@@ -106,13 +106,16 @@ def test_classifier_resume_each_vs_lead_resume(tmp_path):
     path2 = tmp_path / "d2.docx"; doc2.save(path2)
     items2 = classify_tables(str(path2))
     assert items2[0]["role"] == "resume_each"
-    # 无标记键值表 → lead_resume（旧行为不回归）
+    assert items2[0]["mode"] == "per_person"  # 一人一表默认整表克隆（可改回）
+    # 无标记键值表 → lead_resume（旧行为不回归，mode 保持默认空）
     doc3 = Document()
     t3 = doc3.add_table(4, 2)
     for r, label in enumerate(["姓名", "性别", "职称", "学历"]):
         t3.rows[r].cells[0].text = label
     path3 = tmp_path / "d3.docx"; doc3.save(path3)
-    assert classify_tables(str(path3))[0]["role"] == "lead_resume"
+    item3 = classify_tables(str(path3))[0]
+    assert item3["role"] == "lead_resume"
+    assert item3["mode"] == ""
 
 
 def test_no_adjacent_tables_after_clone(tmp_path):
