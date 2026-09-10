@@ -14,7 +14,7 @@ from pathlib import Path
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm
-from docx.table import Table
+from docx.table import Table, _Cell
 
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
@@ -95,6 +95,98 @@ def _clone_table_after(anchor_table):
     if nxt is not None and nxt.tag == qn("w:tbl"):
         new.addnext(new.makeelement(qn("w:p"), {}))
     return Table(new, anchor_table._parent)
+
+
+def expand_table_matrix(table) -> list:
+    """把 vMerge/gridSpan 展开为逻辑网格：matrix[r][c] = 该逻辑格的
+    origin w:tc 元素引用（横向跨列各格指向同一 tc；纵向续行格指向
+    restart tc）。用于大网格简历表的逻辑坐标填充（不重建表）。"""
+    matrix = []
+    col_origin = {}  # 网格列 → 最近 vMerge=restart 的 origin tc
+    for tr in table._tbl.tr_lst:
+        row = []
+        col = 0
+        for tc in tr.tc_lst:
+            span = 1
+            vmerge = None
+            tcPr = tc.tcPr
+            if tcPr is not None:
+                gs = tcPr.find(qn("w:gridSpan"))
+                if gs is not None:
+                    try:
+                        span = max(1, int(gs.get(qn("w:val")) or 1))
+                    except ValueError:
+                        span = 1
+                vm = tcPr.find(qn("w:vMerge"))
+                if vm is not None:
+                    vmerge = vm.get(qn("w:val")) or "continue"
+            for k in range(span):
+                if vmerge == "continue":
+                    row.append(col_origin.get(col + k, tc))
+                else:
+                    row.append(tc)
+                    if vmerge == "restart":
+                        col_origin[col + k] = tc
+                    else:
+                        col_origin.pop(col + k, None)
+            col += span
+        matrix.append(row)
+    return matrix
+
+
+def _fill_resume_grid_mesh(table, label_to_sem: dict, sem: dict,
+                           perfs_text: str) -> int:
+    """大网格简历表矩阵填充（V1.2 7.2）：按 expand_table_matrix 展开逻辑
+    网格，label 格（规范化命中 label_to_sem，每个 origin 只处理一次）→
+    同行右侧首个不同 origin 格，无右邻则下方行同列首个不同 origin 格；
+    语义键 lead_perfs 写 perfs_text。返回写入格数。"""
+    matrix = expand_table_matrix(table)
+    written = 0
+    seen = []
+    for r, row in enumerate(matrix):
+        for c, tc in enumerate(row):
+            if any(tc is t for t in seen):
+                continue
+            seen.append(tc)
+            label = (_Cell(tc, table).text or "").strip().rstrip("：:").strip()
+            sem_key = (label_to_sem or {}).get(label)
+            if not sem_key:
+                continue
+            target = None
+            for cc in range(c + 1, len(row)):
+                if row[cc] is not tc:
+                    target = row[cc]
+                    break
+            if target is None:
+                for rr in range(r + 1, len(matrix)):
+                    if c < len(matrix[rr]) and matrix[rr][c] is not tc:
+                        target = matrix[rr][c]
+                        break
+            if target is None:
+                continue
+            value = (perfs_text if sem_key == "lead_perfs"
+                     else (sem or {}).get(sem_key, ""))
+            _set_cell_text(_Cell(target, table), value or "")
+            written += 1
+    return written
+
+
+def _is_grid_resume(table) -> bool:
+    """大网格简历表判定：列数 ≥10 或合并格密集（vMerge/gridSpan 合计 ≥3 处）。"""
+    if len(table.columns) >= 10:
+        return True
+    merges = len(table._tbl.findall(f".//{qn('w:vMerge')}")) \
+        + len(table._tbl.findall(f".//{qn('w:gridSpan')}"))
+    return merges >= 3
+
+
+def _fill_resume_auto(table, label_to_sem: dict, sem: dict,
+                      perfs_text: str) -> tuple:
+    """简历表填充分流：大网格 → 矩阵填充（保留原合并结构）；中小表 →
+    原 _fill_resume_table。返回 (写入格数, 是否网格模式)。"""
+    if _is_grid_resume(table):
+        return _fill_resume_grid_mesh(table, label_to_sem, sem, perfs_text), True
+    return _fill_resume_table(table, label_to_sem, sem, perfs_text), False
 
 
 def _fill_resume_table(table, label_to_sem: dict, sem: dict,
@@ -449,19 +541,23 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         elif role == "lead_resume":
             lead = next((p for p in persons if p.get("is_lead")), None)
             written = 0
+            grid = False
             if lead is not None:
-                written = _fill_resume_table(
+                written, grid = _fill_resume_auto(
                     table, binding.get("columns") or {},
                     lead.get("sem") or {},
                     str(lead.get("perfs_text")
                         or data.get("lead_perfs_text") or ""))
-            report["filled"].append(
-                {"table_index": idx, "role": role, "rows": written})
+            entry = {"table_index": idx, "role": role, "rows": written}
+            if grid:
+                entry["mode"] = "grid"
+            report["filled"].append(entry)
         elif role == "resume_each":
             if binding.get("mode") == "per_person":
                 # 一人一表（V1.2 7.4）：第 1 份填原样表，其余先克隆再填；
                 # 克隆全部基于填充前的样表，逐级以链尾为 anchor（任意相邻
-                # 两表之间必有空段分隔），人员顺序与 picked 一致
+                # 两表之间必有空段分隔），人员顺序与 picked 一致；
+                # 大网格每份按矩阵填充（V1.2 7.2）
                 picked = _scope_persons(persons,
                                         binding.get("person_scope") or "all")
                 targets = [table]
@@ -470,30 +566,37 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                     anchor = _clone_table_after(anchor)
                     targets.append(anchor)
                 total = 0
+                grid = False
                 for t, p in zip(targets, picked):
                     perfs = str(p.get("perfs_text") or (
                         data.get("lead_perfs_text")
                         if p.get("is_lead") else "") or "")
-                    total += _fill_resume_table(
+                    w, grid = _fill_resume_auto(
                         t, binding.get("columns") or {},
                         p.get("sem") or {}, perfs)
+                    total += w
                 if len(picked) > 1:
                     table_insertions[idx] = len(picked) - 1
-                report["filled"].append(
-                    {"table_index": idx, "role": role, "rows": total,
-                     "cloned": len(picked)})
+                entry = {"table_index": idx, "role": role, "rows": total,
+                         "cloned": len(picked)}
+                if grid:
+                    entry["mode"] = "grid"
+                report["filled"].append(entry)
             else:
                 # 未开 per_person：等同 lead_resume（单份 lead 填充，旧行为）
                 lead = next((p for p in persons if p.get("is_lead")), None)
                 written = 0
+                grid = False
                 if lead is not None:
-                    written = _fill_resume_table(
+                    written, grid = _fill_resume_auto(
                         table, binding.get("columns") or {},
                         lead.get("sem") or {},
                         str(lead.get("perfs_text")
                             or data.get("lead_perfs_text") or ""))
-                report["filled"].append(
-                    {"table_index": idx, "role": role, "rows": written})
+                entry = {"table_index": idx, "role": role, "rows": written}
+                if grid:
+                    entry["mode"] = "grid"
+                report["filled"].append(entry)
         elif role == "quote":
             report["skipped"].append(
                 {"table_index": idx, "role": role, "reason": "报价表需手工填写"})

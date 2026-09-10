@@ -40,8 +40,10 @@ bindings JSON schema（本模块为权威定义，T7 导出与 T9 存储/回显�
    "拟派岗位"列——两者关键词不可混淆（label 关键词不含"拟派/本岗位"）。
 4. person 命中数 ≥ 2 且 ≥ perf 命中数 → person_roster；否则 perf 命中数 ≥ 2
    → perf_list。confidence：命中 ≥ 3 → 高，2 → 低。
-5. 表格 2~3 列且第 0 列逐行（数据行文本）命中 RESUME_LABELS ≥ 3 个不同标签
-   → lead_resume；columns = {标签原文: 语义键}（未入 RESUME_LABEL_TO_SEM
+5. 键值简历样表（第 0 列逐行命中 RESUME_LABELS ≥3 个不同标签）：含
+   「拟在本项目任职/主要工作经历/执业资格证书名称」任一 → resume_each
+   （2~5 列或 ≥10 列大网格，V1.2 7.2/7.4）；否则 2~3 列或大网格 →
+   lead_resume；columns = {标签原文: 语义键}（未入 RESUME_LABEL_TO_SEM
    的标签不进 columns）。confidence 高（≥5）/ 低。
 6. 其余 → ignore（confidence 低）。
 
@@ -308,10 +310,12 @@ def _classify_table(table, table_index: int, heading: str,
         item["perf_scope"] = "lead" if "负责人" in heading else "all"
         return item
 
-    # 规则 4.6：键值样表含「一人一表」标记 → resume_each（V1.2 7.4，
-    # 排在 lead_resume 之前；2~5 列，简历标签命中 ≥3 且 col0 文本含
-    # 拟在本项目任职/主要工作经历/执业资格证书名称 任一）
-    if 2 <= len(table.columns) <= 5:
+    # 规则 4.6/5：键值简历样表（2~5 列；V1.2 7.2 起大网格 ≥10 列同样识别，
+    # 4~9 列中小表分类不变）。含「一人一表」标记（拟在本项目任职/主要工作
+    # 经历/执业资格证书名称 任一）→ resume_each；否则 ≤3 列或大网格 →
+    # lead_resume（旧行为）。
+    ncols = len(table.columns)
+    if (2 <= ncols <= 5) or ncols >= 10:
         hits, columns = _match_resume(table)
         if len(hits) >= 3:
             col0_text = "".join(
@@ -322,15 +326,11 @@ def _classify_table(table, table_index: int, heading: str,
                 item["columns"] = columns
                 item["confidence"] = "高" if len(hits) >= 5 else "低"
                 return item
-
-    # 规则 5：2~3 列且第 0 列逐行命中简历标签 ≥ 3 → lead_resume
-    if 2 <= len(table.columns) <= 3:
-        hits, columns = _match_resume(table)
-        if len(hits) >= 3:
-            item["role"] = "lead_resume"
-            item["columns"] = columns
-            item["confidence"] = "高" if len(hits) >= 5 else "低"
-            return item
+            if ncols <= 3 or ncols >= 10:
+                item["role"] = "lead_resume"
+                item["columns"] = columns
+                item["confidence"] = "高" if len(hits) >= 5 else "低"
+                return item
 
     # 规则 6：拿不准一律 ignore
     return item

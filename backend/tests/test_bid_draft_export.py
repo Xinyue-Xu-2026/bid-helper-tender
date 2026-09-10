@@ -496,3 +496,101 @@ def test_two_row_header_no_data_rows(tmp_path):
     # 克隆自表头的 donor 已剔除 vMerge
     for cell in table.rows[2].cells:
         assert cell._tc.tcPr.find(qn("w:vMerge")) is None
+
+
+# ---------- 13. 简历大网格矩阵填充（V1.2 7.2，P3） ----------
+
+from app.core.bid_draft_exporter import (
+    expand_table_matrix, _fill_resume_grid_mesh)
+
+
+def _grid_table(doc):
+    # 2x2 表：标签格在 (0,0)，值在 (0,1)；(1,0) 标签，值在 (1,1)
+    t = doc.add_table(2, 2)
+    t.rows[0].cells[0].text = "姓名"
+    t.rows[1].cells[0].text = "主要工作经历"
+    return t
+
+
+def test_expand_table_matrix_identity_for_plain_grid():
+    doc = Document(); t = _grid_table(doc)
+    m = expand_table_matrix(t)
+    assert len(m) == 2 and len(m[0]) == 2
+    assert m[0][0] == m[0][0]  # origin 稳定
+
+
+def test_grid_mesh_writes_right_and_below():
+    doc = Document(); t = _grid_table(doc)
+    written = _fill_resume_grid_mesh(
+        t, {"姓名": "name", "主要工作经历": "lead_perfs"},
+        {"name": "张三"}, "甲项目（2024）")
+    assert t.rows[0].cells[1].text == "张三"
+    assert t.rows[1].cells[1].text == "甲项目（2024）"
+    assert written == 2
+
+
+def test_grid_mesh_writes_below_when_no_right():
+    """标签格同行无右邻（单列行）→ 写下方同列首个不同 origin 格。"""
+    doc = Document(); t = doc.add_table(2, 1)
+    t.rows[0].cells[0].text = "主要工作经历"
+    written = _fill_resume_grid_mesh(
+        t, {"主要工作经历": "lead_perfs"}, {}, "甲项目（2024）")
+    assert t.rows[1].cells[0].text == "甲项目（2024）"
+    assert written == 1
+
+
+def test_grid_span_label_writes_right_origin():
+    """横向合并标签格 gridSpan=2 → 右侧首个不同 origin 目标格；
+    矩阵中跨列各格指向同一 origin。"""
+    doc = Document(); t = doc.add_table(1, 3)
+    t.cell(0, 0).merge(t.cell(0, 1))
+    t.cell(0, 0).text = "姓名"
+    m = expand_table_matrix(t)
+    assert m[0][0] is m[0][1]
+    assert m[0][2] is not m[0][0]
+    written = _fill_resume_grid_mesh(t, {"姓名": "name"}, {"name": "张三"}, "")
+    assert t.rows[0].cells[2].text == "张三"
+    assert written == 1
+
+
+def test_grid_mesh_vmerge_continuation_maps_to_origin():
+    """纵向合并（vMerge）：续行格映射到 restart origin；label 只处理一次，
+    值写 origin 右侧，续行不写。"""
+    doc = Document(); t = doc.add_table(2, 2)
+    t.cell(0, 0).merge(t.cell(1, 0))
+    t.cell(0, 0).text = "姓名"
+    m = expand_table_matrix(t)
+    assert m[1][0] is m[0][0]
+    written = _fill_resume_grid_mesh(t, {"姓名": "name"}, {"name": "张三"}, "")
+    assert t.rows[0].cells[1].text == "张三"
+    assert t.rows[1].cells[1].text == ""
+    assert written == 1
+
+
+def test_fill_draft_lead_resume_large_grid_uses_mesh(tmp_path):
+    """端到端：≥10 列简历大网格绑定 lead_resume → 矩阵填充（不重建表，
+    filled 记 mode="grid"），合并结构保留。"""
+    doc = Document()
+    t = doc.add_table(2, 10)
+    t.rows[0].cells[0].text = "姓名"
+    t.rows[1].cells[0].text = "主要工作经历"
+    # 制造密集合并之外的普通大网格：值目标格 = 各标签右邻
+    draft = str(tmp_path / "draft.docx")
+    doc.save(draft)
+    out = str(tmp_path / "out.docx")
+    bindings = {"tables": [{"table_index": 0, "role": "lead_resume",
+                            "columns": {"姓名": "name",
+                                        "主要工作经历": "lead_perfs"},
+                            "confirmed": True}],
+                "swap_toc": False}
+    data = {"persons": [{"name": "张三", "is_lead": True,
+                         "sem": {"name": "张三"},
+                         "perfs_text": "甲项目（2024）", "fields": {}}],
+            "contracts": [], "lead_perfs_text": "甲项目（2024）"}
+    report = fill_draft(draft, out, bindings, data)
+    table = Document(out).tables[0]
+    assert len(table.rows) == 2 and len(table.columns) == 10  # 未重建
+    assert table.rows[0].cells[1].text == "张三"
+    assert table.rows[1].cells[1].text == "甲项目（2024）"
+    assert report["filled"][0]["mode"] == "grid"
+    assert report["verify"]["ok"] is True
