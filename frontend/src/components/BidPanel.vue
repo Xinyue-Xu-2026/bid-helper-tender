@@ -7,6 +7,7 @@ import {
   saveBidDraftBindings, uploadBidDraft,
 } from '../api'
 import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
+import DocumentEditor from './DocumentEditor.vue'
 
 const props = defineProps({ projectId: Number, bidDate: String, projectName: { type: String, default: '' } })
 
@@ -438,6 +439,7 @@ function roleLabel(v) {
 const draft = ref(null)              // 底稿预览对象；null = 无底稿
 const draftLoading = ref(false)      // 底稿卡片加载/生成/上传中
 const draftDialogVisible = ref(false)
+const docEditVisible = ref(false)   // 底稿内容编辑对话框（方案 A）
 const draftHeadings = ref([])        // 裁切起止候选标题 [{index, level, title}]
 const draftRange = ref({ start: '', end: '' })  // 裁切起止（值=heading.index；'' = 未选；end -1 = 文档末尾）
 const bindingRows = ref([])          // 对话框内可编辑的表格绑定行（基于预览 tables 拷贝）
@@ -797,7 +799,10 @@ onMounted(() => { load(); loadDraft() })
       </el-tooltip>
       <el-button :loading="exportingLegacy === 'xlsx'" @click="onExport('xlsx')">导出 Excel</el-button>
       <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">导出 Word</el-button>
+      <el-button @click="docEditVisible = true">编辑文档</el-button>
     </el-space>
+
+    <DocumentEditor v-if="docEditVisible" :project-id="projectId" @close="docEditVisible = false" />
 
     <el-dialog v-model="exportDialogVisible" title="导出商务标" width="560px">
       <el-form label-width="80px">

@@ -182,12 +182,16 @@ def save_bid_document(project_id: int, body: DocumentEditIn,
     row = db.get_project_bid_template(project_id)
     if not row or not Path(row.get("file_path") or "").exists():
         raise HTTPException(422, "尚无底稿，请先生成或上传底稿")
+    base = row.get("edited_path") or row.get("file_path")
     out = config.BID_DRAFTS_DIR / f"project_{project_id}_edited.docx"
+    tmp = config.BID_DRAFTS_DIR / f"project_{project_id}_edited.tmp.docx"
     try:
-        apply_edits(row["file_path"], str(out),
+        apply_edits(str(base), str(tmp),
                     paragraphs=body.paragraphs, tables=body.tables,
                     clones=body.clones)
+        Path(tmp).replace(out)
     except ValueError as exc:
+        Path(tmp).unlink(missing_ok=True)
         raise HTTPException(400, str(exc))
     db.update_bid_template(row["id"], edited_path=str(out))
     return {"ok": True, "blocks": read_blocks(str(out))["blocks"]}

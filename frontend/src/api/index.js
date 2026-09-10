@@ -176,5 +176,8 @@ export const saveBidDraftBindings = (pid, data) => api.put(`/projects/${pid}/bid
 // 占位符同义词映射（设置页用）：{ 别名: 标准标签 }
 export const getPlaceholderSynonyms = () => api.get('/settings/placeholder-synonyms').then(r => r.data)
 export const savePlaceholderSynonyms = (mapping) => api.put('/settings/placeholder-synonyms', mapping).then(r => r.data)
+// 底稿内容编辑（方案 A 结构保真编辑器）：读块序列 / 保存编辑（段落+表格+复制表）
+export const getBidDocument = (pid) => api.get(`/projects/${pid}/bid-draft/document`).then(r => r.data)
+export const saveBidDocument = (pid, payload) => api.post(`/projects/${pid}/bid-draft/document`, payload).then(r => r.data)
 // 证书级到期明细（首页提醒条）：[{ type, asset_name, cert_type, cert_name, expiry_date, days_left }]
 export const getExpiringDetail = (days = 30) => api.get('/assets/expiring-detail', { params: { days } }).then(r => r.data)
