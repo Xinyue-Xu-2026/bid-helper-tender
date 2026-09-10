@@ -214,6 +214,34 @@ def _match_resume(table) -> dict:
     return hits, columns
 
 
+def _iter_all_cell_texts(table):
+    """产出表格全部单元格的规范化文本（横向合并按 _tc 去重）。"""
+    for row in table.rows:
+        for _, text in _dedup_col_texts(row):
+            yield _norm(text)
+
+
+def _has_resume_markers(table) -> bool:
+    """全表任一单元格命中简历样表标记（子串）。简历样表的标签可能横向排布
+    在任意列（如 姓名/年龄/执业资格证书…），故不限于第 0 列。"""
+    texts = list(_iter_all_cell_texts(table))
+    return any(any(m in t for m in RESUME_EACH_MARKERS) for t in texts)
+
+
+def _match_resume_all(table) -> tuple:
+    """全表扫描 RESUME_LABELS（不限于第 0 列），返回 (hits, columns)。
+    简历样表的标签常分布在多列（姓名/年龄/学历/职称/执业资格… 键值排布）。"""
+    hits = set()
+    columns = {}
+    for text in _iter_all_cell_texts(table):
+        for label in RESUME_LABELS:
+            if label in text:
+                hits.add(label)
+                if label in RESUME_LABEL_TO_SEM:
+                    columns[label] = RESUME_LABEL_TO_SEM[label]
+    return hits, columns
+
+
 def _image_label_kind(table) -> str:
     """图片占位表首行文本命中 IMAGE_LABEL_KINDS 首个关键词的语义，全不中留空。"""
     first = _norm(table.rows[0].cells[0].text) if table.rows else ""
@@ -283,6 +311,19 @@ def _classify_table(table, table_index: int, heading: str,
           and _row_hit_count(_dedup_col_texts(rows[1])) >= 2):
         item["header_rows"] = 2
     person_map, perf_map = _match_columns(pairs)
+
+    # 规则 3.5：简历样表优先识别（V1.2 修复）。简历样表表头含 姓名/年龄/
+    # 执业资格 等关键词，会被下方 person_roster 抢走并 flatten；这里先按
+    # 「全表命中简历标签 ≥3 且含简历标记」识别为 resume_each（每人一份，
+    # 默认整表克隆），优先于人员/业绩一览表。
+    if len(table.columns) >= 2:
+        resume_hits, resume_cols = _match_resume_all(table)
+        if len(resume_hits) >= 3 and _has_resume_markers(table):
+            item["role"] = "resume_each"
+            item["columns"] = resume_cols
+            item["mode"] = "per_person"
+            item["confidence"] = "高" if len(resume_hits) >= 5 else "低"
+            return item
 
     # 规则 4：命中数判定人员表 / 业绩表。
     # 共享键归属裁定（T5）："序号"两族共有且匹配时 person 族优先锁定，
