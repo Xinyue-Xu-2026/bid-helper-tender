@@ -148,11 +148,17 @@ export const mimicDownloadUrl = (pid, file) =>
 export const getBidAssets = (pid) => api.get(`/projects/${pid}/bid-assets`).then(r => r.data)
 export const saveBidAssets = (pid, data) => api.put(`/projects/${pid}/bid-assets`, data).then(r => r.data)
 export const bidExportUrl = (pid, format) => `/api/projects/${pid}/bid-assets/export?format=${format}`
-// 商务标模板导出：payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}] }
+// 商务标模板导出：payload { persons: [{asset_id, is_lead}], contracts: [{asset_id, section}],
+//   project_no, project_name, doc_date, tenderer, bidder_name, legal_rep_id, agent_id,
+//   section_name, section_no }（标段名称/标段编号可选，用于占位符填充）
 // 返回完整响应（blob + headers），调用方从 Content-Disposition 取文件名；
 // 有底稿时响应头带 X-Fill-Report（URL 编码的 fill_report JSON），旧模板路径无此头
 export const exportBidTemplate = (pid, payload) =>
   api.post(`/projects/${pid}/bid-assets/export-template`, payload, { responseType: 'blob' })
+// 占位符预览：body {project_no, project_name, doc_date, tenderer, bidder_name, section_name, section_no}（均可空）
+// 返回 { matched: [{label, value, count, kind}], suspicious: [{text}] }；无底稿时后端报错，调用方需优雅降级
+export const previewBidPlaceholders = (pid, payload) =>
+  api.post(`/projects/${pid}/bid-draft/placeholders`, payload).then(r => r.data)
 // 商务标底稿：headings 供手动选择裁切起止（suggested 为自动定位建议，可能为 null）
 export const getBidDraftHeadings = (pid) => api.get(`/projects/${pid}/bid-draft/headings`).then(r => r.data)
 // 生成底稿：body {start_heading, end_heading}，空=自动定位/到末尾；422=未识别格式章节需手动起止
@@ -164,6 +170,11 @@ export const uploadBidDraft = (pid, file) => {
 }
 // 有底稿返回预览对象；无底稿返回 { draft: null }
 export const getBidDraft = (pid) => api.get(`/projects/${pid}/bid-draft`).then(r => r.data)
+// 绑定保存：tables 每行 { table_index, role, columns, person_scope, perf_scope, label_kind,
+//   person, confirmed, header_rows(1..4 表头行数), mode('' 或 'per_person'，简历表每人一张) }
 export const saveBidDraftBindings = (pid, data) => api.put(`/projects/${pid}/bid-draft/bindings`, data).then(r => r.data)
+// 占位符同义词映射（设置页用）：{ 别名: 标准标签 }
+export const getPlaceholderSynonyms = () => api.get('/settings/placeholder-synonyms').then(r => r.data)
+export const savePlaceholderSynonyms = (mapping) => api.put('/settings/placeholder-synonyms', mapping).then(r => r.data)
 // 证书级到期明细（首页提醒条）：[{ type, asset_name, cert_type, cert_name, expiry_date, days_left }]
 export const getExpiringDetail = (days = 30) => api.get('/assets/expiring-detail', { params: { days } }).then(r => r.data)

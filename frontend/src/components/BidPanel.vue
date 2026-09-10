@@ -3,8 +3,8 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   bidExportUrl, exportBidTemplate, generateBidDraft, getBidAssets, getBidDraft,
-  getBidDraftHeadings, getProject, listAssets, saveBidAssets, saveBidDraftBindings,
-  uploadBidDraft,
+  getBidDraftHeadings, getProject, listAssets, previewBidPlaceholders, saveBidAssets,
+  saveBidDraftBindings, uploadBidDraft,
 } from '../api'
 import { CONTRACT_UNION_FIELDS } from '../constants/contractSubtypes'
 
@@ -288,9 +288,34 @@ async function onExport(fmt) {
 
 // ---------- 导出商务标对话框：每次打开时按当前项目信息重新初始化 ----------
 const exportDialogVisible = ref(false)
-const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '', legal_rep_id: null, agent_id: null })
+const exportForm = ref({ project_no: '', project_name: '', doc_date: '', tenderer: '', bidder_name: '', legal_rep_id: null, agent_id: null, section_name: '', section_no: '' })
 // 法定代表人/委托代理人候选（legal 资产）
 const legalCandidates = ref([])
+
+// ---------- 占位符确认：导出对话框内预览底稿占位符的匹配结果 ----------
+const placeholderPreview = ref(null)     // { matched: [...], suspicious: [...] }；null = 未加载
+const placeholderLoading = ref(false)
+const placeholderFailed = ref(false)     // 无底稿或请求失败 → 优雅降级（提示但不阻塞导出）
+const placeholderSkipped = ref(false)    // 用户选择「按默认填充，跳过确认」
+
+async function loadPlaceholderPreview() {
+  placeholderLoading.value = true
+  placeholderFailed.value = false
+  try {
+    const f = exportForm.value
+    placeholderPreview.value = await previewBidPlaceholders(props.projectId, {
+      project_no: f.project_no, project_name: f.project_name, doc_date: f.doc_date,
+      tenderer: f.tenderer, bidder_name: f.bidder_name,
+      section_name: f.section_name, section_no: f.section_no,
+    })
+  } catch {
+    // 无底稿或请求失败：拦截器已弹错，对话框内降级提示，不阻塞导出
+    placeholderPreview.value = null
+    placeholderFailed.value = true
+  } finally {
+    placeholderLoading.value = false
+  }
+}
 
 async function loadLegalCandidates() {
   try {
@@ -309,7 +334,11 @@ watch(exportDialogVisible, async v => {
     bidder_name: '宏信天德工程顾问有限公司',
     legal_rep_id: null,
     agent_id: null,
+    section_name: '',
+    section_no: '',
   }
+  placeholderPreview.value = null
+  placeholderSkipped.value = false
   loadLegalCandidates()
   if (!exportForm.value.tenderer) {
     try {
@@ -317,6 +346,8 @@ watch(exportDialogVisible, async v => {
       exportForm.value.tenderer = p.client || ''
     } catch { /* 拦截器已弹错；留空可手填 */ }
   }
+  // 表单值就绪后预览占位符（无底稿时自动降级为提示条）
+  loadPlaceholderPreview()
 })
 
 // 导出商务标：is_lead / certs / section 与保存载荷同源（均已持久化），另加对话框字段
@@ -342,6 +373,8 @@ async function onExportTemplate() {
       bidder_name: exportForm.value.bidder_name.trim(),
       legal_rep_id: exportForm.value.legal_rep_id,
       agent_id: exportForm.value.agent_id,
+      section_name: exportForm.value.section_name.trim(),
+      section_no: exportForm.value.section_no.trim(),
     }
     const r = await exportBidTemplate(props.projectId, payload)
     const cd = r.headers['content-disposition'] || ''
@@ -379,6 +412,7 @@ async function onExportTemplate() {
 const DRAFT_ROLE_OPTIONS = [
   { value: 'person_roster', label: '人员一览表' },
   { value: 'lead_resume', label: '负责人简历表' },
+  { value: 'resume_each', label: '简历表（每人一份）' },
   { value: 'perf_list', label: '业绩一览表' },
   { value: 'quote', label: '报价表' },
   { value: 'image_slot', label: '图片占位' },
@@ -438,10 +472,14 @@ async function loadDraft() {
   }
 }
 
-// 用预览对象刷新卡片与对话框状态（bindings 拷贝为可编辑行）
+// 用预览对象刷新卡片与对话框状态（bindings 拷贝为可编辑行，补齐 header_rows/mode 缺省值）
 function applyDraftPreview(preview) {
   draft.value = preview
-  bindingRows.value = (preview.tables || []).map(t => ({ ...t }))
+  bindingRows.value = (preview.tables || []).map(t => ({
+    ...t,
+    header_rows: Number(t.header_rows) >= 1 ? Number(t.header_rows) : 1,
+    mode: t.mode || '',
+  }))
   swapToc.value = !!preview.swap_toc
   // 裁切范围在 headings 加载后由 syncRangeFromDraft 回填（title → index）
 }
@@ -577,13 +615,18 @@ async function onUploadDraft(uploadFile) {
   }
 }
 
-// 角色切换时重置该行的条件字段为默认值（避免残留其它角色的条件）
+// 角色切换时重置该行的条件字段为默认值（避免残留其它角色的条件）；
+// resume_each（简历表-每人一份）默认开启每人一张表，其余角色清空 mode
 function onBindingRoleChange(row) {
   row.person_scope = 'all'
   row.perf_scope = 'all'
   row.label_kind = LABEL_KIND_OPTIONS[0]
   row.person = 'lead'
+  row.mode = row.role === 'resume_each' ? 'per_person' : ''
 }
+
+// 简历表（每人一份）人数预览：N = 当前已勾选人员数
+const resumeEachCount = computed(() => selectedPersons.value.length)
 
 // 「确认并保存绑定」：整表提交，所有行 confirmed=true（提交后即生效，未确认的表不会被填充）
 async function onSaveBindings() {
@@ -598,6 +641,8 @@ async function onSaveBindings() {
         perf_scope: r.perf_scope,
         label_kind: r.label_kind,
         person: r.person,
+        header_rows: Number(r.header_rows) >= 1 ? Number(r.header_rows) : 1,
+        mode: r.role === 'resume_each' && r.mode === 'per_person' ? 'per_person' : '',
         confirmed: true,
       })),
       swap_toc: swapToc.value,
@@ -754,13 +799,19 @@ onMounted(() => { load(); loadDraft() })
       <el-button :loading="exportingLegacy === 'docx'" @click="onExport('docx')">导出 Word</el-button>
     </el-space>
 
-    <el-dialog v-model="exportDialogVisible" title="导出商务标" width="440px">
+    <el-dialog v-model="exportDialogVisible" title="导出商务标" width="560px">
       <el-form label-width="80px">
         <el-form-item label="项目编号">
           <el-input v-model="exportForm.project_no" placeholder="请输入项目编号" />
         </el-form-item>
         <el-form-item label="项目名称">
           <el-input v-model="exportForm.project_name" placeholder="请输入项目名称" />
+        </el-form-item>
+        <el-form-item label="标段名称">
+          <el-input v-model="exportForm.section_name" placeholder="请输入标段名称（可留空）" />
+        </el-form-item>
+        <el-form-item label="标段编号">
+          <el-input v-model="exportForm.section_no" placeholder="请输入标段编号（可留空）" />
         </el-form-item>
         <el-form-item label="招标人">
           <el-input v-model="exportForm.tenderer" placeholder="请输入招标人名称（留空则不填充）" />
@@ -785,13 +836,58 @@ onMounted(() => { load(); loadDraft() })
                           placeholder="选择日期" style="width: 100%" />
         </el-form-item>
       </el-form>
+
+      <!-- 占位符确认：预览底稿占位符的匹配结果；无底稿/失败时降级提示，不阻塞导出 -->
+      <div v-loading="placeholderLoading"
+           style="border-top: 1px dashed #ebeef5; padding-top: 10px; margin-top: -6px">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
+          <span style="font-size: 13px; font-weight: 600">占位符确认</span>
+          <el-button size="small" link type="primary" :loading="placeholderLoading"
+                     @click="loadPlaceholderPreview">重新预览</el-button>
+          <el-button v-if="placeholderPreview && !placeholderSkipped" size="small" link
+                     @click="placeholderSkipped = true">按默认填充，跳过确认</el-button>
+          <el-button v-else-if="placeholderSkipped" size="small" link type="primary"
+                     @click="placeholderSkipped = false">查看确认</el-button>
+        </div>
+        <el-alert v-if="placeholderFailed" type="info" :closable="false"
+                  title="暂无法预览占位符（未生成底稿或请求失败），不影响导出，可在导出报告中核对。"
+                  style="margin-bottom: 4px" />
+        <template v-else-if="placeholderPreview && !placeholderSkipped">
+          <template v-if="(placeholderPreview.matched || []).length">
+            <div style="font-size: 12px; color: #909399; margin: 4px 0 2px">将填入</div>
+            <div v-for="(m, i) in placeholderPreview.matched" :key="i"
+                 style="font-size: 13px; margin: 2px 0">
+              <span style="color: #606266">{{ m.label }}</span>
+              <span style="color: #c0c4cc; margin: 0 6px">→</span>
+              <span>{{ m.value || '（空）' }}</span>
+              <span v-if="m.count > 1" style="color: #909399; font-size: 12px">　填充 {{ m.count }} 处</span>
+            </div>
+          </template>
+          <template v-if="(placeholderPreview.suspicious || []).length">
+            <div style="font-size: 12px; color: #e6a23c; margin: 8px 0 2px">未识别（疑似占位）</div>
+            <div v-for="(s, i) in placeholderPreview.suspicious" :key="i"
+                 style="font-size: 13px; margin: 2px 0; color: #e6a23c">
+              {{ s.text }}
+            </div>
+            <div style="font-size: 12px; color: #e6a23c; margin-top: 2px">
+              以上占位符未匹配到填写内容，导出后将保留原样，请人工核对。
+            </div>
+          </template>
+          <div v-if="!(placeholderPreview.matched || []).length && !(placeholderPreview.suspicious || []).length"
+               style="font-size: 13px; color: #909399">底稿中未检测到占位符。</div>
+        </template>
+        <div v-else-if="placeholderSkipped" style="font-size: 12px; color: #909399">
+          已跳过确认，导出时将按上方填写内容直接填充，未识别占位符保留原样。
+        </div>
+      </div>
+
       <template #footer>
         <el-button @click="exportDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="exporting" @click="onExportTemplate">确定导出</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="draftDialogVisible" title="商务标底稿预览与确认" width="760px">
+    <el-dialog v-model="draftDialogVisible" title="商务标底稿预览与确认" width="900px">
       <!-- 顶部工具区：裁切起止 + 按范围（重新）生成 -->
       <el-space wrap style="margin-bottom: 12px">
         <el-select v-model="draftRange.start" filterable placeholder="起始标题" style="width: 240px">
@@ -833,7 +929,7 @@ onMounted(() => { load(); loadDraft() })
                            show-overflow-tooltip>
             <template #default="{ row }">{{ row.context_heading || '-' }}</template>
           </el-table-column>
-          <el-table-column label="角色" width="140">
+          <el-table-column label="角色" width="150">
             <template #default="{ row }">
               <el-select v-model="row.role" size="small" @change="onBindingRoleChange(row)">
                 <el-option v-for="o in DRAFT_ROLE_OPTIONS" :key="o.value"
@@ -841,7 +937,13 @@ onMounted(() => { load(); loadDraft() })
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="条件" min-width="190">
+          <el-table-column label="表头行数" width="100" align="center">
+            <template #default="{ row }">
+              <el-input-number v-model="row.header_rows" size="small" :min="1" :max="4"
+                               style="width: 76px" />
+            </template>
+          </el-table-column>
+          <el-table-column label="条件" min-width="200">
             <template #default="{ row }">
               <el-select v-if="row.role === 'person_roster'" v-model="row.person_scope"
                          size="small" placeholder="人员范围">
@@ -853,6 +955,15 @@ onMounted(() => { load(); loadDraft() })
                 <el-option v-for="o in PERF_SCOPE_OPTIONS" :key="o.value"
                            :label="o.label" :value="o.value" />
               </el-select>
+              <div v-else-if="row.role === 'resume_each'">
+                <el-checkbox :model-value="row.mode === 'per_person'"
+                             @change="v => row.mode = v ? 'per_person' : ''">
+                  每人一张表
+                </el-checkbox>
+                <div style="font-size: 12px; color: #909399">
+                  {{ row.mode === 'per_person' ? `每人一张表 × ${resumeEachCount} 人` : '已关闭每人一张表，按单表填充' }}
+                </div>
+              </div>
               <el-space v-else-if="row.role === 'image_slot'" wrap>
                 <el-select v-model="row.label_kind" size="small" placeholder="图片类型"
                            style="width: 110px">
@@ -905,16 +1016,62 @@ onMounted(() => { load(); loadDraft() })
           </div>
         </template>
 
+        <template v-if="fillReport.placeholders">
+          <template v-if="(fillReport.placeholders.filled || []).length">
+            <h4 style="margin: 12px 0 4px">占位符</h4>
+            <div v-for="(p, i) in fillReport.placeholders.filled" :key="i"
+                 style="font-size: 13px; margin: 2px 0">
+              <span style="color: #606266">{{ p.label }}</span>
+              <span style="color: #c0c4cc; margin: 0 6px">→</span>
+              <span>{{ p.value || '（空）' }}</span>
+              <span v-if="p.count > 1" style="color: #909399; font-size: 12px">　填充 {{ p.count }} 处</span>
+            </div>
+          </template>
+          <template v-if="(fillReport.placeholders.suspicious || []).length">
+            <h4 style="margin: 12px 0 4px; color: #e6a23c">未识别（疑似占位）</h4>
+            <div v-for="(s, i) in fillReport.placeholders.suspicious" :key="i"
+                 style="font-size: 13px; margin: 2px 0; color: #e6a23c">
+              {{ s.text }}
+            </div>
+            <div style="font-size: 12px; color: #e6a23c; margin-top: 2px">
+              以上占位符未匹配到填写内容，已保留原样，请在导出文件中人工核对。
+            </div>
+          </template>
+        </template>
+
         <template v-if="(fillReport.images || []).length">
-          <h4 style="margin: 8px 0 4px">图片</h4>
-          <div v-for="(im, i) in fillReport.images" :key="i"
-               :style="`font-size: 13px; margin: 2px 0; ${im.ok ? '' : 'color: #f56c6c'}`">
-            #{{ im.table_index }} {{ im.person }} · {{ im.label_kind }}{{ im.ok ? '' : ' 插入失败' }}
+          <h4 style="margin: 12px 0 4px">图片</h4>
+          <div v-for="(im, i) in fillReport.images" :key="i" style="font-size: 13px; margin: 2px 0">
+            <template v-if="im.ok">#{{ im.table_index }} {{ im.person }} · {{ im.label_kind }}</template>
+            <template v-else>
+              <span style="color: #f56c6c; font-weight: 500">
+                #{{ im.table_index }} {{ im.person }} · {{ im.label_kind }} 插入失败：{{ im.reason || '未知原因' }}
+              </span>
+              <span v-if="im.too_long" style="color: #f56c6c">（扫描件过长，建议拆分）</span>
+            </template>
           </div>
         </template>
 
+        <template v-if="fillReport.page_setup">
+          <h4 style="margin: 12px 0 4px">页码 / 分节</h4>
+          <div style="font-size: 13px; margin: 2px 0">
+            分节数：{{ fillReport.page_setup.sections ?? '-' }}
+            <template v-if="Array.isArray(fillReport.page_setup.section_page_numbers)">
+              <span v-for="(v, i) in fillReport.page_setup.section_page_numbers" :key="i"
+                    style="margin-left: 10px; color: #606266">
+                第{{ i + 1 }}节：{{ v ? '已挂页码' : '未挂页码' }}
+              </span>
+            </template>
+          </div>
+          <el-alert v-if="fillReport.page_setup.degraded" type="warning" :closable="false"
+                    style="margin: 4px 0"
+                    :title="`页码/分节处理已降级：${fillReport.page_setup.degraded}`" />
+          <el-alert v-for="(w, i) in fillReport.page_setup.warnings || []" :key="i"
+                    type="warning" :closable="false" :title="w" style="margin: 4px 0" />
+        </template>
+
         <template v-if="(fillReport.skipped || []).length">
-          <h4 style="margin: 8px 0 4px">已跳过</h4>
+          <h4 style="margin: 12px 0 4px">已跳过</h4>
           <div v-for="(s, i) in fillReport.skipped" :key="i"
                style="font-size: 13px; margin: 2px 0; color: #909399">
             表格#{{ s.table_index }}（{{ roleLabel(s.role) }}）：{{ s.reason }}
