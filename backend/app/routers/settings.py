@@ -4,7 +4,10 @@ from pydantic import BaseModel
 from app.core.llm_parser import (
     CODING_DEFAULT_MODEL, CODING_MODELS, _friendly_api_error, _make_client, is_coding_key,
 )
-from app.settings_store import get_api_key, get_model, load_settings, save_settings
+from app.settings_store import (
+    get_api_key, get_model, get_placeholder_synonyms, load_settings,
+    save_placeholder_synonyms, save_settings,
+)
 
 router = APIRouter()
 
@@ -28,6 +31,21 @@ def write_settings(body: SettingsIn):
         data["model"] = body.model
     save_settings(data)
     return {"ok": True}
+
+
+# ---------- 占位符同义词库（V1.2 Task 8a） ----------
+
+@router.get("/placeholder-synonyms")
+def read_placeholder_synonyms():
+    """读取占位符同义词库（别名→规范标签；默认库 + 已存覆盖项）。"""
+    return get_placeholder_synonyms()
+
+
+@router.put("/placeholder-synonyms")
+def write_placeholder_synonyms(body: dict[str, str]):
+    """保存同义词覆盖项（{别名: 规范标签}，空键/空值被清洗），
+    返回规范化后的覆盖项。"""
+    return save_placeholder_synonyms(body)
 
 
 @router.post("/test")

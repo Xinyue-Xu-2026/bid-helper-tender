@@ -1,13 +1,16 @@
-"""商务标底稿 API：章节定位 / 生成（裁切）/ 手动上传 / 预览回显 / 绑定确认。
-路由层只做参数校验与错误码映射，业务编排在 BidDraftService。"""
+"""商务标底稿 API：章节定位 / 生成（裁切）/ 手动上传 / 预览回显 / 绑定确认 /
+占位符预览。路由层只做参数校验与错误码映射，业务编排在 BidDraftService。"""
 import tempfile
 from pathlib import Path
 
+from docx import Document
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app import settings_store
 from app.core.bid_draft import BidDraftError
 from app.core.bid_table_classifier import ROLES
+from app.core.bid_template_exporter import scan_placeholders
 from app.core.input_convert import InputConvertError
 from app.db import Database
 from app.deps import get_db
@@ -40,6 +43,17 @@ class TableBindingIn(BaseModel):
 class BindingsIn(BaseModel):
     tables: list[TableBindingIn] = []
     swap_toc: bool = False
+
+
+class PlaceholderPreviewIn(BaseModel):
+    """占位符预览参数（全可选，默认空——空值不参与规则）。"""
+    project_no: str = ""
+    project_name: str = ""
+    doc_date: str = ""
+    tenderer: str = ""
+    bidder_name: str = ""
+    section_name: str = ""
+    section_no: str = ""
 
 
 def _project_or_404(db: Database, project_id: int) -> dict:
@@ -118,3 +132,19 @@ def save_bid_draft_bindings(project_id: int, body: BindingsIn,
             raise HTTPException(422, f"非法填充模式：{t.mode}")
     db.update_bid_template(row["id"], bindings=body.model_dump())
     return {"ok": True}
+
+
+@router.post("/projects/{project_id}/bid-draft/placeholders")
+def preview_placeholders(project_id: int, body: PlaceholderPreviewIn = None,
+                         db: Database = Depends(get_db)):
+    """占位符预览（V1.2）：对当前底稿跑 scan_placeholders（规则唯一来源
+    在 core，路由不复制），同义词取全局设置。无底稿 → 404。
+    返回 {"matched":[{label,value,count,kind}], "suspicious":[{text}]}。"""
+    _project_or_404(db, project_id)
+    row = db.get_project_bid_template(project_id)
+    if not row or not Path(row.get("file_path") or "").exists():
+        raise HTTPException(404, "尚无底稿，请先生成或上传底稿")
+    doc = Document(row["file_path"])
+    params = body.model_dump() if body else {}
+    return scan_placeholders(
+        doc, params, synonyms=settings_store.get_placeholder_synonyms())

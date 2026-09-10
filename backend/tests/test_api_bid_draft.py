@@ -313,6 +313,32 @@ def test_put_bindings_mode_validation_and_roundtrip(client, tmp_path):
     assert r.status_code == 422
 
 
+# ---------- 占位符预览（V1.2 Task 8a） ----------
+
+def test_placeholders_preview_no_draft_404(client):
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders", json={})
+    assert r.status_code == 404
+
+
+def test_placeholders_preview_matched(client, tmp_path, db_path):
+    """底稿含"招标人：____" → 预览 matched 含 招标人=传入 tenderer。"""
+    from app.db import Database
+    pid = _make_project(client)
+    doc = Document()
+    doc.add_paragraph("招标人：____")
+    p = tmp_path / "draft.docx"
+    doc.save(str(p))
+    Database(db_path).create_bid_template(pid, "底稿", str(p))
+    r = client.post(f"/api/projects/{pid}/bid-draft/placeholders",
+                    json={"tenderer": "某中心"})
+    assert r.status_code == 200
+    data = r.json()
+    assert any(m["label"] == "招标人" and m["value"] == "某中心"
+               for m in data["matched"])
+    assert "suspicious" in data
+
+
 def test_put_bindings_roundtrip(client, tmp_path):
     pid = _make_project(client)
     _upload_tender(client, pid, tmp_path)

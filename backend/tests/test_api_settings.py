@@ -56,3 +56,25 @@ def test_test_connection_coding_key_model_fallback(client, monkeypatch):
     r = client.post("/api/settings/test", json={"api_key": "sk-kimi-abc123", "model": "kimi-k3"})
     assert r.status_code == 200 and r.json()["ok"] is True
     assert captured["create"]["model"] == CODING_DEFAULT_MODEL
+
+
+# ---------- 占位符同义词库（V1.2 Task 8a） ----------
+
+def test_placeholder_synonyms_get_default(client):
+    """GET 默认库：含 采购人→招标人 等内建同义词。"""
+    r = client.get("/api/settings/placeholder-synonyms")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["采购人"] == "招标人"
+    assert data["工程项目名称"] == "项目名称"
+
+
+def test_placeholder_synonyms_put_roundtrip(client):
+    """PUT 自定义覆盖（空键/空值被清洗）→ 回读一致且默认库仍在。"""
+    r = client.put("/api/settings/placeholder-synonyms",
+                   json={"甲方": "招标人", "  ": "某标签"})
+    assert r.status_code == 200
+    assert r.json() == {"甲方": "招标人"}
+    data = client.get("/api/settings/placeholder-synonyms").json()
+    assert data["甲方"] == "招标人"
+    assert data["采购人"] == "招标人"   # 默认库不被覆盖丢失
