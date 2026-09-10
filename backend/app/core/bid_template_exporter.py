@@ -259,8 +259,8 @@ BRACKET_LABEL_KEYS = {
     "标段": "section_name", "日期": "doc_date",
 }
 _SECTION_COMBO_RE = re.compile(
-    r"[（(]\s*(?:项目名称|工程名称|工程项目名称)\s*[）)]\s*"
-    r"[（(]\s*标段(?:名称)?\s*[）)]")
+    r"([（(])\s*(?:项目名称|工程名称|工程项目名称)\s*[）)](\s*)"
+    r"([（(])\s*标段(?:名称)?\s*[）)]")
 _UNRECOGNIZED_UNDERSCORE_RE = re.compile(r"_{4,}|＿{4,}")
 _DOC_DATE_BLANK_RE = re.compile(
     r"(日\s*期\s*[：:]?\s*)[_＿\s]*年[_＿\s]*月[_＿\s]*日")
@@ -290,9 +290,17 @@ def _iter_cell_paragraphs(cell):
                 yield from _iter_cell_paragraphs(sub)
 
 
+_MC_FALLBACK_TAG = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
 def _iter_textbox_paragraphs(doc):
-    """文本框（含嵌套）内段落，不重复产出。"""
+    """文本框（含嵌套）内段落，不重复产出。
+    Word 写出的文本框为 mc:AlternateContent：mc:Choice（DrawingML）+
+    mc:Fallback（VML）各含一份相同 w:txbxContent，跳过 Fallback 内的，
+    避免同一段落产出两次。"""
     for txbx in doc.element.body.iter(qn("w:txbxContent")):
+        if any(a.tag == _MC_FALLBACK_TAG for a in txbx.iterancestors()):
+            continue
         for child in txbx.iterchildren():
             if child.tag == qn("w:p"):
                 yield Paragraph(child, doc)
@@ -400,11 +408,16 @@ def build_placeholder_rules(doc, *, project_no: str = "", project_name: str = ""
                   for p in _iter_all_paragraphs(doc)
                   if not _is_toc_paragraph(p))
         if hit:
+            # 保留底稿匹配到的括号风格与两组间空白
+            # （半角输入→半角，全角输入→全角）
+            def _combo_repl(m, pn=project_name, sn=section_name):
+                close = "）" if m.group(3) == "（" else ")"
+                return f"{pn}{m.group(2)}{m.group(3)}{sn}{close}"
             combo = f"{project_name} ({section_name})"
             rules.append({"kind": "section_combo",
                           "label": "(项目名称)(标段名称)",
                           "key": "project_name+section_name", "value": combo,
-                          "pattern": _SECTION_COMBO_RE, "repl": combo})
+                          "pattern": _SECTION_COMBO_RE, "repl": _combo_repl})
     # 标签式空白占位：标签后仅空白/下划线（或行尾）时填充
     label_keys = _effective_label_keys(synonyms)
     for label in sorted(label_keys, key=len, reverse=True):

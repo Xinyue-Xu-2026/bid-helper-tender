@@ -64,7 +64,8 @@ def verify_draft_fill(draft_path: str, out_path: str,
     bound_paragraph_indices：授权页等经用户确认允许正文填充改动的段落
     下标集合（toc/分节符过滤后的段落序列坐标系，与比对循环一致），
     这些段落整体跳过比对。默认空集。
-    replace_params：{"project_no","project_name","doc_date"}，与导出时一致；
+    replace_params：{"project_no","project_name","doc_date","tenderer",
+    "bidder_name","section_name","section_no","synonyms"}，与导出时一致；
     空/某键空 → compute_text_subs 相应无规则，套用无害。
     toc 样式段落两侧恒跳过（导出的 _replace_stale_text 从不触碰 toc 段）；
     swapped_toc=True 时产物 toc 段已整组换为 TOC 域，同样由该跳过覆盖。

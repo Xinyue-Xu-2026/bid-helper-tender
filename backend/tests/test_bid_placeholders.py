@@ -44,6 +44,17 @@ def test_bracket_half_and_full_width_filled():
     assert "（" not in full and "(项目名称)" not in full
 
 
+def test_section_combo_keeps_full_width_brackets():
+    """全角组合占位（项目名称）（标段名称）→ 保留全角括号风格。"""
+    doc = _doc_with(["（项目名称）（标段名称）"])
+    rules = build_placeholder_rules(doc, project_name="P", section_name="S")
+    full = "\n".join(p.text for p in _iter_all_paragraphs(doc))
+    for r in rules:
+        full = r["pattern"].sub(r["repl"], full)
+    assert "P（S）" in full
+    assert "（项目名称）" not in full
+
+
 def test_textbox_paragraphs_are_traversed_and_no_dup():
     doc = Document()
     p = doc.add_paragraph()
@@ -58,6 +69,39 @@ def test_textbox_paragraphs_are_traversed_and_no_dup():
         '<wps:txbx><w:txbxContent><w:p><w:r><w:t>招标人：____</w:t></w:r></w:p>'
         '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline>'
         '</w:drawing></w:r></w:p>')
+    from lxml import etree
+    p._p.addnext(etree.fromstring(xml))
+    texts = [t.text for t in _iter_textbox_paragraphs(doc)]
+    assert texts.count("招标人：____") == 1
+
+
+def test_textbox_alternate_content_fallback_not_duplicated():
+    """Word 真实写法的文本框：mc:AlternateContent 中 mc:Choice（DrawingML）
+    与 mc:Fallback（VML）各含一份相同 w:txbxContent —— 只应产出一次。"""
+    doc = Document()
+    p = doc.add_paragraph()
+    run = p.add_run()
+    inner = ('<w:p><w:r><w:t>招标人：____</w:t></w:r></w:p>')
+    xml = (
+        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+        'xmlns:v="urn:schemas-microsoft-com:vml">'
+        '<w:r><mc:AlternateContent>'
+        '<mc:Choice Requires="wps">'
+        '<w:drawing><wp:inline><a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:txbx><w:txbxContent>' + inner +
+        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>'
+        '</wp:inline></w:drawing>'
+        '</mc:Choice>'
+        '<mc:Fallback>'
+        '<w:pict><v:shape><v:textbox><w:txbxContent>' + inner +
+        '</w:txbxContent></v:textbox></v:shape></w:pict>'
+        '</mc:Fallback>'
+        '</mc:AlternateContent></w:r></w:p>')
     from lxml import etree
     p._p.addnext(etree.fromstring(xml))
     texts = [t.text for t in _iter_textbox_paragraphs(doc)]
