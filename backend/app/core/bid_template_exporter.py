@@ -236,6 +236,51 @@ _TENDERER_LABEL_RE = re.compile(r"(招标人[：:])(?=[\s_　＿]|$)[\s_　＿]*
 _BIDDER_LABEL_RE = re.compile(r"(投标人名称[：:])(?=[\s_　＿]|$)[\s_　＿]*")
 
 
+# ---------- 通用占位符规则核心（V1.2） ----------
+# 单一事实源：填充端（_replace_stale_text/compute_text_subs）与校验端
+# （bid_verify）共用 build_placeholder_rules 产出的规则列表。
+
+DEFAULT_PLACEHOLDER_SYNONYMS = {
+    "工程项目名称": "项目名称", "工程名称": "项目名称",
+    "采购人": "招标人", "供应商名称": "投标人名称",
+}
+PLACEHOLDER_LABEL_KEYS = {
+    "项目名称": "project_name", "招标人": "tenderer",
+    "投标人名称": "bidder_name", "项目编号": "project_no",
+    "招标编号": "project_no", "标段名称": "section_name",
+    "标段编号": "section_no", "日期": "doc_date",
+}
+BRACKET_LABEL_KEYS = {
+    "项目名称": "project_name", "工程名称": "project_name",
+    "工程项目名称": "project_name", "招标人名称": "tenderer",
+    "招标人": "tenderer", "采购人": "tenderer",
+    "投标人名称": "bidder_name", "供应商名称": "bidder_name",
+    "标段名称": "section_name", "标段编号": "section_no",
+    "标段": "section_name", "日期": "doc_date",
+}
+_SECTION_COMBO_RE = re.compile(
+    r"[（(]\s*(?:项目名称|工程名称|工程项目名称)\s*[）)]\s*"
+    r"[（(]\s*标段(?:名称)?\s*[）)]")
+_UNRECOGNIZED_UNDERSCORE_RE = re.compile(r"_{4,}|＿{4,}")
+_DOC_DATE_BLANK_RE = re.compile(
+    r"(日\s*期\s*[：:]?\s*)[_＿\s]*年[_＿\s]*月[_＿\s]*日")
+_PLACEHOLDER_ONLY_RE = re.compile(r"^[_＿\s]+$")
+
+
+def _effective_label_keys(synonyms):
+    keys = dict(PLACEHOLDER_LABEL_KEYS)
+    for alias, canonical in (synonyms or DEFAULT_PLACEHOLDER_SYNONYMS).items():
+        key = PLACEHOLDER_LABEL_KEYS.get(canonical)
+        if key and alias not in keys:
+            keys[alias] = key
+    return keys
+
+
+def _date_text(doc_date):
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", (doc_date or "").strip())
+    return f"{int(m.group(1))}年{int(m.group(2))}月{int(m.group(3))}日" if m else ""
+
+
 def _iter_cell_paragraphs(cell):
     for para in cell.paragraphs:
         yield para
@@ -245,14 +290,27 @@ def _iter_cell_paragraphs(cell):
                 yield from _iter_cell_paragraphs(sub)
 
 
+def _iter_textbox_paragraphs(doc):
+    """文本框（含嵌套）内段落，不重复产出。"""
+    for txbx in doc.element.body.iter(qn("w:txbxContent")):
+        for child in txbx.iterchildren():
+            if child.tag == qn("w:p"):
+                yield Paragraph(child, doc)
+            elif child.tag == qn("w:tbl"):
+                for row in Table(child, doc).rows:
+                    for cell in row.cells:
+                        yield from _iter_cell_paragraphs(cell)
+
+
 def _iter_all_paragraphs(doc):
-    """正文段落 + 所有表格（含嵌套）单元格内段落。"""
+    """正文段落 + 所有表格（含嵌套）单元格内段落 + 文本框内段落。"""
     for para in doc.paragraphs:
         yield para
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 yield from _iter_cell_paragraphs(cell)
+    yield from _iter_textbox_paragraphs(doc)
 
 
 def _is_toc_paragraph(para: Paragraph) -> bool:
@@ -309,34 +367,130 @@ def _discover_stale_values(doc) -> tuple:
     return stale_no, stale_name
 
 
-def compute_text_subs(doc, project_no: str = "", project_name: str = "",
-                      doc_date: str = "", tenderer: str = "",
-                      bidder_name: str = "") -> list:
-    """计算残留文本替换规则 [(pattern, repl)]（含 stale 编号/名称运行时发现）。
-    _replace_stale_text 调本函数再逐段应用；导出与防篡改校验（bid_verify）
-    共用同一套规则，保证"导出改了什么"与"校验豁免什么"一致。
-    tenderer/bidder_name 非空时追加标签式空白占位填充规则
-    （招标人：____ / 投标人名称：____）。"""
-    subs = []
+def build_placeholder_rules(doc, *, project_no: str = "", project_name: str = "",
+                            doc_date: str = "", tenderer: str = "",
+                            bidder_name: str = "", section_name: str = "",
+                            section_no: str = "", synonyms=None) -> list:
+    """生成占位符替换规则列表，每项 {"kind","label","key","value","pattern","repl"}。
+    顺序：stale → 组合 → 标签（长度降序）→ 括号（长度降序）→ 日期。
+    填充端与校验端共用本函数，保证"导出改了什么"与"校验豁免什么"一致。"""
+    values = {
+        "project_no": project_no, "project_name": project_name,
+        "doc_date": doc_date, "tenderer": tenderer,
+        "bidder_name": bidder_name, "section_name": section_name,
+        "section_no": section_no,
+    }
+    rules = []
+    # stale：模板残留的上次投标编号/名称（空白占位不算 stale）
     stale_no, stale_name = _discover_stale_values(doc)
     if project_no and stale_no:
         new_no = project_no if project_no.endswith("号") else f"{project_no}号"
-        subs.append((re.compile(re.escape(stale_no)), new_no))
-    if project_name and stale_name and project_name != stale_name:
-        subs.append((re.compile(re.escape(stale_name)), project_name))
-    if doc_date:
-        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", doc_date)
-        if m:
-            y, mo, d = (int(g) for g in m.groups())
-            date_text = f"{y}年{mo}月{d}日"
-            subs.append((_DOC_DATE_RE, lambda match: match.group(1) + date_text))
-    if tenderer:
-        subs.append((_TENDERER_LABEL_RE,
-                     lambda match: match.group(1) + tenderer))
-    if bidder_name:
-        subs.append((_BIDDER_LABEL_RE,
-                     lambda match: match.group(1) + bidder_name))
-    return subs
+        rules.append({"kind": "stale_no", "label": stale_no, "key": "project_no",
+                      "value": new_no, "pattern": re.compile(re.escape(stale_no)),
+                      "repl": new_no})
+    if (project_name and stale_name and project_name != stale_name
+            and not _PLACEHOLDER_ONLY_RE.match(stale_name)):
+        rules.append({"kind": "stale_name", "label": stale_name,
+                      "key": "project_name", "value": project_name,
+                      "pattern": re.compile(re.escape(stale_name)),
+                      "repl": project_name})
+    # 组合：(项目名称)(标段名称) → 项目名 (标段名)
+    if project_name and section_name:
+        hit = any(_SECTION_COMBO_RE.search(_para_text(p))
+                  for p in _iter_all_paragraphs(doc)
+                  if not _is_toc_paragraph(p))
+        if hit:
+            combo = f"{project_name} ({section_name})"
+            rules.append({"kind": "section_combo",
+                          "label": "(项目名称)(标段名称)",
+                          "key": "project_name+section_name", "value": combo,
+                          "pattern": _SECTION_COMBO_RE, "repl": combo})
+    # 标签式空白占位：标签后仅空白/下划线（或行尾）时填充
+    label_keys = _effective_label_keys(synonyms)
+    for label in sorted(label_keys, key=len, reverse=True):
+        key = label_keys[label]
+        if key == "doc_date":
+            continue  # 日期由专用日期规则处理（含 ____年__月__日 空白格式）
+        value = str(values.get(key) or "").strip()
+        if not value:
+            continue
+        pattern = re.compile(
+            rf"({re.escape(label)}\s*[：:])(?=[\s_　＿]|$)[\s_　＿]*")
+        rules.append({"kind": "label", "label": label, "key": key,
+                      "value": value, "pattern": pattern,
+                      "repl": (lambda m, l=label, v=value: m.group(1) + v)})
+    # 括号式占位：(项目名称)/（招标人名称）等
+    for label in sorted(BRACKET_LABEL_KEYS, key=len, reverse=True):
+        key = BRACKET_LABEL_KEYS[label]
+        value = str(values.get(key) or "").strip()
+        if not value:
+            continue
+        if key == "doc_date":
+            value = _date_text(doc_date)
+            if not value:
+                continue
+        pattern = re.compile(
+            rf"[（(【\[]\s*{re.escape(label)}\s*[）)】\]]")
+        rules.append({"kind": "bracket", "label": label, "key": key,
+                      "value": value, "pattern": pattern, "repl": value})
+    # 日期：带数字的旧日期与空白日期占位
+    date_text = _date_text(doc_date)
+    if date_text:
+        rules.append({"kind": "date", "label": "日期", "key": "doc_date",
+                      "value": date_text, "pattern": _DOC_DATE_RE,
+                      "repl": (lambda m, v=date_text: m.group(1) + v)})
+        rules.append({"kind": "date_blank", "label": "日期", "key": "doc_date",
+                      "value": date_text, "pattern": _DOC_DATE_BLANK_RE,
+                      "repl": (lambda m, v=date_text: m.group(1) + v)})
+    return rules
+
+
+def compute_text_subs(doc, project_no: str = "", project_name: str = "",
+                      doc_date: str = "", tenderer: str = "",
+                      bidder_name: str = "", section_name: str = "",
+                      section_no: str = "", synonyms=None) -> list:
+    """计算残留文本替换规则 [(pattern, repl)]（= build_placeholder_rules 的
+    (pattern, repl) 投影）。导出与防篡改校验（bid_verify）共用同一套规则，
+    保证"导出改了什么"与"校验豁免什么"一致。"""
+    return [(r["pattern"], r["repl"]) for r in build_placeholder_rules(
+        doc, project_no=project_no, project_name=project_name,
+        doc_date=doc_date, tenderer=tenderer, bidder_name=bidder_name,
+        section_name=section_name, section_no=section_no, synonyms=synonyms)]
+
+
+def scan_placeholders(doc, params: dict, synonyms=None) -> dict:
+    """扫描底稿占位符命中情况：
+    返回 {"matched": [{"label","value","count","kind"}],
+          "suspicious": [{"text"}]}（未被任何规则命中的成串下划线段落）。"""
+    params = params or {}
+    if synonyms is None:
+        synonyms = params.get("synonyms")
+    rules = build_placeholder_rules(
+        doc,
+        project_no=str(params.get("project_no") or ""),
+        project_name=str(params.get("project_name") or ""),
+        doc_date=str(params.get("doc_date") or ""),
+        tenderer=str(params.get("tenderer") or ""),
+        bidder_name=str(params.get("bidder_name") or ""),
+        section_name=str(params.get("section_name") or ""),
+        section_no=str(params.get("section_no") or ""),
+        synonyms=synonyms)
+    texts = [_para_text(p) for p in _iter_all_paragraphs(doc)
+             if not _is_toc_paragraph(p)]
+    matched = []
+    for r in rules:
+        count = sum(len(r["pattern"].findall(t)) for t in texts)
+        if count:
+            matched.append({"label": r["label"], "value": r["value"],
+                            "count": count, "kind": r["kind"]})
+    suspicious = []
+    for t in texts:
+        if not t.strip():
+            continue
+        if (_UNRECOGNIZED_UNDERSCORE_RE.search(t)
+                and not any(r["pattern"].search(t) for r in rules)):
+            suspicious.append({"text": t})
+    return {"matched": matched, "suspicious": suspicious}
 
 
 def _replace_stale_text(doc, project_no: str = "", project_name: str = "",

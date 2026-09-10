@@ -7,8 +7,8 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from app.core.bid_template_exporter import (
-    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs, _para_text,
-    compute_text_subs,
+    _is_toc_paragraph, _iter_block_items, _iter_cell_paragraphs,
+    _iter_textbox_paragraphs, _para_text, compute_text_subs,
 )
 
 
@@ -41,6 +41,18 @@ def _table_texts(table, subs=None) -> list:
     return texts
 
 
+def _textbox_texts(doc, subs=None) -> list:
+    """收集文本框（含嵌套）内段落文本；subs 非空时逐段套用替换规则
+    （toc 样式段除外，与导出侧 _replace_stale_text 对称）。"""
+    out = []
+    for p in _iter_textbox_paragraphs(doc):
+        t = _para_text(p)
+        if subs and not _is_toc_paragraph(p):
+            t = _apply_subs(t, subs)
+        out.append(t)
+    return out
+
+
 def verify_draft_fill(draft_path: str, out_path: str,
                       bound_table_indices: set, replace_params: dict,
                       swapped_toc: bool = False,
@@ -68,7 +80,10 @@ def verify_draft_fill(draft_path: str, out_path: str,
         project_name=str(params.get("project_name") or ""),
         doc_date=str(params.get("doc_date") or ""),
         tenderer=str(params.get("tenderer") or ""),
-        bidder_name=str(params.get("bidder_name") or ""))
+        bidder_name=str(params.get("bidder_name") or ""),
+        section_name=str(params.get("section_name") or ""),
+        section_no=str(params.get("section_no") or ""),
+        synonyms=params.get("synonyms"))
 
     def _split(doc):
         paras, tables = [], []
@@ -119,6 +134,18 @@ def verify_draft_fill(draft_path: str, out_path: str,
         if expected != _para_text(o_para):
             snippet = _para_text(d_para)[:30]
             issues.append(f'段落[{i}] "{snippet}" 内容被改动')
+
+    # 文本框：底稿侧套用同一套替换规则后与产物逐段比对
+    d_txbx = _textbox_texts(draft, subs)
+    o_txbx = _textbox_texts(out)
+    if d_txbx != o_txbx:
+        if len(d_txbx) != len(o_txbx):
+            issues.append(
+                f"文本框内容被改动：底稿 {len(d_txbx)} 段，产物 {len(o_txbx)} 段")
+        else:
+            for i, (d_t, o_t) in enumerate(zip(d_txbx, o_txbx)):
+                if d_t != o_t:
+                    issues.append(f"文本框段落[{i}] 内容被改动")
 
     return {"ok": not issues, "issues": issues,
             "checked_paragraphs": checked_paragraphs,

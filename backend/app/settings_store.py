@@ -144,3 +144,30 @@ def save_field_config(cfg: dict) -> dict:
     all_settings["field_config"] = normalized
     save_settings(all_settings)
     return normalized
+
+
+# ---------- 占位符同义词库（设置 API 在后续任务接入） ----------
+
+from app.core.bid_template_exporter import DEFAULT_PLACEHOLDER_SYNONYMS
+
+
+def get_placeholder_synonyms() -> dict:
+    """读取占位符同义词（别名→规范标签），未保存的项回退默认库。"""
+    raw = load_settings().get("placeholder_synonyms") or {}
+    base = dict(DEFAULT_PLACEHOLDER_SYNONYMS)
+    for alias, canonical in raw.items():
+        alias, canonical = str(alias).strip(), str(canonical).strip()
+        if alias and canonical:
+            base[alias] = canonical
+    return base
+
+
+def save_placeholder_synonyms(m: dict) -> dict:
+    """保存占位符同义词覆盖项（存 settings 的 placeholder_synonyms 键），
+    返回清洗后的 dict。"""
+    clean = {str(k).strip(): str(v).strip()
+             for k, v in (m or {}).items() if str(k).strip() and str(v).strip()}
+    s = load_settings()
+    s["placeholder_synonyms"] = clean
+    save_settings(s)
+    return clean
