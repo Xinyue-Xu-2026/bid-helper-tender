@@ -122,15 +122,27 @@ def apply_edits(docx_path: str, out_path: str, paragraphs: dict = None,
     if os.path.abspath(str(docx_path)) == os.path.abspath(str(out_path)):
         raise ValueError("out_path 不得与 docx_path 同路径")
     doc = Document(docx_path)
-    doc_tables = doc.tables
+    paragraphs = {int(k): v for k, v in (paragraphs or {}).items()}
+    table_edits = {int(k): v for k, v in (tables or {}).items()}
 
+    # 1) 结构操作（复制表）先做：文本编辑的表下标是「克隆后」的下标（前端读的
+    # 是克隆后状态），故复制必须先于文本编辑，坐标系才一致。
+    cloned = 0
+    for spec in (clones or []):
+        idx = int(spec.get("table_index"))
+        n = int(spec.get("count") or 0)
+        if not (0 <= idx < len(doc.tables)):
+            continue
+        anchor = doc.tables[idx]
+        for _ in range(n):
+            anchor = _clone_table_after(anchor)
+            cloned += 1
+
+    # 2) 文本编辑（段落 / 表格格子，原位写）
     p_idx = 0
     t_idx = 0
-    paragraphs = paragraphs or {}
-    table_edits = tables or {}
     cells_written = 0
     paras_written = 0
-
     for block in _iter_block_items(doc):
         if isinstance(block, Table):
             edits = table_edits.get(t_idx)
@@ -151,17 +163,6 @@ def apply_edits(docx_path: str, out_path: str, paragraphs: dict = None,
                 _write_para_text(block, paragraphs[p_idx])
                 paras_written += 1
             p_idx += 1
-
-    cloned = 0
-    for spec in (clones or []):
-        idx = int(spec.get("table_index"))
-        n = int(spec.get("count") or 0)
-        if not (0 <= idx < len(doc_tables)):
-            continue
-        anchor = doc_tables[idx]
-        for _ in range(n):
-            anchor = _clone_table_after(anchor)
-            cloned += 1
 
     doc.save(str(out_path))
     return {"paragraphs": paras_written, "cells": cells_written,

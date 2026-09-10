@@ -153,8 +153,9 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
     headers = {"Content-Disposition": f"attachment; filename*=utf-8''{filename}"}
 
     bt = db.get_project_bid_template(project_id)
-    if bt and Path(bt.get("file_path") or "").exists():
-        # 新管线：底稿 + 用户确认 bindings 填充，附填充/校验报告
+    draft_path = (bt.get("edited_path") or bt.get("file_path")) if bt else ""
+    if bt and Path(draft_path or "").exists():
+        # 新管线：底稿（编辑版优先）+ 用户确认 bindings 填充，附填充/校验报告
         bindings = bt.get("bindings") or {}
         data = bid_service.assemble_bid_draft_data(
             db, project_id,
@@ -163,7 +164,7 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
         auth = {"legal_rep": _legal_person(db, body.legal_rep_id),
                 "agent": _legal_person(db, body.agent_id),
                 "doc_date": (body.doc_date or "").strip()}
-        report = fill_draft(bt["file_path"], str(dest), bindings, data,
+        report = fill_draft(draft_path, str(dest), bindings, data,
                             project_no=(body.project_no or "").strip(),
                             project_name=effective_name,
                             doc_date=(body.doc_date or "").strip(),

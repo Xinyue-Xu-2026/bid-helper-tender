@@ -7,10 +7,11 @@ from docx import Document
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app import settings_store
+from app import config, settings_store
 from app.core.bid_draft import BidDraftError
 from app.core.bid_table_classifier import ROLES
 from app.core.bid_template_exporter import scan_placeholders
+from app.core.doc_blocks import apply_edits, read_blocks
 from app.core.input_convert import InputConvertError
 from app.db import Database
 from app.deps import get_db
@@ -54,6 +55,15 @@ class PlaceholderPreviewIn(BaseModel):
     bidder_name: str = ""
     section_name: str = ""
     section_no: str = ""
+
+
+class DocumentEditIn(BaseModel):
+    """底稿内容编辑（方案 A 结构保真编辑器）：全量快照。
+    paragraphs: {段落序: 文本}；tables: {表序: [[文本,...]]（按 read_blocks rows 对齐）}；
+    clones: [{"table_index": 源表序, "count": 复制份数}]。"""
+    paragraphs: dict[int, str] = {}
+    tables: dict[int, list] = {}
+    clones: list = []
 
 
 def _project_or_404(db: Database, project_id: int) -> dict:
@@ -148,3 +158,36 @@ def preview_placeholders(project_id: int, body: PlaceholderPreviewIn = None,
     params = body.model_dump() if body else {}
     return scan_placeholders(
         doc, params, synonyms=settings_store.get_placeholder_synonyms())
+
+
+@router.get("/projects/{project_id}/bid-draft/document")
+def get_bid_document(project_id: int, db: Database = Depends(get_db)):
+    """读取底稿块序列（编辑版优先）。无底稿/文件缺失 → 404。"""
+    _project_or_404(db, project_id)
+    row = db.get_project_bid_template(project_id)
+    if not row:
+        raise HTTPException(404, "尚无底稿，请先生成或上传底稿")
+    path = row.get("edited_path") or row.get("file_path")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "底稿文件不存在")
+    return read_blocks(str(path))
+
+
+@router.post("/projects/{project_id}/bid-draft/document")
+def save_bid_document(project_id: int, body: DocumentEditIn,
+                      db: Database = Depends(get_db)):
+    """保存底稿内容编辑：以原始底稿为基准，复制表 + 原位写文本，落为
+    「编辑版底稿」；导出/校验改走编辑版。返回回显块序列。"""
+    _project_or_404(db, project_id)
+    row = db.get_project_bid_template(project_id)
+    if not row or not Path(row.get("file_path") or "").exists():
+        raise HTTPException(422, "尚无底稿，请先生成或上传底稿")
+    out = config.BID_DRAFTS_DIR / f"project_{project_id}_edited.docx"
+    try:
+        apply_edits(row["file_path"], str(out),
+                    paragraphs=body.paragraphs, tables=body.tables,
+                    clones=body.clones)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    db.update_bid_template(row["id"], edited_path=str(out))
+    return {"ok": True, "blocks": read_blocks(str(out))["blocks"]}

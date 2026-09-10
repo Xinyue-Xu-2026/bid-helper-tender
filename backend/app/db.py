@@ -148,12 +148,15 @@ class Database:
                     conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT DEFAULT ''")
 
     def _migrate_bid_templates_columns(self):
-        """幂等迁移：旧库的 bid_templates 表补 tenderer 列（P3 招标人名称）。"""
+        """幂等迁移：旧库的 bid_templates 表补 tenderer / edited_path 列。"""
         with self._connect() as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(bid_templates)")}
             if "tenderer" not in cols:
                 conn.execute("ALTER TABLE bid_templates "
                              "ADD COLUMN tenderer TEXT DEFAULT ''")
+            if "edited_path" not in cols:
+                conn.execute("ALTER TABLE bid_templates "
+                             "ADD COLUMN edited_path TEXT DEFAULT ''")
 
     def _migrate_project_assets_columns(self):
         """幂等迁移：旧库的 project_assets 表补 is_lead/certs/section 三列。
@@ -543,9 +546,9 @@ class Database:
 
     def update_bid_template(self, bid_template_id: int, **kwargs):
         """allowed = {"name", "file_path", "cut_start", "cut_end", "bindings",
-        "tenderer"}；bindings 为 dict 时自动 json.dumps。"""
+        "tenderer", "edited_path"}；bindings 为 dict 时自动 json.dumps。"""
         allowed = {"name", "file_path", "cut_start", "cut_end", "bindings",
-                   "tenderer"}
+                   "tenderer", "edited_path"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if "bindings" in fields and isinstance(fields["bindings"], dict):
             fields["bindings"] = json.dumps(fields["bindings"], ensure_ascii=False)
