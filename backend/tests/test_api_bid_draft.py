@@ -277,6 +277,22 @@ def test_put_bindings_header_rows_roundtrip(client, tmp_path):
     assert g["tables"][0]["header_rows"] == 2
 
 
+def test_put_bindings_header_rows_three_accepted(client, tmp_path):
+    """header_rows=3 属合法域 1..4（V1.2 Task 4 边界补充）→ 200 且回显。"""
+    pid = _make_project(client)
+    _upload_tender(client, pid, tmp_path)
+    gen = _generate(client, pid)
+    sug = gen["tables"][0]
+    r = client.put(f"/api/projects/{pid}/bid-draft/bindings", json={
+        "tables": [{"table_index": sug["table_index"], "role": sug["role"],
+                    "columns": sug["columns"], "header_rows": 3,
+                    "confirmed": True}],
+        "swap_toc": False})
+    assert r.status_code == 200
+    g = client.get(f"/api/projects/{pid}/bid-draft").json()
+    assert g["tables"][0]["header_rows"] == 3
+
+
 def test_put_bindings_roundtrip(client, tmp_path):
     pid = _make_project(client)
     _upload_tender(client, pid, tmp_path)

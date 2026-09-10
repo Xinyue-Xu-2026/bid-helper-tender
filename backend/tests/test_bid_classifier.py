@@ -266,3 +266,74 @@ def test_merged_header_cells(tmp_path):
     col0_sem = "name" if item["columns"].get("name") == 0 else "seq"
     assert item["columns"][col0_sem] == 0
     assert max(item["columns"].values()) < 5
+
+
+# ---------- 拟派岗位列（V1.2 Task 4） ----------
+
+def test_role_column_keywords_include_bendan():
+    from app.core.bid_table_classifier import PERSON_COL_KEYWORDS
+    assert "本项目任职" in PERSON_COL_KEYWORDS["role"]
+    assert "本项目职务" in PERSON_COL_KEYWORDS["role"]
+
+
+def test_person_roster_maps_role_column(tmp_path):
+    doc = Document()
+    _make_table(doc, [
+        ["姓名", "学历", "本项目任职"],
+        ["张三", "硕士", "项目经理"],
+    ])
+    item = next(s for s in classify_tables(_save(doc, tmp_path))
+                if s["role"] == "person_roster")
+    assert "role" in item["columns"]
+    assert item["columns"]["role"] == 2
+
+
+def test_role_beats_label_on_bendan_zhiwu(tmp_path):
+    """「本项目职务」含 label 关键词「职务」：长关键词优先，role 命中抢列，
+    label 不得截胡（V1.2 7.6 防回归）。"""
+    doc = Document()
+    _make_table(doc, [
+        ["姓名", "学历", "本项目职务"],
+        ["张三", "硕士", "项目经理"],
+    ])
+    item = classify_tables(_save(doc, tmp_path))[0]
+    assert item["columns"].get("role") == 2
+    assert item["columns"].get("label") != 2
+
+
+def test_header_rows_two_when_row0_no_data_and_row1_header(tmp_path):
+    """双行表头第三规则（7.1 补强）：row0 命中表头关键词但整行无数据语义
+    （无数字/金额等），且 row1 也命中表头关键词签名（≥2）→ header_rows=2。"""
+    doc = Document()
+    _make_table(doc, [
+        ["姓名", "职称", "执业资格"],        # row0：上层表头（无数字）
+        ["职务", "专业工作年限", "资格证书"],  # row1：下层表头（同样命中关键词）
+        ["张三", "工程师", "造价工程师"],     # row2 起为数据
+    ])
+    item = classify_tables(_save(doc, tmp_path))[0]
+    assert item["role"] == "person_roster"
+    assert item["header_rows"] == 2
+
+
+def test_export_role_column_filled(tmp_path):
+    """端到端：人员表 role 列 → fill_draft 写入 person_semantics 的 role 值。"""
+    from app.core.bid_draft_exporter import fill_draft
+    doc = Document()
+    _make_table(doc, [
+        ["姓名", "学历", "本项目任职"],
+        ["旧名", "旧学历", "旧岗位"],
+    ])
+    draft = _save(doc, tmp_path)
+    out = str(tmp_path / "out.docx")
+    bindings = {"tables": [{
+        "table_index": 0, "role": "person_roster",
+        "columns": {"name": 0, "education": 1, "role": 2},
+        "person_scope": "all", "confirmed": True}], "swap_toc": False}
+    data = {"persons": [{"name": "张三", "is_lead": True,
+                         "sem": {"name": "张三", "education": "硕士",
+                                 "role": "项目经理"}}],
+            "contracts": []}
+    report = fill_draft(draft, out, bindings, data)
+    rows = [[c.text for c in r.cells] for r in Document(out).tables[0].rows]
+    assert rows[1][2] == "项目经理"
+    assert report["verify"]["ok"] is True

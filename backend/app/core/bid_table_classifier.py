@@ -66,7 +66,7 @@ PERSON_COL_KEYWORDS = {
     "education": ("学历",), "title": ("职称",),
     "work_years": ("专业工作年限", "工作年限", "从业年限"),
     "certs": ("执业资格", "注册资格", "资格证书", "资格"),
-    "role": ("拟派岗位", "拟任职务", "本项目岗位"),
+    "role": ("拟派岗位", "拟任职务", "本项目岗位", "本项目任职", "本项目职务"),
 }
 PERF_COL_KEYWORDS = {
     "seq": ("序号",), "project_name": ("项目名称",),
@@ -88,11 +88,17 @@ IMAGE_LABEL_KINDS = (("社保", "社保"), ("身份证", "身份证"),
                      ("资格证书", "注册证书"), ("执业资格", "注册证书"))
 
 _WS_RE = re.compile(r"\s+")
+_DATA_HINT_RE = re.compile(r"\d")
 
 
 def _norm(s: str) -> str:
     """去全部空白。"""
     return _WS_RE.sub("", s or "")
+
+
+def _row_has_data_semantics(pairs) -> bool:
+    """行含数据语义信号：任一单元格含数字（序号/金额/年限/日期等）。"""
+    return any(_DATA_HINT_RE.search(text or "") for _, text in pairs)
 
 
 def _iter_block_items(doc):
@@ -256,7 +262,8 @@ def _classify_table(table, table_index: int, heading: str,
     # 规则 3：表头行关键词签名（第 0 行命中 < 2 且行数 ≥ 2 时跨行拼接兜底）。
     # header_rows：拼接兜底触发 → 2；row0 自身命中足够但 row1 在同列重复
     # row0 标签 ≥2 格（断裂 vMerge 副表头，真实底稿 17×10 人员汇总表回归）
-    # → 2；其余 → 1。
+    # → 2；row0 整行无数据语义（无数字/金额等）且 row1 也命中表头关键词
+    # 签名 ≥2（双层表头各行皆含关键词，7.1 补强）→ 2；其余 → 1。
     pairs = _dedup_col_texts(rows[0])
     if _row_hit_count(pairs) < 2 and len(rows) >= 2:
         row1 = dict(_dedup_col_texts(rows[1]))
@@ -265,6 +272,9 @@ def _classify_table(table, table_index: int, heading: str,
         item["header_rows"] = 2
     elif len(rows) >= 2 and _shared_header_cells(
             pairs, _dedup_col_texts(rows[1])) >= 2:
+        item["header_rows"] = 2
+    elif (len(rows) >= 2 and not _row_has_data_semantics(pairs)
+          and _row_hit_count(_dedup_col_texts(rows[1])) >= 2):
         item["header_rows"] = 2
     person_map, perf_map = _match_columns(pairs)
 
