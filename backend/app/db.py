@@ -137,6 +137,15 @@ class Database:
         self._migrate_project_assets_columns()
         self._migrate_perfs_to_contracts()
         self._migrate_bid_templates_columns()
+        self._migrate_projects_columns()
+
+    def _migrate_projects_columns(self):
+        """幂等迁移：旧库的 projects 表补 section_name/section_no 列（V1.2 标段）。"""
+        with self._connect() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
+            for name in ("section_name", "section_no"):
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT DEFAULT ''")
 
     def _migrate_bid_templates_columns(self):
         """幂等迁移：旧库的 bid_templates 表补 tenderer 列（P3 招标人名称）。"""
@@ -226,7 +235,8 @@ class Database:
             return dict(row) if row else None
 
     def update_project(self, project_id: int, **kwargs):
-        allowed = {"name", "client", "bid_date", "project_type", "notes", "tender_file_path"}
+        allowed = {"name", "client", "bid_date", "project_type", "notes",
+                   "tender_file_path", "section_name", "section_no"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return

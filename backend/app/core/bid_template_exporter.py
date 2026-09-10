@@ -508,13 +508,16 @@ def scan_placeholders(doc, params: dict, synonyms=None) -> dict:
 
 def _replace_stale_text(doc, project_no: str = "", project_name: str = "",
                         doc_date: str = "", tenderer: str = "",
-                        bidder_name: str = "") -> None:
+                        bidder_name: str = "", section_name: str = "",
+                        section_no: str = "", synonyms=None) -> None:
     """替换模板中残留的上次投标文本：规则由 compute_text_subs 统一计算，
-    此处仅逐段（含表格单元格，跳过 toc 段）应用。project_no/doc_date 为空
-    则跳过对应替换，project_name 为空则不替换；tenderer/bidder_name 为空
-    则不填充对应标签空白。"""
+    此处仅逐段（含表格单元格与文本框，跳过 toc 段）应用。project_no/doc_date
+    为空则跳过对应替换，project_name 为空则不替换；tenderer/bidder_name/
+    section_name/section_no 为空则不填充对应标签/括号空白。"""
     subs = compute_text_subs(doc, project_no, project_name, doc_date,
-                             tenderer=tenderer, bidder_name=bidder_name)
+                             tenderer=tenderer, bidder_name=bidder_name,
+                             section_name=section_name, section_no=section_no,
+                             synonyms=synonyms)
     if not subs:
         return
     for para in _iter_all_paragraphs(doc):

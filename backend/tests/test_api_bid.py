@@ -3,6 +3,8 @@
 空勾选导出 422 / expiring-detail 明细 / 证书有效期警告（expired、soon）。"""
 from datetime import date, timedelta
 from io import BytesIO
+from urllib.parse import unquote
+import json
 
 import pytest
 from docx import Document
@@ -378,3 +380,66 @@ def test_cert_warning_soon_with_past_bid_date(client):
     assert w["cert_name"] == "一级建造师"
     assert w["days_left"] == 15
     assert "15" in w["message"]
+
+
+# ---------- 9. 标段字段（V1.2 Task 2） ----------
+
+def test_projects_has_section_columns(client):
+    from app.db import Database
+    db = Database(); db.init_schema(); db.init_schema()   # 幂等
+    with db._connect() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
+    assert {"section_name", "section_no"} <= cols
+
+
+def _make_section_draft(client, db_path, pid, tmp_path):
+    """直接造底稿：含 标段名称：____（标签空白）与 （标段名称）（括号占位）。"""
+    doc = Document()
+    doc.add_paragraph("标段名称：____")
+    doc.add_paragraph("（标段名称）")
+    path = tmp_path / "draft.docx"
+    doc.save(str(path))
+    db = Database(db_path)
+    db.create_bid_template(pid, "底稿", str(path))
+    return path
+
+
+def test_export_section_param_fills_label_and_bracket(client, db_path, tmp_path):
+    """导出 body 带 section_name/section_no → 底稿标签空白与括号占位被填充；
+    section 字段非空时持久化到 projects。"""
+    pid = _make_project(client)
+    _make_section_draft(client, db_path, pid, tmp_path)
+    person_id = _make_person(client, "张三")
+    r = client.post(_bid_url(pid, "/export-template"), json={
+        "persons": [{"asset_id": person_id, "is_lead": True}],
+        "contracts": [],
+        "section_name": "一标段", "section_no": "A1"})
+    assert r.status_code == 200
+    out = Document(BytesIO(r.content))
+    texts = [p.text for p in out.paragraphs]
+    assert "标段名称：一标段" in texts
+    assert "一标段" in texts and "（标段名称）" not in texts
+    # 校验端共用同一套规则 → 不误报
+    report = json.loads(unquote(r.headers["x-fill-report"]))
+    assert report["verify"]["ok"] is True
+    # 非空标段持久化到 projects
+    row = Database(db_path).get_project(pid)
+    assert row["section_name"] == "一标段"
+    assert row["section_no"] == "A1"
+
+
+def test_export_section_empty_skips_fill(client, db_path, tmp_path):
+    """section 为空 → 不填充，空白占位保持原样，projects 不写标段。"""
+    pid = _make_project(client)
+    _make_section_draft(client, db_path, pid, tmp_path)
+    person_id = _make_person(client, "张三")
+    r = client.post(_bid_url(pid, "/export-template"), json={
+        "persons": [{"asset_id": person_id, "is_lead": True}],
+        "contracts": []})
+    assert r.status_code == 200
+    out = Document(BytesIO(r.content))
+    texts = [p.text for p in out.paragraphs]
+    assert "标段名称：____" in texts
+    assert "（标段名称）" in texts
+    row = Database(db_path).get_project(pid)
+    assert row["section_name"] == "" and row["section_no"] == ""

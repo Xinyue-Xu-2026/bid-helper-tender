@@ -54,6 +54,8 @@ class BidTemplateExportIn(BaseModel):
     bidder_name: str = ""     # 投标人名称（空则不填充"投标人名称：____"空白）
     legal_rep_id: int | None = None   # 法定代表人（legal 资产 id）
     agent_id: int | None = None       # 委托代理人（legal 资产 id）
+    section_name: str = ""   # 标段名称（空则不填充"标段名称：____/（标段名称）"占位）
+    section_no: str = ""     # 标段编号（空则不填充"标段编号：____"占位）
 
 
 def _legal_person(db: Database, asset_id: int | None) -> dict | None:
@@ -135,6 +137,14 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
     project = _get_project_or_404(db, project_id)
     if not body.persons and not body.contracts:
         raise HTTPException(422, "请先勾选人员或业绩")
+    # 标段字段非空时持久化到 projects（下次导出可回显）
+    section_update = {}
+    if (body.section_name or "").strip():
+        section_update["section_name"] = body.section_name.strip()
+    if (body.section_no or "").strip():
+        section_update["section_no"] = body.section_no.strip()
+    if section_update:
+        db.update_project(project_id, **section_update)
     effective_name = (body.project_name or "").strip() or project["name"]
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in effective_name)
     dest = Path(tempfile.gettempdir()) / f"{safe}_{uuid.uuid4().hex[:8]}_商务标.docx"
@@ -158,7 +168,9 @@ def export_bid_template(project_id: int, body: BidTemplateExportIn,
                             doc_date=(body.doc_date or "").strip(),
                             tenderer=(body.tenderer or "").strip(),
                             bidder_name=(body.bidder_name or "").strip(),
-                            auth=auth)
+                            auth=auth,
+                            section_name=(body.section_name or "").strip(),
+                            section_no=(body.section_no or "").strip())
         headers["X-Fill-Report"] = quote(
             json.dumps(report, ensure_ascii=False))
     else:

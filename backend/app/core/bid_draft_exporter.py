@@ -340,10 +340,13 @@ def _scope_contracts(contracts, persons, scope: str) -> list:
 def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
                project_no: str = "", project_name: str = "",
                doc_date: str = "", tenderer: str = "",
-               bidder_name: str = "", auth: dict = None) -> dict:
+               bidder_name: str = "", auth: dict = None,
+               section_name: str = "", section_no: str = "") -> dict:
     """按确认的 bindings 填充底稿并另存 dest_path，返回 fill_report。
     dest 与 draft 不得同路径。tenderer/bidder_name 为空则跳过对应
-    标签空白（招标人：____ / 投标人名称：____）填充。
+    标签空白（招标人：____ / 投标人名称：____）填充；section_name/
+    section_no 为空则跳过标段标签/括号占位（标段名称：____ /
+    （标段名称）等）填充。
     auth：可选，{"legal_rep": {姓名/身份证号/正反面扫描件路径...} | {},
     "agent": {...}, "doc_date": str}——授权页（法定代表人身份证明/授权
     委托书）签名区与身份证附图填充；未提供或字段为空则跳过。"""
@@ -366,7 +369,8 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     # 提前替换不改变产物内容。
     _replace_stale_text(doc, project_no=project_no,
                         project_name=project_name, doc_date=doc_date,
-                        tenderer=tenderer, bidder_name=bidder_name)
+                        tenderer=tenderer, bidder_name=bidder_name,
+                        section_name=section_name, section_no=section_no)
 
     # 授权页正文填充：改动的是普通正文段，须把被改段加入 verify 的
     # bound（paragraph 下标，toc/分节符过滤坐标系）避免误报
@@ -438,7 +442,9 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
         bound_table_indices=bound_indices,
         replace_params={"project_no": project_no, "project_name": project_name,
                         "doc_date": doc_date, "tenderer": tenderer,
-                        "bidder_name": bidder_name},
+                        "bidder_name": bidder_name,
+                        "section_name": section_name,
+                        "section_no": section_no},
         swapped_toc=swap_toc,
         bound_paragraph_indices=auth_bound)
     return report
