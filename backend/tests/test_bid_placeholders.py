@@ -1,5 +1,6 @@
 import re
 from docx import Document
+from docx.oxml.ns import qn
 from docx.shared import Cm
 
 from app.core.bid_template_exporter import (
@@ -169,3 +170,90 @@ def test_fill_draft_report_placeholders_empty_keys(tmp_path):
     report = fill_draft(str(draft), str(out),
                         {"tables": [], "swap_toc": False}, {})
     assert report["placeholders"] == {"filled": [], "suspicious": []}
+
+
+def _drawing_run_xml(text):
+    return (
+        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<w:drawing><wp:inline><a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:txbx><w:txbxContent>'
+        f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>'
+        '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>'
+        '</wp:inline></w:drawing></w:r>')
+
+
+def test_set_cell_text_preserves_drawing_paragraph():
+    """终审修复：写单元格文本时保留含 w:drawing/w:pict 的段落与 run，
+    不得毁掉图片/文本框。"""
+    from lxml import etree
+    from app.core.bid_template_exporter import _set_cell_text
+    doc = Document()
+    t = doc.add_table(1, 1)
+    cell = t.rows[0].cells[0]
+    cell.text = "旧值"
+    p2 = cell.add_paragraph()
+    p2._p.append(etree.fromstring(_drawing_run_xml("文本框内容")))
+    _set_cell_text(cell, "新值")
+    assert cell.paragraphs[0].text == "新值"
+    assert len(cell.paragraphs) == 2, "含 drawing 的段落应保留"
+    assert next(cell.paragraphs[1]._p.iter(qn("w:drawing")), None) is not None
+
+
+def test_set_cell_text_preserves_drawing_run_in_first_paragraph():
+    """首个段落内的 drawing run 同样不得被删除。"""
+    from lxml import etree
+    from app.core.bid_template_exporter import _set_cell_text
+    doc = Document()
+    cell = doc.add_table(1, 1).rows[0].cells[0]
+    cell.text = "旧值"
+    cell.paragraphs[0]._p.append(etree.fromstring(_drawing_run_xml("文本框内容")))
+    _set_cell_text(cell, "新值")
+    assert cell.paragraphs[0].text == "新值"
+    assert next(cell.paragraphs[0]._p.iter(qn("w:drawing")), None) is not None
+
+
+def test_textbox_texts_excludes_table_textboxes():
+    """终审修复：表内文本框（属表格/克隆表内容）不参与文本框比对；表外比对。"""
+    from lxml import etree
+    from app.core.bid_verify import _textbox_texts
+    doc = Document()
+    body_p = doc.add_paragraph()
+    body_p._p.append(etree.fromstring(_drawing_run_xml("表外占位")))
+    t = doc.add_table(1, 1)
+    cell_p = t.rows[0].cells[0].paragraphs[0]
+    cell_p._p.append(etree.fromstring(_drawing_run_xml("表内文本")))
+    texts = _textbox_texts(doc)
+    assert "表外占位" in texts
+    assert "表内文本" not in texts
+
+
+def test_fill_cell_textbox_no_verify_false_positive(tmp_path):
+    """终审修复端到端：数据行单元格含文本框时，填充后 verify.ok 且文本框保留。"""
+    from lxml import etree
+    from app.core.bid_draft_exporter import fill_draft
+    doc = Document()
+    t = doc.add_table(2, 2)
+    t.rows[0].cells[0].text = "序号"
+    t.rows[0].cells[1].text = "姓名"
+    t.rows[1].cells[0].text = "1"
+    name_cell = t.rows[1].cells[1]
+    name_cell.text = "旧"
+    name_cell.paragraphs[0]._p.append(etree.fromstring(_drawing_run_xml("姓名占位")))
+    draft = tmp_path / "d.docx"
+    doc.save(str(draft))
+    out = tmp_path / "o.docx"
+    bindings = {"tables": [{"table_index": 0, "role": "person_roster",
+                            "columns": {"1": "name"}, "confirmed": True}],
+                "swap_toc": False}
+    persons = [{"name": "张三", "is_lead": True, "role": "项目经理",
+                "sem": {"name": "张三", "seq": "1"}, "fields": {}}]
+    report = fill_draft(str(draft), str(out), bindings,
+                        {"persons": persons, "contracts": [],
+                         "lead_perfs_text": ""})
+    assert report["verify"]["ok"] is True, report["verify"]["issues"]
+    out_cell = Document(str(out)).tables[0].rows[1].cells[1]
+    assert next(out_cell._tc.iter(qn("w:drawing")), None) is not None

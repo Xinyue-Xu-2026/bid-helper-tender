@@ -92,15 +92,35 @@ def _locate_tables(doc) -> dict:
     return roles
 
 
+_NON_TEXT_TAGS = (qn("w:drawing"), qn("w:pict"))
+
+
+def _el_has_nontext(el) -> bool:
+    """元素子树是否含图片/文本框等非文本绘制内容（w:drawing / w:pict）。"""
+    return any(next(el.iter(tag), None) is not None for tag in _NON_TEXT_TAGS)
+
+
+def _para_has_nontext(para) -> bool:
+    """段落是否含图片/文本框等非文本绘制内容。"""
+    return _el_has_nontext(para._element)
+
+
 def _set_cell_text(cell, text: str) -> None:
-    """写单元格文本（\n 转软换行），尽量保留首段/首 run 的格式。"""
+    """写单元格文本（\n 转软换行），尽量保留首段/首 run 的格式。
+    删除首段之后的段落时跳过含 w:drawing/w:pict 的段落——这类段落携带
+    图片/文本框等非文本内容，填充不得毁掉它们（否则图片丢失，且文本框
+    校验与表格填充交叉误报）。"""
     lines = str(text if text is not None else "").split("\n")
     para = cell.paragraphs[0]
     for p in cell.paragraphs[1:]:
+        if _para_has_nontext(p):
+            continue
         p._element.getparent().remove(p._element)
     if para.runs:
         run = para.runs[0]
         for r in para.runs[1:]:
+            if _el_has_nontext(r._element):
+                continue
             r._element.getparent().remove(r._element)
     else:
         run = para.add_run()

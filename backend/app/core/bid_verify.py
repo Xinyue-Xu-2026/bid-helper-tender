@@ -42,10 +42,17 @@ def _table_texts(table, subs=None) -> list:
 
 
 def _textbox_texts(doc, subs=None) -> list:
-    """收集文本框（含嵌套）内段落文本；subs 非空时逐段套用替换规则
-    （toc 样式段除外，与导出侧 _replace_stale_text 对称）。"""
+    """收集**表外**文本框（含嵌套）内段落文本；subs 非空时逐段套用替换
+    规则（toc 样式段除外，与导出侧 _replace_stale_text 对称）。
+
+    仅比对表外文本框：文本框位于表格单元格内时属表格/克隆表内容——绑定表
+    本就不参与文本比对，且 resume_each 整表克隆会复制表内文本框，若按
+    全文逐段比对会因数量/内容不对称而误报（违反"防篡改不误报"）。封面
+    占位文本框（V1.2 4.2）均为表外段落，不受此收窄影响。"""
     out = []
     for p in _iter_textbox_paragraphs(doc):
+        if any(a.tag == qn("w:tbl") for a in p._p.iterancestors()):
+            continue
         t = _para_text(p)
         if subs and not _is_toc_paragraph(p):
             t = _apply_subs(t, subs)
