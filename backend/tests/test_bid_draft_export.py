@@ -375,7 +375,7 @@ def test_report_structure_and_quote_skip(tmp_path):
     out = str(tmp_path / "out.docx")
     report = fill_draft(draft, out, bindings, _data())
     assert set(report) == {"filled", "images", "skipped", "verify", "page_setup",
-                           "authority_images", "auth_bound"}
+                           "authority_images", "auth_bound", "placeholders"}
     reasons = {(s.get("table_index"), s.get("reason"))
                for s in report["skipped"]}
     assert (4, "报价表需手工填写") in reasons

@@ -19,7 +19,7 @@ from docx.table import Table, _Cell
 from app.core.bid_template_exporter import (
     _clear_table_images, _insert_image_into_table, _is_toc_paragraph,
     _para_text, _replace_stale_text, _rewrite_paragraph_text, _set_cell_text,
-    insert_image_adaptive, page_text_width_cm,
+    insert_image_adaptive, page_text_width_cm, scan_placeholders,
 )
 from app.core.bid_page_setup import apply_page_setup
 from app.core.bid_verify import _is_section_break_para, verify_draft_fill
@@ -483,7 +483,19 @@ def fill_draft(draft_path: str, dest_path: str, bindings: dict, data: dict,
     persons = data.get("persons") or []
     contracts = data.get("contracts") or []
     report = {"filled": [], "images": [], "skipped": [], "verify": None,
-              "page_setup": None, "authority_images": 0, "auth_bound": []}
+              "page_setup": None, "authority_images": 0, "auth_bound": [],
+              "placeholders": {"filled": [], "suspicious": []}}
+
+    # 占位符清单（V1.2 4.3 验收 7）：在任何替换之前对底稿扫描，
+    # 规则唯一来源 scan_placeholders（与预览端点/填充/校验同源）
+    scan = scan_placeholders(
+        doc, {"project_no": project_no, "project_name": project_name,
+              "doc_date": doc_date, "tenderer": tenderer,
+              "bidder_name": bidder_name, "section_name": section_name,
+              "section_no": section_no},
+        synonyms=synonyms)
+    report["placeholders"] = {"filled": scan["matched"],
+                              "suspicious": scan["suspicious"]}
 
     # 残留文本替换须在填充之前执行：替换规则（compute_text_subs）基于
     # 填充前的底稿计算，与 verify_draft_fill 的底稿侧同源——否则 stale 值

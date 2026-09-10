@@ -137,3 +137,35 @@ def test_fill_draft_synonyms_fill_alias(tmp_path):
                tenderer="某中心")
     texts2 = [p.text for p in Document(str(out2)).paragraphs]
     assert "甲方：____" in texts2
+
+
+def test_fill_draft_report_includes_placeholders(tmp_path):
+    """导出报告纳入占位符清单（V1.2 4.3 验收 7）：filled=识别将填，
+    suspicious=未识别成串下划线，不静默。"""
+    from app.core.bid_draft_exporter import fill_draft
+    doc = Document()
+    doc.add_paragraph("招标人：____")
+    doc.add_paragraph("______________________________")
+    draft = tmp_path / "d.docx"
+    doc.save(str(draft))
+    out = tmp_path / "o.docx"
+    report = fill_draft(str(draft), str(out), {"tables": [], "swap_toc": False},
+                        {}, tenderer="某中心")
+    ph = report["placeholders"]
+    assert any(m["label"] == "招标人" and m["value"] == "某中心"
+               for m in ph["filled"])
+    assert ph["suspicious"], "未识别的孤立下划线应列入 suspicious"
+    assert report["verify"]["ok"] is True
+
+
+def test_fill_draft_report_placeholders_empty_keys(tmp_path):
+    """无占位符底稿 → filled/suspicious 均为空列表（键恒存在）。"""
+    from app.core.bid_draft_exporter import fill_draft
+    doc = Document()
+    doc.add_paragraph("正文无占位符。")
+    draft = tmp_path / "d.docx"
+    doc.save(str(draft))
+    out = tmp_path / "o.docx"
+    report = fill_draft(str(draft), str(out),
+                        {"tables": [], "swap_toc": False}, {})
+    assert report["placeholders"] == {"filled": [], "suspicious": []}
